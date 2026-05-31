@@ -2418,34 +2418,80 @@ function AC:ManageWarriorVigilance()
     if not Throttle("WarriorVigilance", 8) then return false end
     if self:GetSpellCooldown(S.Vigilance) > 0 or not self:IsUsableSpell(S.Vigilance) then return false end
 
+    self.warriorVigilance = self.warriorVigilance or {}
+    local now = GetTime()
+
+    local function isValidVigilanceUnit(unit)
+        return UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsFriend("player", unit)
+    end
+
+    local function isVigilanceInRange(unit)
+        local ok, range = pcall(IsSpellInRange, S.Vigilance, unit)
+        return (not ok) or range == nil or range == 1
+    end
+
+    local function findUnitByGUID(guid)
+        if not guid then return nil end
+        for i = 1, GetNumPartyMembers() do
+            local unit = "party" .. i
+            if isValidVigilanceUnit(unit) and UnitGUID(unit) == guid then
+                return unit
+            end
+        end
+        return nil
+    end
+
+    -- If Vigilance is already visible on a party member, lock to that target.
+    for i = 1, GetNumPartyMembers() do
+        local unit = "party" .. i
+        if isValidVigilanceUnit(unit) and self:HasBuff(unit, S.Vigilance) then
+            self.warriorVigilance.guid = UnitGUID(unit)
+            self.warriorVigilance.name = UnitName(unit)
+            self.warriorVigilance.lastSeen = now
+            return false
+        end
+    end
+
+    -- Maintain the selected target instead of cycling through every unbuffed member.
+    local trackedUnit = findUnitByGUID(self.warriorVigilance.guid)
+    if trackedUnit then
+        if (now - (self.warriorVigilance.lastCast or 0)) < 45 then
+            return false
+        end
+
+        if isVigilanceInRange(trackedUnit) then
+            CastSpellByName(S.Vigilance, trackedUnit)
+            self.warriorVigilance.lastCast = now
+            self.warriorVigilance.name = UnitName(trackedUnit)
+            WarriorDebug("Prot: Refreshing Vigilance on " .. (UnitName(trackedUnit) or trackedUnit))
+            return true
+        end
+
+        return false
+    end
+
     local bestUnit = nil
     local bestScore = -1
     for i = 1, GetNumPartyMembers() do
         local unit = "party" .. i
-        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsFriend("player", unit) and
-           not self:HasBuff(unit, S.Vigilance) then
-            local inRange = true
-            local ok, range = pcall(IsSpellInRange, S.Vigilance, unit)
-            if ok and range ~= nil then
-                inRange = range == 1
-            end
+        if isValidVigilanceUnit(unit) and isVigilanceInRange(unit) then
+            local score = 10
+            if not self:IsTankSpec(unit) then score = score + 30 end
+            if UnitAffectingCombat(unit) then score = score + 10 end
+            if UnitExists(unit .. "target") and UnitCanAttack("player", unit .. "target") then score = score + 10 end
 
-            if inRange then
-                local score = 10
-                if not self:IsTankSpec(unit) then score = score + 30 end
-                if UnitAffectingCombat(unit) then score = score + 10 end
-                if UnitExists(unit .. "target") and UnitCanAttack("player", unit .. "target") then score = score + 10 end
-
-                if score > bestScore then
-                    bestScore = score
-                    bestUnit = unit
-                end
+            if score > bestScore then
+                bestScore = score
+                bestUnit = unit
             end
         end
     end
 
     if bestUnit then
         CastSpellByName(S.Vigilance, bestUnit)
+        self.warriorVigilance.guid = UnitGUID(bestUnit)
+        self.warriorVigilance.name = UnitName(bestUnit)
+        self.warriorVigilance.lastCast = now
         WarriorDebug("Prot: Vigilance on " .. (UnitName(bestUnit) or bestUnit))
         return true
     end
