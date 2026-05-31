@@ -1,0 +1,10 @@
+.agents/
+.claude/
+.codex/
+.vscode/
+
+*.bak
+*.bak-*
+*.bak_*
+*.gggg
+Classes/Warlock_Fixed.lua

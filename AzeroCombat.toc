@@ -1,0 +1,31 @@
+## Interface: 30300
+## Title: AzeroCombat
+## Notes: Automatic combat rotations for all classes on WotLK
+## Author: YourName
+## Version: 1.1
+## SavedVariables: AzeroCombatDB
+## SavedVariablesPerCharacter: AzeroCombatPerCharDB
+
+# Libraries - must load first
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\AceAddon-3.0\AceAddon-3.0.lua
+Libs\AceEvent-3.0\AceEvent-3.0.lua
+Libs\AceTimer-3.0\AceTimer-3.0.lua
+Libs\AceDB-3.0\AceDB-3.0.lua
+
+# Core files - must load before class files
+Utils.lua
+Core.lua
+
+# Class rotations - load after core
+Classes\DeathKnight.lua
+Classes\Druid.lua
+Classes\Hunter.lua
+Classes\Mage.lua
+Classes\Paladin.lua
+Classes\Rogue.lua
+Classes\Shaman.lua
+Classes\Warlock.lua
+Classes\Warrior.lua
+Classes\Priest.lua
