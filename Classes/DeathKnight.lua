@@ -336,17 +336,24 @@ function AC:BloodDeathKnightRotation()
         end
     end
     
-    -- Interrupt casters
-    if UnitCastingInfo("target") and self:IsUsableSpell(S.MindFreeze) then
-        self:CastSpell(S.MindFreeze, "target")
-        DeathKnightDebug("BLOOD: Mind Freeze interrupt")
-        return true
-    end
-    
     -- RESEARCH PRIORITY 1: ICY TOUCH SPAM = HIGHEST THREAT IN GAME
     -- Must maintain diseases for optimal threat/damage
     local hasBloodPlague = self:HasDebuff("target", S.BloodPlague)
     local hasFrostFever = self:HasDebuff("target", S.FrostFever)
+    local refreshDisease = self:ShouldRefreshDiseases("target")
+    
+    -- Refresh diseases using the shared disease timing helper.
+    if refreshDisease == "IcyTouch" and self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
+        self:CastSpell(S.IcyTouch, "target")
+        DeathKnightDebug("BLOOD: Icy Touch (disease refresh)")
+        return true
+    end
+    
+    if refreshDisease == "PlagueStrike" and self:GetUnholyRunes() > 0 and self:IsUsableSpell(S.PlagueStrike) then
+        self:CastSpell(S.PlagueStrike, "target")
+        DeathKnightDebug("BLOOD: Plague Strike (disease refresh)")
+        return true
+    end
     
     -- Apply/refresh Frost Fever first (Icy Touch = massive threat)
     if not hasFrostFever and self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
@@ -371,11 +378,8 @@ function AC:BloodDeathKnightRotation()
         end
         
         -- Death and Decay for AoE threat establishment
-        if self:IsUsableSpell(S.DeathAndDecay) and not self:IsChanneling() and not self:IsPlayerMoving() then
+        if self:GetSpellCooldown(S.DeathAndDecay) == 0 and self:SafeCastGroundAOE(S.DeathAndDecay) then
             DeathKnightDebug("BLOOD: Death and Decay (AoE threat)")
-            CastSpellByName(S.DeathAndDecay)
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
             return true
         end
         
@@ -414,13 +418,6 @@ function AC:BloodDeathKnightRotation()
     if self:GetBloodRunes() > 0 and self:IsUsableSpell(S.BloodStrike) then
         self:CastSpell(S.BloodStrike, "target")
         DeathKnightDebug("BLOOD: Blood Strike")
-        return true
-    end
-    
-    -- CRITICAL: More Icy Touch for threat when frost runes available
-    if self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
-        self:CastSpell(S.IcyTouch, "target")
-        DeathKnightDebug("BLOOD: Extra Icy Touch (threat spam)")
         return true
     end
     
@@ -489,13 +486,6 @@ function AC:FrostDeathKnightRotation()
         end
     end
     
-    -- Interrupts
-    if UnitCastingInfo("target") and self:IsUsableSpell(S.MindFreeze) then
-        self:CastSpell(S.MindFreeze, "target")
-        DeathKnightDebug("FROST: Mind Freeze interrupt")
-        return true
-    end
-    
     -- RESEARCH CRITICAL: RIME PROC = Instant Howling Blast (ALWAYS HIGHEST PRIORITY)
     if (self:HasBuff("player", S.RimeProc) or self:HasBuff("player", S.Rime) or self:HasBuff("player", "Freezing Fog")) and self:KnowsSpell(S.HowlingBlast) then
         self:CastSpell(S.HowlingBlast, "target")
@@ -530,6 +520,20 @@ function AC:FrostDeathKnightRotation()
     local hasBloodPlague = self:HasDebuff("target", S.BloodPlague)
     local hasFrostFever = self:HasDebuff("target", S.FrostFever)
     
+    -- Apply/refresh diseases using the shared disease timing helper.
+    local refreshDisease = self:ShouldRefreshDiseases("target")
+    if refreshDisease == "IcyTouch" and self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
+        self:CastSpell(S.IcyTouch, "target")
+        DeathKnightDebug("FROST: Icy Touch (disease refresh)")
+        return true
+    end
+    
+    if refreshDisease == "PlagueStrike" and self:GetUnholyRunes() > 0 and self:IsUsableSpell(S.PlagueStrike) then
+        self:CastSpell(S.PlagueStrike, "target")
+        DeathKnightDebug("FROST: Plague Strike (disease refresh)")
+        return true
+    end
+    
     -- Apply Icy Touch first (Frost Fever)
     if not hasFrostFever and self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
         self:CastSpell(S.IcyTouch, "target")
@@ -561,11 +565,8 @@ function AC:FrostDeathKnightRotation()
         end
         
         -- Death and Decay for sustained AoE
-        if self:IsUsableSpell(S.DeathAndDecay) and not self:IsChanneling() and not self:IsPlayerMoving() then
+        if self:GetSpellCooldown(S.DeathAndDecay) == 0 and self:SafeCastGroundAOE(S.DeathAndDecay) then
             DeathKnightDebug("FROST: Death and Decay (AoE)")
-            CastSpellByName(S.DeathAndDecay)
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
             return true
         end
     end
@@ -585,13 +586,6 @@ function AC:FrostDeathKnightRotation()
             end
         end
         
-        -- Blood Strike for death rune conversion and rune usage priority
-        if self:GetBloodRunes() > 0 and self:IsUsableSpell(S.BloodStrike) then
-            self:CastSpell(S.BloodStrike, "target")
-            DeathKnightDebug("FROST: Blood Strike (death rune conversion)")
-            return true
-        end
-        
         -- Pestilence to refresh diseases if needed
         if hasBloodPlague and hasFrostFever and self:IsUsableSpell(S.Pestilence) then
             -- Check if diseases are about to expire (less than 6 seconds)
@@ -603,6 +597,13 @@ function AC:FrostDeathKnightRotation()
                 DeathKnightDebug("FROST: Pestilence (refresh diseases)")
                 return true
             end
+        end
+
+        -- Blood Strike for death rune conversion and rune usage priority
+        if self:GetBloodRunes() > 0 and self:IsUsableSpell(S.BloodStrike) then
+            self:CastSpell(S.BloodStrike, "target")
+            DeathKnightDebug("FROST: Blood Strike (death rune conversion)")
+            return true
         end
     end
     
@@ -680,19 +681,6 @@ function AC:UnholyDeathKnightRotation()
         end
     end
     
-    -- Interrupts (Strangulate preferred for Unholy)
-    if UnitCastingInfo("target") then
-        if self:KnowsSpell(S.Strangulate) and self:IsUsableSpell(S.Strangulate) then
-            self:CastSpell(S.Strangulate, "target")
-            DeathKnightDebug("UNHOLY: Strangulate interrupt")
-            return true
-        elseif self:IsUsableSpell(S.MindFreeze) then
-            self:CastSpell(S.MindFreeze, "target")
-            DeathKnightDebug("UNHOLY: Mind Freeze interrupt")
-            return true
-        end
-    end
-    
     -- RESEARCH CRITICAL: Maintain Bone Shield buff for survivability
     if self:KnowsSpell(S.BoneShield) and not self:HasBuff("player", S.BoneShield) and self:IsUsableSpell(S.BoneShield) then
         self:CastSpell(S.BoneShield)
@@ -710,8 +698,21 @@ function AC:UnholyDeathKnightRotation()
         -- RESEARCH: Diseases first, then spread with Pestilence
         local hasBloodPlague = self:HasDebuff("target", S.BloodPlague)
         local hasFrostFever = self:HasDebuff("target", S.FrostFever)
+        local refreshDisease = self:ShouldRefreshDiseases("target")
         
         -- Apply diseases to primary target
+        if refreshDisease == "PlagueStrike" and self:GetUnholyRunes() > 0 and self:IsUsableSpell(S.PlagueStrike) then
+            self:CastSpell(S.PlagueStrike, "target")
+            DeathKnightDebug("UNHOLY: Plague Strike (AoE disease refresh)")
+            return true
+        end
+        
+        if refreshDisease == "IcyTouch" and self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
+            self:CastSpell(S.IcyTouch, "target")
+            DeathKnightDebug("UNHOLY: Icy Touch (AoE disease refresh)")
+            return true
+        end
+        
         if not hasFrostFever and self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
             self:CastSpell(S.IcyTouch, "target")
             DeathKnightDebug("UNHOLY: Icy Touch (AoE setup)")
@@ -732,11 +733,8 @@ function AC:UnholyDeathKnightRotation()
         end
         
         -- Death and Decay for AoE damage
-        if self:IsUsableSpell(S.DeathAndDecay) and not self:IsChanneling() and not self:IsPlayerMoving() then
+        if self:GetSpellCooldown(S.DeathAndDecay) == 0 and self:SafeCastGroundAOE(S.DeathAndDecay) then
             DeathKnightDebug("UNHOLY: Death and Decay (AoE)")
-            CastSpellByName(S.DeathAndDecay)
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
             return true
         end
         
@@ -752,8 +750,21 @@ function AC:UnholyDeathKnightRotation()
     -- Pattern: PS > IT > BS > BS > SS > DC > SS > SS > SS > DC > DC > SS > BS > BS > SS > DC
     local hasBloodPlague = self:HasDebuff("target", S.BloodPlague)
     local hasFrostFever = self:HasDebuff("target", S.FrostFever)
+    local refreshDisease = self:ShouldRefreshDiseases("target")
     
     -- STEP 1: Establish diseases (PS > IT)
+    if refreshDisease == "PlagueStrike" and self:GetUnholyRunes() > 0 and self:IsUsableSpell(S.PlagueStrike) then
+        self:CastSpell(S.PlagueStrike, "target")
+        DeathKnightDebug("UNHOLY: Plague Strike (disease refresh)")
+        return true
+    end
+    
+    if refreshDisease == "IcyTouch" and self:GetFrostRunes() > 0 and self:IsUsableSpell(S.IcyTouch) then
+        self:CastSpell(S.IcyTouch, "target")
+        DeathKnightDebug("UNHOLY: Icy Touch (disease refresh)")
+        return true
+    end
+    
     if not hasBloodPlague and self:GetUnholyRunes() > 0 and self:IsUsableSpell(S.PlagueStrike) then
         self:CastSpell(S.PlagueStrike, "target")
         DeathKnightDebug("UNHOLY: Plague Strike (disease priority)")
@@ -838,6 +849,13 @@ function AC:UnholyDeathKnightRotation()
     if runicPower >= 80 and self:IsUsableSpell(S.DeathCoil) then
         self:CastSpell(S.DeathCoil, "target")
         DeathKnightDebug("UNHOLY: Death Coil (RP cap emergency)")
+        return true
+    end
+
+    -- Unholy-specific ranged interrupt after core priority is exhausted.
+    if UnitCastingInfo("target") and self:IsUsableSpell(S.Strangulate) and self:GetSpellCooldown(S.Strangulate) == 0 then
+        self:CastSpell(S.Strangulate, "target")
+        DeathKnightDebug("UNHOLY: Strangulate interrupt")
         return true
     end
     
