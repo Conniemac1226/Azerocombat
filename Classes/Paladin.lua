@@ -1240,8 +1240,8 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
             if self:CastPaladinSpell(S.CrusaderStrike, "target") then return true end
         end
         
-        -- Priority 7: Exorcism (filler, but lower priority without Art of War)
-        if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 15 then
+        -- Priority 7: Exorcism (filler, but only when stationary unless Art of War makes it instant)
+        if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 15 and not self:IsPlayerMovingCached() then
             if self:CastPaladinSpell(S.Exorcism, "target") then return true end
         end
         
