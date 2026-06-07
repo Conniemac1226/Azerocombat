@@ -2037,6 +2037,41 @@ function AC:ForceBerserkerStance()
     return false
 end
 
+function AC:TryArmsInterrupt(unit)
+    unit = unit or "target"
+
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) then
+        return false
+    end
+
+    local spellName, _, _, _, _, endTime, _, _, uninterruptible = UnitCastingInfo(unit)
+    if not spellName or uninterruptible then
+        return false
+    end
+
+    if not self:ShouldInterruptSpell(spellName) then
+        return false
+    end
+
+    local currentStance = self:GetCurrentStance()
+    if currentStance == 3 then
+        if self:TryInterrupt(S.Pummel, unit) then
+            WarriorDebug("Arms: Pummel interrupt")
+            return true
+        end
+        return false
+    end
+
+    local timeLeft = endTime and ((endTime / 1000) - GetTime()) or 0
+    if timeLeft >= 2.0 and self:KnowsSpell(S.BerserkerStance) and self:GetSpellCooldown(S.BerserkerStance) == 0 then
+        CastSpellByName(S.BerserkerStance)
+        WarriorDebug("Arms: Switching to Berserker for Pummel on " .. spellName)
+        return true
+    end
+
+    return false
+end
+
 -- FIXED: Enhanced talent checking with error handling
 function AC:HasTalentByName(talentName, cacheKey)
     if not talentName then return false end
@@ -3079,6 +3114,10 @@ function AC:ArmsWarriorRotation()
             return false
             end
         end
+
+        -- Arms interrupt handling: Pummel when already in Berserker, otherwise only stance swap
+        -- when the cast still has enough time left to justify the GCD.
+        if self:TryArmsInterrupt("target") then return true end
 
         -- FIXED: Use defensive cooldowns when needed
         if self:UseWarriorDefensives() then return true end

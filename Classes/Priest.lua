@@ -559,7 +559,7 @@ function AC:UsePriestOffensives(spec)
     -- Shadow
     if spec == "Shadow" then
         -- Shadowfiend
-        if self:IsUsableSpell(S.Shadowfiend) and Throttle("Shadowfiend", 300) then
+        if self:IsUsableSpell(S.Shadowfiend) and self:GetSpellCooldown(S.Shadowfiend) == 0 and Throttle("Shadowfiend", 300) then
             CastSpellByName(S.Shadowfiend, "target")
             PriestDebug("Shadowfiend")
             if self.UseTrinkets then self:UseTrinkets() end
@@ -568,7 +568,7 @@ function AC:UsePriestOffensives(spec)
         end
         
         -- Power Infusion
-        if self:IsUsableSpell(S.PowerInfusion) and Throttle("PowerInfusion", 120) then
+        if self:IsUsableSpell(S.PowerInfusion) and self:GetSpellCooldown(S.PowerInfusion) == 0 and Throttle("PowerInfusion", 120) then
             CastSpellByName(S.PowerInfusion, "player")
             PriestDebug("Power Infusion")
             return true
@@ -651,6 +651,13 @@ function AC:ShadowPriestRotation()
         PriestDebug("Shadow: Entering Shadowform")
         return true
     end
+
+    -- Maintain Vampiric Embrace for passive self/group healing.
+    if self:IsUsableSpell(S.VampiricEmbrace) and not self:HasBuff("player", S.VampiricEmbrace) then
+        CastSpellByName(S.VampiricEmbrace, "player")
+        PriestDebug("Shadow: Vampiric Embrace")
+        return true
+    end
     
     if not hasTarget then
         local bestTarget = self:FindBestTarget()
@@ -679,19 +686,47 @@ function AC:ShadowPriestRotation()
     
     local targetHP = self:GetTargetHealthPercent("target")
     local isFastDying = self:IsFastDyingMob("target")
+    local isMoving = self:IsPlayerMoving()
+    local channelingMindFlay = self:IsChanneling(S.MindFlay)
     
     -- Offensive cooldowns
     if self:UsePriestOffensives("Shadow") then return true end
     
-    -- Interrupt with Silence
-    if UnitCastingInfo("target") and self:IsUsableSpell(S.Silence) then
-        CastSpellByName(S.Silence, "target")
+    -- Interrupt with Silence using the shared priority filter
+    if self.TryInterrupt and self:TryInterrupt(S.Silence, "target") then
         PriestDebug("Shadow: Silence interrupt")
         return true
     end
-    
+
+    -- Psychic Horror fallback when Silence is unavailable and the target is still casting.
+    local targetClassification = UnitClassification("target")
+    if UnitCastingInfo("target") and self:IsUsableSpell(S.PsychicHorror) and 
+       self:GetSpellCooldown(S.PsychicHorror) == 0 and self:GetSpellCooldown(S.Silence) > 0 and
+       targetClassification ~= "worldboss" then
+        CastSpellByName(S.PsychicHorror, "target")
+        PriestDebug("Shadow: Psychic Horror control")
+        return true
+    end
+
+    -- While moving, skip casted filler and only spend globals on instant or execute tools.
+    if isMoving then
+        if targetHP < 25 and self:IsUsableSpell(S.ShadowWordDeath) and self:GetSpellCooldown(S.ShadowWordDeath) == 0 then
+            CastSpellByName(S.ShadowWordDeath, "target")
+            PriestDebug("Shadow: Shadow Word: Death (moving)")
+            return true
+        end
+
+        if manaPercent < 5 and not IsAutoRepeatSpell(S.Shoot) then
+            CastSpellByName(S.Shoot, "target")
+            PriestDebug("Shadow: Wanding (moving)")
+            return true
+        end
+
+        return false
+    end
+
     -- Shadow Word: Death execute
-    if targetHP < 25 and self:IsUsableSpell(S.ShadowWordDeath) then
+    if targetHP < 25 and self:IsUsableSpell(S.ShadowWordDeath) and self:GetSpellCooldown(S.ShadowWordDeath) == 0 then
         CastSpellByName(S.ShadowWordDeath, "target")
         PriestDebug("Shadow: Shadow Word: Death")
         return true
@@ -713,15 +748,20 @@ function AC:ShadowPriestRotation()
             return true -- Missing DoT
         end
         
+        local refreshThreshold = 3
+
         -- Only use pandemic for advanced rotations
         if complexity == "ADVANCED" or complexity == "MODERATE" then
             local timeRemaining = self:DebuffTimeRemaining("target", debuffName)
-            local pandemicThreshold = baseDuration * 0.3 -- 30% rule
-            return timeRemaining <= pandemicThreshold
+            refreshThreshold = baseDuration * 0.3 -- 30% rule
         end
         
-        -- Simple refresh for basic rotations (current behavior)
-        return self:DebuffTimeRemaining("target", debuffName) < 3
+        -- Avoid clipping Mind Flay early unless the DoT is actually due.
+        if channelingMindFlay then
+            refreshThreshold = math.min(refreshThreshold, 1.0)
+        end
+
+        return self:DebuffTimeRemaining("target", debuffName) <= refreshThreshold
     end
     
     -- RESEARCH-BASED: Optimal Shadow DoT Priority
@@ -749,7 +789,7 @@ function AC:ShadowPriestRotation()
     end
     
     -- Mind Blast on cooldown
-    if self:IsUsableSpell(S.MindBlast) and manaPercent > 10 then
+    if self:IsUsableSpell(S.MindBlast) and self:GetSpellCooldown(S.MindBlast) == 0 and manaPercent > 10 then
         CastSpellByName(S.MindBlast, "target")
         PriestDebug("Shadow: Mind Blast")
         return true

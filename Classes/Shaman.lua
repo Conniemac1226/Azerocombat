@@ -697,8 +697,9 @@ function AC:ElementalRotation(level, hasTarget, targetHP, manaPercent, enemies)
     end
     
     -- Enhanced single-target rotation with Lava Burst mastery
+    local isMoving = self:IsPlayerMoving()
     local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
-    
+
     -- Flame Shock application/refresh
     if self:CanUseShamanSpell(S.FlameShock) and flameShockDuration < 2 and manaPercent > 10 then
         if self:CastShamanSpell(S.FlameShock) then
@@ -706,7 +707,26 @@ function AC:ElementalRotation(level, hasTarget, targetHP, manaPercent, enemies)
             return true
         end
     end
-    
+
+    -- Movement-safe filler: prefer instant shocks over hard casts while repositioning.
+    if isMoving then
+        if self:CanUseShamanSpell(S.Thunderstorm) and enemies >= 3 and CheckInteractDistance("target", 2) then
+            if self:CastShamanSpell(S.Thunderstorm) then
+                ShamanDebug("Thunderstorm movement damage")
+                return true
+            end
+        end
+
+        if self:CanUseShamanSpell(S.EarthShock) and manaPercent > 5 then
+            if self:CastShamanSpell(S.EarthShock) then
+                ShamanDebug("Earth Shock movement filler")
+                return true
+            end
+        end
+
+        return false
+    end
+
     -- Lava Burst with Flame Shock synergy (guaranteed crit)
     if flameShockDuration > 2 and self:CanUseShamanSpell(S.LavaBurst) and manaPercent > 15 then
         if self:CastShamanSpell(S.LavaBurst) then
