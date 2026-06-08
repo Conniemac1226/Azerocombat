@@ -3609,12 +3609,126 @@ function AC:FuryWarriorRotation()
     return false
 end
 
+-- Dedicated low-level warrior handling for characters with no talent points yet.
+function AC:LevelingWarriorRotation()
+    local level = UnitLevel("player")
+    local rage = UnitPower("player", 1)
+    local health = self:GetPlayerHealthPercent()
+    local inCombat = UnitAffectingCombat("player")
+    local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
+
+    if Throttle("LevelingDebug", 2.5) then
+        WarriorDebug(string.format(
+            "Leveling mode: L:%d Rage:%d HP:%.0f Combat:%s Target:%s",
+            level,
+            rage,
+            health,
+            inCombat and "Y" or "N",
+            hasTarget and "Y" or "N"
+        ))
+    end
+
+    if not inCombat then
+        if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target") then
+            if level >= 4 and self:TryCharge() then
+                return true
+            end
+        end
+
+        if self:CheckWarriorBuffs("None") then
+            return true
+        end
+
+        if Throttle("LevelingIdle", 3.0) then
+            WarriorDebug("Leveling mode: out of combat, waiting for target or rage")
+        end
+        return false
+    end
+
+    if not hasTarget then
+        local meleeTarget = self:FindMeleeTarget()
+        if meleeTarget then
+            TargetUnit(meleeTarget)
+            hasTarget = true
+            WarriorDebug("Leveling mode: found melee target " .. (UnitName("target") or "Unknown"))
+        else
+            local bestTarget = self:FindBestWarriorTarget()
+            if bestTarget then
+                TargetUnit(bestTarget)
+                hasTarget = true
+                WarriorDebug("Leveling mode: found target " .. (UnitName("target") or "Unknown"))
+            end
+        end
+    end
+
+    if not hasTarget then
+        if Throttle("LevelingNoTarget", 3.0) then
+            WarriorDebug("Leveling mode: no hostile target available")
+        end
+        return false
+    end
+
+    StartAttack()
+
+    if not self:IsInMeleeRange("target") then
+        if Throttle("LevelingOutOfMelee", 2.0) then
+            WarriorDebug("Leveling mode: target out of melee range, waiting for swing or gap closer")
+        end
+        return false
+    end
+
+    if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
+        CastSpellByName(S.BloodRage)
+        WarriorDebug("Leveling mode: Blood Rage")
+        return true
+    end
+
+    if self:TryVictoryRush() then
+        return true
+    end
+
+    local targetHP = self:GetTargetHealthPercent("target")
+    if targetHP < 20 and level >= 24 and self:IsUsableSpell(S.Execute) and rage >= 10 then
+        CastSpellByName(S.Execute, "target")
+        WarriorDebug("Leveling mode: Execute")
+        return true
+    end
+
+    if level >= 4 and self:DebuffTimeRemaining("target", S.Rend) < 2 and self:IsUsableSpell(S.Rend) and rage >= 10 then
+        CastSpellByName(S.Rend, "target")
+        WarriorDebug("Leveling mode: Rend")
+        return true
+    end
+
+    if level >= 8 and self:HasBuff("player", S.TasteForBlood) and self:IsUsableSpell(S.Overpower) and rage >= 5 then
+        CastSpellByName(S.Overpower, "target")
+        WarriorDebug("Leveling mode: Overpower")
+        return true
+    end
+
+    if ShouldQueueRageDump(rage, nil, 35) and QueueOnNextSwing(S.HeroicStrike, "Leveling mode: Heroic Strike dump") then
+        return true
+    end
+
+    if Throttle("LevelingNoAction", 2.5) then
+        WarriorDebug("Leveling mode: no usable action this tick")
+    end
+
+    return false
+end
+
 -- FIXED: Main rotation controller with better performance
 function AC:WarriorRotation()
     local spec = self:GetPlayerSpec()
     local health = self:GetPlayerHealthPercent()
     local actionTaken = false
     local inCombat = UnitAffectingCombat("player")
+
+    -- Characters below level 10 have no talents, so route them through the
+    -- dedicated leveling handler instead of the spec-based rotations.
+    if UnitLevel("player") < 10 or spec == "None" then
+        return self:LevelingWarriorRotation()
+    end
 
     -- Out of combat buffs
     if not inCombat then
@@ -3636,84 +3750,6 @@ function AC:WarriorRotation()
         actionTaken = self:ArmsWarriorRotation()
     elseif spec == "Fury" then
         actionTaken = self:FuryWarriorRotation()
-    else
-        -- FIXED: Leveling rotation (simplified with melee preference and range checking)
-        local currentStance = self:GetCurrentStance()
-        if currentStance ~= 1 then
-            if self:ForceBattleStance() then return true end
-        end
-        if currentStance ~= 1 then
-            WarriorDebug("Leveling: Waiting for Battle Stance")
-            return true
-        end
-
-        local rage, level = UnitPower("player", 1), UnitLevel("player")
-        if not UnitExists("target") then
-            -- Prefer melee targets
-            local meleeTarget = self:FindMeleeTarget()
-            if meleeTarget then
-                TargetUnit(meleeTarget)
-            else
-                local bestTarget = self:FindBestWarriorTarget()
-                if bestTarget then
-                    TargetUnit(bestTarget)
-                end
-            end
-        end 
-        if not UnitExists("target") then return false end 
-
-        -- FIXED: Basic leveling rotation (only in melee)
-        if not self:IsInMeleeRange("target") then
-            WarriorDebug("Leveling: Target out of melee range, skipping abilities")
-            return false
-        end
-
-        if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
-            CastSpellByName(S.BloodRage)
-            WarriorDebug("Leveling: Blood Rage")
-            return true
-        end
-        
-        -- Victory Rush
-        if self:TryVictoryRush() then return true end
-        
-        local targetHP = self:GetTargetHealthPercent("target")
-        if targetHP < 20 and level >= 24 and self:IsUsableSpell(S.Execute) and rage >= 10 then
-            CastSpellByName(S.Execute, "target")
-            WarriorDebug("Leveling: Execute")
-            return true
-        end
-        
-        if level >= 4 and self:DebuffTimeRemaining("target", S.Rend) < 2 and self:IsUsableSpell(S.Rend) and rage >= 10 then
-            CastSpellByName(S.Rend, "target")
-            WarriorDebug("Leveling: Rend")
-            return true
-        end
-        
-        if level >= 8 and self:HasBuff("player", S.TasteForBlood) and self:IsUsableSpell(S.Overpower) and rage >= 5 then
-            CastSpellByName(S.Overpower, "target")
-            WarriorDebug("Leveling: Overpower")
-            return true
-        end
-        
-        if level >= 40 and self:KnowsSpell(S.MortalStrike) and self:IsUsableSpell(S.MortalStrike) and rage >= 20 then
-            CastSpellByName(S.MortalStrike, "target")
-            WarriorDebug("Leveling: Mortal Strike")
-            return true
-        end
-        
-        if level >= 40 and self:KnowsSpell(S.Bloodthirst) and self:IsUsableSpell(S.Bloodthirst) and rage >= 20 then
-            CastSpellByName(S.Bloodthirst, "target")
-            WarriorDebug("Leveling: Bloodthirst")
-            return true
-        end
-        
-        if rage > 60 and self:IsUsableSpell(S.HeroicStrike) then
-            CastSpellByName(S.HeroicStrike, "target")
-            WarriorDebug("Leveling: Heroic Strike dump")
-            return true
-        end
-        actionTaken = false 
     end
 
     return actionTaken
