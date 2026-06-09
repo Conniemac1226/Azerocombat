@@ -32,6 +32,7 @@ local defaults = {
         egtEnabled = false,  -- Add this line
         autofarmEnabled = false,  -- Add autofarm state
         targetingMode = "auto",
+        feralRoleMode = "auto",
         debugWindowEnabled = false,  -- Debug window state
         debugWindowPosition = {
             point = "TOPLEFT",
@@ -3503,6 +3504,21 @@ function AC:OnEnable()
             end
         elseif msg == "mode" or msg == "targetmode" then
             self:ToggleTargetingMode()
+        elseif msg == "feral" then
+            local feralRole = (self.db and self.db.profile and self.db.profile.feralRoleMode) or "auto"
+            self:Print("Feral role preference: " .. feralRole)
+            self:Print("Use /ac feral auto | bear | cat")
+        elseif msg == "feral auto" or msg == "feral bear" or msg == "feral cat" then
+            local role = msg:match("^feral%s+(%w+)$")
+            if role == "auto" or role == "bear" or role == "cat" then
+                self.db.profile.feralRoleMode = role
+                if self.druidFeralCombatRole then
+                    self.druidFeralCombatRole = nil
+                end
+                self:Print("Feral role preference set to " .. role)
+            else
+                self:Print("Invalid feral role. Use /ac feral auto | bear | cat")
+            end
         elseif msg == "spec" then
             self:ForceSpecDetection()
         elseif msg == "performance" or msg == "perf" then
@@ -3584,6 +3600,7 @@ function AC:OnEnable()
             print("/ac hide - Hide control panel")
             print("/ac debug - Toggle debug mode")
             print("/ac mode - Toggle Auto/Single Target mode")
+            print("/ac feral auto|bear|cat - Set feral role preference")
             print("/ac debugwin - Toggle debug window (shows debug messages in separate window)")
             print("/ac silent - Toggle silent mode (hide chat messages)")
             print("/ac spec - Force spec detection")

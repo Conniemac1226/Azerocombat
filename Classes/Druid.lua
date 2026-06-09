@@ -121,6 +121,141 @@ local function DruidDebug(msg)
     end
 end
 
+local function NormalizeFeralRole(role)
+    if not role then return "auto" end
+    role = string.lower(tostring(role))
+    if role == "bear" or role == "cat" or role == "auto" then
+        return role
+    end
+    return "auto"
+end
+
+function AC:HasTalentByName(talentName, cacheKey)
+    if not talentName then return false end
+
+    self.druidTalentCache = self.druidTalentCache or {}
+    local key = cacheKey or talentName
+    local now = GetTime()
+    local cached = self.druidTalentCache[key]
+    if cached and (now - cached.time) < 5 then
+        return cached.value
+    end
+
+    local success, numTabs = pcall(GetNumTalentTabs)
+    local found = false
+    if success then
+        for tab = 1, numTabs do
+            local tabSuccess, numTalents = pcall(GetNumTalents, tab)
+            if tabSuccess then
+                for talent = 1, numTalents do
+                    local talentSuccess, name, _, _, _, currRank = pcall(GetTalentInfo, tab, talent)
+                    if talentSuccess and name and name:find(talentName, 1, true) and currRank > 0 then
+                        found = true
+                        break
+                    end
+                end
+                if found then break end
+            end
+        end
+    end
+
+    self.druidTalentCache[key] = {
+        time = now,
+        value = found
+    }
+    return found
+end
+
+function AC:GetFeralTalentPoints()
+    local success, numTabs = pcall(GetNumTalentTabs)
+    if not success then return 0 end
+
+    for tab = 1, numTabs do
+        local tabSuccess, tabName, _, points = pcall(GetTalentTabInfo, tab)
+        if tabSuccess and tabName and tabName:find("Feral", 1, true) then
+            return points or 0
+        end
+    end
+
+    return 0
+end
+
+function AC:IsFeralBuild()
+    local spec = self:GetPlayerSpec()
+    return spec == "Feral" or self:GetFeralTalentPoints() > 0
+end
+
+function AC:GetFeralRolePreference()
+    if not self.db or not self.db.profile then
+        return "auto"
+    end
+    return NormalizeFeralRole(self.db.profile.feralRoleMode)
+end
+
+function AC:SetFeralRolePreference(role)
+    role = NormalizeFeralRole(role)
+    if self.db and self.db.profile then
+        self.db.profile.feralRoleMode = role
+    end
+    if self.druidFeralCombatRole then
+        self.druidFeralCombatRole = nil
+    end
+    return role
+end
+
+function AC:DetermineFeralRole()
+    local preferred = self:GetFeralRolePreference()
+    if preferred ~= "auto" then
+        return preferred
+    end
+
+    if UnitAffectingCombat("player") and self.druidFeralCombatRole then
+        return self.druidFeralCombatRole
+    end
+
+    local bearScore = 0
+    local catScore = 0
+
+    -- Bear-leaning talents
+    if self:HasTalentByName("Feral Instinct", "Druid_FeralInstinct") then bearScore = bearScore + 4 end
+    if self:HasTalentByName("Thick Hide", "Druid_ThickHide") then bearScore = bearScore + 4 end
+    if self:HasTalentByName("Survival of the Fittest", "Druid_SOTF") then bearScore = bearScore + 5 end
+    if self:HasTalentByName("Protector of the Pack", "Druid_POTP") then bearScore = bearScore + 5 end
+    if self:HasTalentByName("Natural Reaction", "Druid_NaturalReaction") then bearScore = bearScore + 3 end
+    if self:HasTalentByName("Infected Wounds", "Druid_InfectedWounds") then bearScore = bearScore + 2 end
+    if self:HasTalentByName("Survival Instincts", "Druid_SurvivalInstincts") then bearScore = bearScore + 2 end
+
+    -- Cat-leaning talents
+    if self:HasTalentByName("Ferocity", "Druid_Ferocity") then catScore = catScore + 4 end
+    if self:HasTalentByName("Feral Aggression", "Druid_FeralAggression") then catScore = catScore + 3 end
+    if self:HasTalentByName("Predatory Strikes", "Druid_PredatoryStrikes") then catScore = catScore + 4 end
+    if self:HasTalentByName("King of the Jungle", "Druid_KingOfTheJungle") then catScore = catScore + 5 end
+    if self:HasTalentByName("Improved Mangle", "Druid_ImprovedMangle") then catScore = catScore + 3 end
+    if self:HasTalentByName("Primal Precision", "Druid_PrimalPrecision") then catScore = catScore + 3 end
+    if self:HasTalentByName("Master Shapeshifter", "Druid_MasterShapeshifter") then catScore = catScore + 2 end
+    if self:HasTalentByName("Predatory Instincts", "Druid_PredatoryInstincts") then catScore = catScore + 2 end
+    if self:HasTalentByName("Shredding Attacks", "Druid_ShreddingAttacks") then catScore = catScore + 1 end
+
+    local currentForm = self:GetCurrentDruidForm()
+    if currentForm == AC.DruidForms.BEAR then
+        bearScore = bearScore + 1
+    elseif currentForm == AC.DruidForms.CAT then
+        catScore = catScore + 1
+    end
+
+    if bearScore > catScore then
+        return "bear"
+    elseif catScore > bearScore then
+        return "cat"
+    end
+
+    if self:IsTank("player") then
+        return "bear"
+    end
+
+    return currentForm == AC.DruidForms.BEAR and "bear" or "cat"
+end
+
 local function IsHealingSpellInRange(unit)
     if not unit or not UnitExists(unit) then return false end
     if UnitIsUnit(unit, "player") then return true end
@@ -388,6 +523,100 @@ function AC:UseDruidOffensives(spec, form)
         end
     end
     
+    return false
+end
+
+-- Dedicated low-level druid handling for characters with no talent points yet.
+function AC:LevelingDruidRotation()
+    local level = UnitLevel("player")
+    local mana = UnitPower("player", 0)
+    local maxMana = UnitPowerMax("player", 0)
+    local manaPercent = (maxMana > 0) and (mana / maxMana * 100) or 100
+    local health = self:GetPlayerHealthPercent()
+    local inCombat = UnitAffectingCombat("player")
+    local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
+
+    if Throttle("LevelingDebug", 2.5) then
+        DruidDebug(string.format(
+            "Leveling mode: L:%d Mana:%.0f%% HP:%.0f Combat:%s Target:%s",
+            level,
+            manaPercent,
+            health,
+            inCombat and "Y" or "N",
+            hasTarget and "Y" or "N"
+        ))
+    end
+
+    -- Emergency self-healing always takes priority.
+    if not UnitCastingInfo("player") then
+        if health < 35 and self:IsUsableSpell(S.HealingTouch) then
+            CastSpellByName(S.HealingTouch, "player")
+            DruidDebug("Leveling: Healing Touch (emergency self-heal)")
+            return true
+        end
+
+        if health < 70 and self:IsUsableSpell(S.Rejuvenation) and not self:HasBuff("player", S.Rejuvenation) then
+            CastSpellByName(S.Rejuvenation, "player")
+            DruidDebug("Leveling: Rejuvenation (self sustain)")
+            return true
+        end
+    end
+
+    if not inCombat then
+        if self:CheckDruidBuffs() then return true end
+
+        if hasTarget then
+            if self:KnowsSpell(S.Moonfire) and self:IsUsableSpell(S.Moonfire) and
+               self:DebuffTimeRemaining("target", S.Moonfire) < 1 and not UnitCastingInfo("player") then
+                CastSpellByName(S.Moonfire, "target")
+                DruidDebug("Leveling: Moonfire (pre-pull)")
+                return true
+            end
+
+            if self:IsUsableSpell(S.Wrath) and not UnitCastingInfo("player") then
+                CastSpellByName(S.Wrath, "target")
+                DruidDebug("Leveling: Wrath (pre-pull)")
+                return true
+            end
+        end
+
+        if Throttle("LevelingIdle", 3.0) then
+            DruidDebug("Leveling: out of combat, waiting for target or mana")
+        end
+        return false
+    end
+
+    if not hasTarget then
+        if Throttle("LevelingNoTarget", 3.0) then
+            DruidDebug("Leveling: no hostile target available")
+        end
+        return false
+    end
+
+    if self:KnowsSpell(S.Moonfire) and self:IsUsableSpell(S.Moonfire) and
+       self:DebuffTimeRemaining("target", S.Moonfire) < 1 and not UnitCastingInfo("player") then
+        CastSpellByName(S.Moonfire, "target")
+        DruidDebug("Leveling: Moonfire")
+        return true
+    end
+
+    if self:IsUsableSpell(S.Wrath) and not UnitCastingInfo("player") then
+        CastSpellByName(S.Wrath, "target")
+        DruidDebug("Leveling: Wrath")
+        return true
+    end
+
+    if self:KnowsSpell(S.EntanglingRoots) and self:IsUsableSpell(S.EntanglingRoots) and
+       self:GetSpellCooldown(S.EntanglingRoots) == 0 and health < 60 then
+        CastSpellByName(S.EntanglingRoots, "target")
+        DruidDebug("Leveling: Entangling Roots (peel)")
+        return true
+    end
+
+    if Throttle("LevelingNoAction", 2.5) then
+        DruidDebug("Leveling: no usable action this tick")
+    end
+
     return false
 end
 
@@ -1876,6 +2105,25 @@ function AC:DruidRotation()
     local mana = UnitPower("player", 0)
     local maxMana = UnitPowerMax("player", 0)
     local manaPercent = (maxMana > 0) and (mana/maxMana*100) or 100
+    local isFeralBuild = self:IsFeralBuild()
+    local feralRole = nil
+
+    if level < 10 then
+        return self:LevelingDruidRotation()
+    end
+
+    if isFeralBuild then
+        feralRole = self:DetermineFeralRole()
+        if inCombat then
+            if not self.druidFeralCombatRole then
+                self.druidFeralCombatRole = feralRole
+                DruidDebug("Feral combat role locked: " .. tostring(feralRole))
+            end
+            feralRole = self.druidFeralCombatRole or feralRole
+        else
+            self.druidFeralCombatRole = nil
+        end
+    end
     
     -- Emergency Lifeblood (Herbalism profession ability) at 50% health
     if inCombat and self:UseLifeblood() then return true end
@@ -1918,12 +2166,16 @@ function AC:DruidRotation()
         
         -- RESEARCH: Feral stealth opener
         if hasTarget and not UnitAffectingCombat("target") then
-            if spec == "Feral" and level >= 20 then
-                -- Cat stealth opener
+            if isFeralBuild and feralRole == "bear" then
+                local desiredBearForm = self:KnowsSpell(S.DireBearForm) and S.DireBearForm or S.BearForm
+                if currentForm ~= AC.DruidForms.BEAR then
+                    if self:ShiftToForm(desiredBearForm) then return true end
+                end
+            elseif isFeralBuild and feralRole == "cat" then
                 if currentForm ~= AC.DruidForms.CAT then
                     if self:ShiftToForm(S.CatForm) then return true end
                 end
-                if currentForm == AC.DruidForms.CAT then
+                if level >= 20 and currentForm == AC.DruidForms.CAT then
                     if not self:HasBuff("player", S.Prowl) and self:IsUsableSpell(S.Prowl) then
                         CastSpellByName(S.Prowl)
                         DruidDebug("Prowl for stealth opener")
@@ -1962,9 +2214,8 @@ function AC:DruidRotation()
     -- In combat rotation dispatch based on spec
     if spec == "Balance" then
         return self:BalanceDruidRotation()
-    elseif spec == "Feral" then
-        -- Decide between cat and bear based on form or group role
-        if currentForm == AC.DruidForms.BEAR or (IsInGroup() and self:IsTank("player")) then
+    elseif isFeralBuild then
+        if feralRole == "bear" then
             return self:FeralBearTankRotation()
         else
             return self:FeralCatDpsRotation()
@@ -1972,15 +2223,7 @@ function AC:DruidRotation()
     elseif spec == "Restoration" then
         return self:RestorationDruidRotation()
     else
-        -- Leveling rotation dispatch
-        if level < 10 then
-            -- Basic caster rotation
-            if hasTarget and self:IsUsableSpell(S.Wrath) and not UnitCastingInfo("player") then
-                CastSpellByName(S.Wrath, "target")
-                DruidDebug("Leveling: Wrath")
-                return true
-            end
-        elseif level < 20 then
+        if level < 20 then
             -- Bear form tanking
             return self:FeralBearTankRotation()
         else
@@ -1999,6 +2242,7 @@ end
 function AC:InitDruidRotations()
     self.rotations = self.rotations or {}
     self.rotations["DRUID"] = {}
+    self.druidFeralCombatRole = nil
     
     self.rotations["DRUID"]["Balance"] = function(s) return s:DruidRotation() end
     self.rotations["DRUID"]["Feral"] = function(s) return s:DruidRotation() end
@@ -2015,4 +2259,20 @@ function AC:InitDruidRotations()
     DruidDebug("|cFF32CD32Restoration:|r HoT optimization + emergency healing priorities")
     DruidDebug("|cFFFFD700Research:|r Based on WotLK 3.3.5a guides from Icy Veins, Warcraft Tavern")
     DruidDebug("|cFFDDA0DDFeatures:|r Stealth openers, travel forms, defensive cooldowns")
+
+    if self.RegisterEvent then
+    self:RegisterEvent("PLAYER_REGEN_ENABLED", function()
+            if self.druidFeralCombatRole then
+                self.druidFeralCombatRole = nil
+                DruidDebug("Feral combat role unlocked")
+            end
+        end)
+    end
+
+    if self.RegisterEvent then
+        self:RegisterEvent("PLAYER_TALENT_UPDATE", function()
+            self.druidTalentCache = nil
+            self.druidFeralCombatRole = nil
+        end)
+    end
 end
