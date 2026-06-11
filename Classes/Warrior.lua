@@ -124,6 +124,18 @@ local function Throttle(key, interval)
     return false
 end
 
+local function ArmsDebugState(key, message)
+    if not AC or not AC.debugMode then
+        return
+    end
+
+    AC.armsDebugState = AC.armsDebugState or {}
+    if AC.armsDebugState[key] ~= message then
+        AC.armsDebugState[key] = message
+        WarriorDebug(message)
+    end
+end
+
 function AC:IsAutoTargetSwitchAllowed()
     if not self:IsTankSpec() then
         return true
@@ -433,24 +445,52 @@ function AC:ThunderClapInRange()
     return self:IsInMeleeRange("target", true)
 end
 
--- Confirm at least one hostile is physically close enough to likely be hit by Thunder Clap.
-function AC:HasEnemyInThunderClapReach(maxNameplates)
+-- Count hostiles physically close enough to likely be hit by Thunder Clap.
+function AC:GetEnemiesInThunderClapReach(maxNameplates)
     maxNameplates = maxNameplates or 20
+    local count = 0
+    local processedGUIDs = {}
+    local groupSize = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
+    local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
 
-    if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target") and
-       CheckInteractDistance("target", 3) then
-        return true
+    local function addUnitInReach(unit, requireCombat)
+        if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+            return
+        end
+        if requireCombat and not UnitAffectingCombat(unit) then
+            return
+        end
+        if not CheckInteractDistance(unit, 3) then
+            return
+        end
+
+        local guid = UnitGUID(unit) or unit
+        if processedGUIDs[guid] then
+            return
+        end
+
+        processedGUIDs[guid] = true
+        count = count + 1
+    end
+
+    addUnitInReach("target", false)
+    addUnitInReach("focus", true)
+    addUnitInReach("mouseover", true)
+
+    for i = 1, groupSize do
+        addUnitInReach(unitPrefix .. i .. "target", true)
     end
 
     for i = 1, maxNameplates do
-        local unit = "nameplate" .. i
-        if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDeadOrGhost(unit) and
-           UnitAffectingCombat(unit) and CheckInteractDistance(unit, 3) then
-            return true
-        end
+        addUnitInReach("nameplate" .. i, true)
     end
 
-    return false
+    return count
+end
+
+-- Confirm at least one hostile is physically close enough to likely be hit by Thunder Clap.
+function AC:HasEnemyInThunderClapReach(maxNameplates)
+    return self:GetEnemiesInThunderClapReach(maxNameplates) >= 1
 end
 
 -- =============================================
@@ -2059,10 +2099,42 @@ function AC:TryArmsInterrupt(unit)
             WarriorDebug("Arms: Pummel interrupt")
             return true
         end
+    end
+
+    return false
+end
+
+function AC:TryFuryInterrupt(unit)
+    unit = unit or "target"
+
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) then
         return false
     end
 
-    WarriorDebug("Arms: Pummel skipped outside Berserker Stance")
+    local spellName, _, _, _, _, endTime, _, _, uninterruptible = UnitCastingInfo(unit)
+    if not spellName or uninterruptible then
+        return false
+    end
+
+    if not self:ShouldInterruptSpell(spellName) then
+        return false
+    end
+
+    local currentStance = self:GetCurrentStance()
+    if currentStance == 3 then
+        if self:TryInterrupt(S.Pummel, unit) then
+            WarriorDebug("Fury: Pummel interrupt")
+            return true
+        end
+        return false
+    end
+
+    local timeLeft = endTime and ((endTime / 1000) - GetTime()) or 0
+    if timeLeft >= 2.0 and self:KnowsSpell(S.BerserkerStance) and self:GetSpellCooldown(S.BerserkerStance) == 0 then
+        CastSpellByName(S.BerserkerStance)
+        WarriorDebug("Fury: Switching to Berserker for Pummel on " .. spellName)
+        return true
+    end
     return false
 end
 
@@ -2133,6 +2205,20 @@ function AC:ShouldDelayThunderClapAfterCharge()
     end
 
     -- Keep delaying while still moving during the tail of the charge window.
+    return self:IsPlayerMoving()
+end
+
+function AC:ShouldDelayProtectionThunderClapAfterCharge()
+    local lastCharge = self.lastWarriorChargeCastTime or 0
+    if lastCharge <= 0 then
+        return false
+    end
+
+    local elapsed = GetTime() - lastCharge
+    if elapsed > 1.0 then
+        return false
+    end
+
     return self:IsPlayerMoving()
 end
 
@@ -2278,7 +2364,7 @@ end
 
 -- Solo-only burst overlay for faster open-world kill speed.
 -- Kept separate from main proc priority so raid/group rotation is unaffected.
-function AC:TryArmsSoloBurst(rage, enemies, targetHP, msCooldown, overpowerReady, overpowerExpiring, suddenDeathReady, rendRemaining)
+function AC:TryArmsSoloBurst(rage, nearbyEnemies, targetHP, msCooldown, overpowerReady, overpowerExpiring, suddenDeathProc, rendRemaining)
     if IsInGroup() then
         return false
     end
@@ -2295,23 +2381,21 @@ function AC:TryArmsSoloBurst(rage, enemies, targetHP, msCooldown, overpowerReady
     end
 
     -- Never steal globals from urgent proc windows.
-    if overpowerExpiring or suddenDeathReady then
+    if overpowerExpiring or suddenDeathProc then
         return false
     end
 
     local highValueSoloTarget = classification == "rare" or classification == "elite" or
                                 classification == "rareelite" or classification == "worldboss" or
-                                enemies >= 2
+                                nearbyEnemies >= 2
 
     local freshTarget = targetHP >= 60
     if freshTarget and Throttle("ArmsSoloBurstTools", 20.0) then
         if self:UseTrinketsFixed() then
             WarriorDebug("Arms Solo Burst: Trinkets")
-            return true
         end
         if self:UseRacialsWarrior(true, false) then
             WarriorDebug("Arms Solo Burst: Offensive racial")
-            return true
         end
     end
 
@@ -2385,7 +2469,7 @@ function AC:ShouldMaintainProtectionThunderClap()
     local targetIsDangerous = classification == "elite" or classification == "rare" or
                               classification == "rareelite" or classification == "worldboss"
     local activelyTanking = UnitExists("targettarget") and UnitIsUnit("targettarget", "player")
-    local hasMultipleTargets = self:GetEnemyCount() >= 2
+    local hasMultipleTargets = self:GetEnemiesInThunderClapReach(20) >= 2
 
     -- Avoid random Thunder Clap on incidental combat targets; only maintain it on real tank targets.
     if not activelyTanking and not targetIsDangerous and not hasMultipleTargets then
@@ -2881,10 +2965,12 @@ function AC:ProtectionWarriorRotation()
 
         -- *** HIGH PRIORITY AoE ABILITIES (only if we have melee targets) ***
         -- INTEGRATION: Use enhanced enemy location detection for better AoE decisions
-        local nearbyEnemies = UnitExists("target") and self:GetEnemiesAtLocation("target", 10) or 0
+        local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
         local inMeleeRange = self:IsInMeleeRange("target", true)
         local targetInCombat = UnitExists("target") and UnitAffectingCombat("target")
-        WarriorDebug("AoE Check: nearbyEnemies=" .. nearbyEnemies .. " inMelee=" .. (inMeleeRange and "Y" or "N"))
+        if Throttle("ProtAOEDebug", 3.0) then
+            WarriorDebug("AoE Check: nearbyEnemies=" .. nearbyEnemies .. " inMelee=" .. (inMeleeRange and "Y" or "N"))
+        end
         if nearbyEnemies >= 2 and inMeleeRange then
             -- Thunder Clap FIRST (highest priority for initial AoE threat)
             -- FIXED: Only use Thunderclap when in proper melee range, not just when enemies are detectable
@@ -2894,14 +2980,14 @@ function AC:ProtectionWarriorRotation()
             local inRange = self:ThunderClapInRange()
             local hasTCReach = self:HasEnemyInThunderClapReach(20)
             local notOnCD = self:GetSpellCooldown(S.ThunderClap) == 0
-            local delayForCharge = self:ShouldDelayThunderClapAfterCharge()
+            local delayForCharge = self:ShouldDelayProtectionThunderClapAfterCharge()
             
             if canUseTC and hasRage and notThrottled and inRange and hasTCReach and notOnCD and not delayForCharge and targetInCombat then 
                 CastSpellByName(S.ThunderClap)
                 self:MarkAsOurTarget(UnitGUID("target"))
                 WarriorDebug("Prot: Thunder Clap (AoE threat priority)")
                 return true
-            elseif nearbyEnemies >= 2 then
+            elseif nearbyEnemies >= 2 and Throttle("ProtTCBlockedDebug", 3.0) then
                 -- DETAILED DEBUG: Find out exactly why Thunder Clap is blocked
                 local spellExists = GetSpellInfo(S.ThunderClap) ~= nil
                 local spellKnown = self:KnowsSpell(S.ThunderClap)
@@ -2958,7 +3044,7 @@ function AC:ProtectionWarriorRotation()
         local tcReadyAndInRange = nearbyEnemies >= 2 and inMeleeRange and self:IsUsableSpell(S.ThunderClap) and rage >= 20 and
                                   self:ThunderClapInRange() and self:HasEnemyInThunderClapReach(20) and
                                   self:GetSpellCooldown(S.ThunderClap) == 0
-        if not tcReadyAndInRange and self:ShouldUseDemoShout(enemies) and self:IsUsableSpell(S.DemoShout) and
+        if not tcReadyAndInRange and self:ShouldUseDemoShout(nearbyEnemies) and self:IsUsableSpell(S.DemoShout) and
            self:GetSpellCooldown(S.DemoShout) == 0 and rage >= 10 and Throttle("DemoShoutProt", 4) then
             CastSpellByName(S.DemoShout)
             self:MarkAsOurTarget(UnitGUID("target"))
@@ -3157,24 +3243,28 @@ function AC:ArmsWarriorRotation()
         -- Retaliation/Disarm are utility tools and are intentionally not used in DPS flow.
 
         local targetHP = self:GetTargetHealthPercent("target")
+        local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
         local msCooldown = self:GetSpellCooldown(S.MortalStrike)
         local opCooldown = self:GetSpellCooldown(S.Overpower)
         local rendRemaining = self:DebuffTimeRemaining("target", S.Rend)
         local tasteRemaining = self:BuffTimeRemaining("player", S.TasteForBlood)
         local hasTaste = self:HasBuff("player", S.TasteForBlood)
-        local overpowerReady = hasTaste and self:IsUsableSpell(S.Overpower) and opCooldown == 0
-        local overpowerExpiring = overpowerReady and tasteRemaining > 0 and tasteRemaining <= 2.0
-        local isCleaveContext = enemies >= 2
+        local overpowerReady = self:IsUsableSpell(S.Overpower) and opCooldown == 0
+        local overpowerExpiring = hasTaste and overpowerReady and tasteRemaining > 0 and tasteRemaining <= 2.0
+        local isCleaveContext = nearbyEnemies >= 2
         local sweepingReady = isCleaveContext
             and self:KnowsSpell(S.SweepingStrikes)
             and self:IsUsableSpell(S.SweepingStrikes)
             and self:GetSpellCooldown(S.SweepingStrikes) == 0
             and rage >= 30
-        local suddenDeathReady = self:HasBuff("player", S.SuddenDeath) and self:IsUsableSpell(S.Execute)
+        local suddenDeathProc = self:HasBuff("player", S.SuddenDeath)
+        local suddenDeathReady = suddenDeathProc and self:IsUsableSpell(S.Execute) and self:GetSpellCooldown(S.Execute) == 0 and rage >= 15
         local executePhase = targetHP < 20
-        local procLock = overpowerReady or overpowerExpiring or suddenDeathReady or executePhase
+        local procLock = overpowerReady or overpowerExpiring or suddenDeathProc or executePhase
 
-        if self:TryArmsSoloBurst(rage, enemies, targetHP, msCooldown, overpowerReady, overpowerExpiring, suddenDeathReady, rendRemaining) then
+        ArmsDebugState("CleaveContext", "Arms: Cleave context " .. (isCleaveContext and "ON" or "OFF") .. " (" .. nearbyEnemies .. " nearby)")
+
+        if self:TryArmsSoloBurst(rage, nearbyEnemies, targetHP, msCooldown, overpowerReady, overpowerExpiring, suddenDeathProc, rendRemaining) then
             return true
         end
         
@@ -3218,8 +3308,7 @@ function AC:ArmsWarriorRotation()
             return true
         end
 
-        local canUseSuddenDeath = suddenDeathReady and self:GetSpellCooldown(S.Execute) == 0 and rage >= 15
-        if canUseSuddenDeath and Throttle("ArmsSDExecuteFast", 0.25) then
+        if suddenDeathReady and Throttle("ArmsSDExecuteFast", 0.25) then
             local holdForOverpower = overpowerReady and rage < 20
             local holdForMS = msCooldown == 0 and rage < 30
             if not holdForOverpower and not holdForMS then
@@ -3228,10 +3317,12 @@ function AC:ArmsWarriorRotation()
                     return true
                 end
             end
+        elseif suddenDeathProc and rage < 15 and Throttle("ArmsSuddenDeathPool", 3.0) then
+            WarriorDebug("Arms: Pooling rage for Sudden Death (" .. rage .. ")")
         end
 
         if overpowerReady and rage >= 5 and self:CastSpell(S.Overpower, "target") then
-            WarriorDebug("Arms: Overpower (Taste for Blood)")
+            WarriorDebug("Arms: Overpower (" .. (hasTaste and "Taste for Blood" or "usable proc") .. ")")
             return true
         end
 
@@ -3252,16 +3343,18 @@ function AC:ArmsWarriorRotation()
         end
 
         -- Cleave/AoE support. Bladestorm is strongest after Rend is secure and no Overpower is expiring.
-        if enemies >= 2 and self:IsInMeleeRange("target") then
+        if isCleaveContext and self:IsInMeleeRange("target") then
             if self:KnowsSpell(S.ThunderClap) and self:IsUsableSpell(S.ThunderClap) and rage >= 20 and
                self:GetSpellCooldown(S.ThunderClap) == 0 and self:ThunderClapInRange() and
-               (not overpowerExpiring) and (not self:ShouldDelayThunderClapAfterCharge()) and Throttle("ArmsThunderClap", 0.5) then
+               self:HasEnemyInThunderClapReach(20) and
+               (not overpowerExpiring) and Throttle("ArmsThunderClap", 0.5) then
                 CastSpellByName(S.ThunderClap)
                 WarriorDebug("Arms: Thunder Clap AoE")
                 return true
             end
 
-            if enemies >= 3 and health > 35 and rendRemaining > 4 and not overpowerExpiring
+            if nearbyEnemies >= 3 and health > 35 and rendRemaining > 4 and not overpowerExpiring
+               and not suddenDeathProc and not executePhase
                and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm)
                and self:GetSpellCooldown(S.Bladestorm) == 0 then
                 CastSpellByName(S.Bladestorm)
@@ -3296,8 +3389,9 @@ function AC:ArmsWarriorRotation()
         end
 
         -- Single-target Bladestorm filler only when it will not clip core Arms buttons.
-        if enemies < 2 and health > 35 and (isElite or inGroup or targetHP > 50) and rendRemaining > 6
-           and not overpowerReady and msCooldown > 1.5 and self:KnowsSpell(S.Bladestorm)
+        if not isCleaveContext and health > 35 and (isElite or inGroup or targetHP > 50) and rendRemaining > 6
+           and not overpowerReady and not suddenDeathProc and not executePhase
+           and msCooldown > 1.5 and self:KnowsSpell(S.Bladestorm)
            and self:IsUsableSpell(S.Bladestorm) and self:GetSpellCooldown(S.Bladestorm) == 0
            and Throttle("ArmsBladestormSingle", 90) then
             CastSpellByName(S.Bladestorm)
@@ -3307,7 +3401,7 @@ function AC:ArmsWarriorRotation()
         
         -- Slam filler only when no core button is about to become available.
         if self:KnowsSpell(S.Slam) and self:IsUsableSpell(S.Slam) and rage >= 15 and not UnitCastingInfo("player") then
-            local opWindowSoon = hasTaste and opCooldown < 1.5
+            local opWindowSoon = overpowerReady or (hasTaste and opCooldown < 1.5)
             if (msCooldown > 1.5 or not self:KnowsSpell(S.MortalStrike)) and not opWindowSoon and rendRemaining > 2 then
                 CastSpellByName(S.Slam, "target")
                 WarriorDebug("Arms: Slam filler")
@@ -3329,7 +3423,7 @@ function AC:ArmsWarriorRotation()
             rage,
             {msCooldown, opCooldown},
             60
-        ) and not procLock and enemies < 2
+        ) and not procLock and not isCleaveContext
         if shouldDumpArms and QueueOnNextSwing(S.HeroicStrike, "Arms: Heroic Strike rage dump") then
             return true
         end
@@ -3381,9 +3475,15 @@ function AC:FuryWarriorRotation()
 
     local rendWeavePending = self.furyRendWeavePendingUntil > now and hasTarget and targetGUID == self.furyRendWeaveTargetGUID
     local preTargetHP = hasTarget and self:GetTargetHealthPercent("target") or 100
+    local preNearbyEnemies = hasTarget and self:GetEnemiesInThunderClapReach(20) or 0
+    local preTargetClassification = hasTarget and UnitClassification("target") or "normal"
+    local inGroup = IsInGroup()
+    local durableGroupTarget = preTargetClassification == "elite" or preTargetClassification == "rareelite" or
+                               preTargetClassification == "worldboss"
     local preBTCooldown = self:GetSpellCooldown(S.Bloodthirst)
     local preWWCooldown = self:GetSpellCooldown(S.Whirlwind)
     local shouldStartRendWeave = inCombat and hasTarget and level >= 30 and self:KnowsSpell(S.Rend)
+        and inGroup and durableGroupTarget and preNearbyEnemies < 2
         and not rendWeavePending
         and (now - self.furyRendWeaveLastAttempt) > 12
         and not self:HasDebuff("target", S.Rend)
@@ -3454,6 +3554,8 @@ function AC:FuryWarriorRotation()
             end
         end
 
+        if self:TryFuryInterrupt("target") then return true end
+
         -- FIXED: Use defensive cooldowns when needed
         if self:UseWarriorDefensives() then return true end
         
@@ -3503,18 +3605,19 @@ function AC:FuryWarriorRotation()
 
         -- Retaliation is utility and intentionally not used in DPS flow.
 
-        -- AoE rotation - use enhanced enemy detection
-        local nearbyEnemies = UnitExists("target") and self:GetEnemiesAtLocation("target", 10) or 0
+        -- AoE rotation - use strict local hostile detection
+        local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
+        local isCleaveContext = nearbyEnemies >= 2
         -- Near-cap safety: queue dump early without consuming the GCD path.
         if rage >= 85 and Throttle("FuryNearCapDump", 0.2) then
-            if enemies >= 2 and nearbyEnemies >= 2 then
+            if isCleaveContext then
                 QueueOnNextSwing(S.Cleave, "Fury: Cleave near-cap dump")
             else
                 QueueOnNextSwing(S.HeroicStrike, "Fury: Heroic Strike near-cap dump")
             end
         end
 
-        if enemies >= 2 and nearbyEnemies >= 2 and self:IsInMeleeRange("target") then 
+        if isCleaveContext and self:IsInMeleeRange("target") then 
             if self:KnowsSpell(S.Whirlwind) and self:IsUsableSpell(S.Whirlwind) and rage >= 25 then
                 if self:CastSpell(S.Whirlwind, "target") then
                     WarriorDebug("Fury: Whirlwind AoE")
