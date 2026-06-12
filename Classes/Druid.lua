@@ -206,7 +206,15 @@ end
 function AC:DetermineFeralRole()
     local preferred = self:GetFeralRolePreference()
     if preferred ~= "auto" then
+        if preferred == "cat" and not self:KnowsSpell(S.CatForm) then
+            return "bear"
+        end
         return preferred
+    end
+
+    -- Leveling safety: if Cat Form is not learned yet, the feral build must play as bear.
+    if not self:KnowsSpell(S.CatForm) then
+        return "bear"
     end
 
     if UnitAffectingCombat("player") and self.druidFeralCombatRole then
@@ -1146,15 +1154,19 @@ function AC:FeralBearTankRotation()
 
     -- Queue Maul proactively since it is an on-next-swing attack, not a normal GCD spender.
     if self:IsUsableSpell(S.Maul) and not IsCurrentSpell(S.Maul) then
-        local shouldQueueMaul = (enemies <= 1 and rage >= 30) or rage >= 45
+        local shouldQueueMaul
+        if UnitLevel("player") < 20 then
+            shouldQueueMaul = rage >= 14
+        else
+            shouldQueueMaul = (enemies <= 1 and rage >= 30) or rage >= 45
+        end
         if shouldQueueMaul then
             CastSpellByName(S.Maul, "target")
             DruidDebug("Bear: Queued Maul")
         end
     end
     
-    -- EPIC PRIORITY: Maintain combat buffs (especially Thorns on tank)
-    if self:CheckDruidCombatBuffs() then return true end
+    -- Combat rebuffs are disabled to avoid dropping out of Bear Form.
     
     -- Interrupt with Bash
     if UnitCastingInfo("target") and self:IsUsableSpell(S.Bash) and rage >= 10 then
@@ -1313,8 +1325,7 @@ function AC:RestorationDruidRotation()
     -- EPIC PRIORITY 0: Handle dispels first
     if self:HandleDispels() then return true end
     
-    -- EPIC PRIORITY 0.5: Maintain combat buffs (Mark of the Wild, Thorns)
-    if self:CheckDruidCombatBuffs() then return true end
+    -- Combat rebuffs are disabled to avoid shapeshift loss during combat.
     
     -- RESEARCH: Tree of Life form for healing (optional but beneficial)
     if self:KnowsSpell(S.TreeOfLife) then
@@ -1953,6 +1964,7 @@ end
 -- =============================================
 
 function AC:CheckDruidCombatBuffs()
+    if UnitAffectingCombat("player") then return false end
     if not Throttle("DruidCombatBuffs", 5) then return false end
     
     -- Get group units for combat rebuffing
@@ -2114,6 +2126,9 @@ function AC:DruidRotation()
 
     if isFeralBuild then
         feralRole = self:DetermineFeralRole()
+        if not self:KnowsSpell(S.CatForm) then
+            feralRole = "bear"
+        end
         if inCombat then
             if not self.druidFeralCombatRole then
                 self.druidFeralCombatRole = feralRole
@@ -2215,7 +2230,7 @@ function AC:DruidRotation()
     if spec == "Balance" then
         return self:BalanceDruidRotation()
     elseif isFeralBuild then
-        if feralRole == "bear" then
+        if feralRole == "bear" or not self:KnowsSpell(S.CatForm) then
             return self:FeralBearTankRotation()
         else
             return self:FeralCatDpsRotation()
