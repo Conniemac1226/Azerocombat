@@ -2527,15 +2527,17 @@ end
 
 function AC:ManageWarriorVigilance()
     if self:GetPlayerSpec() ~= "Protection" or not self:KnowsSpell(S.Vigilance) then return false end
-    if not IsInGroup() or GetNumRaidMembers() > 0 or GetNumPartyMembers() == 0 then return false end
+    if not IsInGroup() then return false end
     if not Throttle("WarriorVigilance", 8) then return false end
     if self:GetSpellCooldown(S.Vigilance) > 0 or not self:IsUsableSpell(S.Vigilance) then return false end
 
     self.warriorVigilance = self.warriorVigilance or {}
     local now = GetTime()
+    local inRaid = GetNumRaidMembers() > 0
 
     local function isValidVigilanceUnit(unit)
-        return UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsFriend("player", unit)
+        return UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsFriend("player", unit) and
+            not UnitIsUnit(unit, "player")
     end
 
     local function isVigilanceInRange(unit)
@@ -2543,21 +2545,46 @@ function AC:ManageWarriorVigilance()
         return (not ok) or range == nil or range == 1
     end
 
+    local function getGroupUnits()
+        local units = {}
+        if inRaid then
+            for i = 1, GetNumRaidMembers() do
+                units[#units + 1] = "raid" .. i
+            end
+        else
+            for i = 1, GetNumPartyMembers() do
+                units[#units + 1] = "party" .. i
+            end
+        end
+        return units
+    end
+
+    local groupUnits = getGroupUnits()
+    if #groupUnits == 0 then return false end
+
+    local function isEligibleRaidTank(unit)
+        return inRaid and isValidVigilanceUnit(unit) and self:IsTank(unit)
+    end
+
+    local function isPreferredVigilanceTarget(unit)
+        if not isValidVigilanceUnit(unit) then return false end
+        if not inRaid then return true end
+        return isEligibleRaidTank(unit)
+    end
+
     local function findUnitByGUID(guid)
         if not guid then return nil end
-        for i = 1, GetNumPartyMembers() do
-            local unit = "party" .. i
-            if isValidVigilanceUnit(unit) and UnitGUID(unit) == guid then
+        for _, unit in ipairs(groupUnits) do
+            if isPreferredVigilanceTarget(unit) and UnitGUID(unit) == guid then
                 return unit
             end
         end
         return nil
     end
 
-    -- If Vigilance is already visible on a party member, lock to that target.
-    for i = 1, GetNumPartyMembers() do
-        local unit = "party" .. i
-        if isValidVigilanceUnit(unit) and self:HasBuff(unit, S.Vigilance) then
+    -- If Vigilance is already visible on a valid group member, lock to that target.
+    for _, unit in ipairs(groupUnits) do
+        if isPreferredVigilanceTarget(unit) and self:HasBuff(unit, S.Vigilance) then
             self.warriorVigilance.guid = UnitGUID(unit)
             self.warriorVigilance.name = UnitName(unit)
             self.warriorVigilance.lastSeen = now
@@ -2584,18 +2611,31 @@ function AC:ManageWarriorVigilance()
     end
 
     local bestUnit = nil
-    local bestScore = -1
-    for i = 1, GetNumPartyMembers() do
-        local unit = "party" .. i
-        if isValidVigilanceUnit(unit) and isVigilanceInRange(unit) then
-            local score = 10
-            if not self:IsTankSpec(unit) then score = score + 30 end
-            if UnitAffectingCombat(unit) then score = score + 10 end
-            if UnitExists(unit .. "target") and UnitCanAttack("player", unit .. "target") then score = score + 10 end
+    if inRaid then
+        local raidTankUnits = {}
+        for _, unit in ipairs(groupUnits) do
+            if isEligibleRaidTank(unit) and isVigilanceInRange(unit) then
+                raidTankUnits[#raidTankUnits + 1] = unit
+            end
+        end
+        if #raidTankUnits == 1 then
+            bestUnit = raidTankUnits[1]
+        elseif #raidTankUnits > 1 then
+            bestUnit = raidTankUnits[math.random(#raidTankUnits)]
+        end
+    else
+        local bestScore = -1
+        for _, unit in ipairs(groupUnits) do
+            if isValidVigilanceUnit(unit) and isVigilanceInRange(unit) then
+                local score = 10
+                if not self:IsTankSpec(unit) then score = score + 30 end
+                if UnitAffectingCombat(unit) then score = score + 10 end
+                if UnitExists(unit .. "target") and UnitCanAttack("player", unit .. "target") then score = score + 10 end
 
-            if score > bestScore then
-                bestScore = score
-                bestUnit = unit
+                if score > bestScore then
+                    bestScore = score
+                    bestUnit = unit
+                end
             end
         end
     end
