@@ -650,7 +650,7 @@ function AC:CheckDruidBuffs()
         end
     end
     
-    -- EPIC THORNS PRIORITY: Check for tanks first, then self
+    -- Thorns: only self or the designated main tank
     if self:IsUsableSpell(S.Thorns) then
         -- In group: prioritize tanks for thorns
             if IsDruidInGroup() then
@@ -1868,95 +1868,35 @@ function AC:CheckDruidGroupBuffs()
         end
     end
     
-    -- EPIC PRIORITY 2: Thorns for melee DPS and tanks (MASSIVE DPS BOOST)
+    -- Thorns: only self or the designated main tank
     if self:IsUsableSpell(S.Thorns) and self:KnowsSpell(S.Thorns) then
-        -- Priority system for Thorns:
-        -- 1. Tanks (highest priority - they take the most hits)
-        -- 2. Melee DPS (rogues, warriors, enhancement shamans, feral druids)
-        -- 3. Hunters (for pet tanking and melee weaving)
-        -- 4. Self if no better targets
-        
-        local thornTargets = {}
-        
-        -- Analyze all group members for Thorns eligibility
-        for _, unit in ipairs(groupUnits) do
-            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) and
-               CheckInteractDistance(unit, 4) and not self:HasBuff(unit, S.Thorns) then
-                
-                local _, class = UnitClass(unit)
-                local priority = 0
-                local role = "unknown"
-                
-                -- EPIC THORNS PRIORITY SYSTEM
-                if self:IsTank(unit) then
-                    priority = 100 -- MAXIMUM PRIORITY - tanks take most hits
-                    role = "tank"
-                elseif class == "ROGUE" or class == "WARRIOR" then
-                    priority = 90 -- High priority melee DPS
-                    role = "melee dps"
-                elseif class == "DEATHKNIGHT" then
-                    priority = 85 -- Death Knights are always melee
-                    role = "melee dps"
-                elseif class == "SHAMAN" then
-                    priority = 80 -- Enhancement shamans benefit greatly
-                    role = "melee dps"
-                elseif class == "DRUID" then
-                    -- Check if feral (cat/bear form)
-                    if self:HasBuff(unit, S.CatForm) or self:HasBuff(unit, S.BearForm) or self:HasBuff(unit, S.DireBearForm) then
-                        priority = 85 -- Feral druids in melee forms
-                        role = "melee dps"
-                    else
-                        priority = 30 -- Caster druids (low priority)
-                        role = "caster"
-                    end
-                elseif class == "PALADIN" then
-                    -- Check if retribution (melee) or protection (tank)
-                    if self:IsTank(unit) then
-                        priority = 100 -- Tank priority
-                        role = "tank"
-                    else
-                        priority = 75 -- Assume retribution if not tank
-                        role = "melee dps"
-                    end
-                elseif class == "HUNTER" then
-                    priority = 60 -- Hunters benefit from pet tanking and melee weaving
-                    role = "ranged dps"
-                else
-                    priority = 20 -- Casters get low priority
-                    role = "caster"
-                end
-                
-                -- Add level-based priority adjustment
-                local level = UnitLevel(unit)
-                if level >= 70 then
-                    priority = priority + 10 -- Endgame characters get priority
-                end
-                
-                table.insert(thornTargets, {
-                    unit = unit,
-                    priority = priority,
-                    role = role,
-                    class = class,
-                    name = UnitName(unit) or unit
-                })
-            end
-        end
-        
-        -- Sort by priority (highest first)
-        table.sort(thornTargets, function(a, b)
-            return a.priority > b.priority
-        end)
-        
-        -- Apply Thorns to the highest priority target
-        if #thornTargets > 0 then
-            local target = thornTargets[1]
-            CastSpellByName(S.Thorns, target.unit)
-            DruidDebug("EPIC THORNS: " .. target.name .. " (" .. target.role .. ", " .. target.class .. ", priority: " .. target.priority .. ")")
+        local mainTankUnit = self:GetMainTankUnit()
+        if mainTankUnit and not UnitIsUnit(mainTankUnit, "player") and
+           CheckInteractDistance(mainTankUnit, 4) and not self:HasBuff(mainTankUnit, S.Thorns) then
+            CastSpellByName(S.Thorns, mainTankUnit)
+            DruidDebug("EPIC THORNS: " .. (UnitName(mainTankUnit) or mainTankUnit) .. " (MAIN TANK)")
             return true
         end
     end
     
+    if self:IsUsableSpell(S.Thorns) and self:KnowsSpell(S.Thorns) and not self:HasBuff("player", S.Thorns) then
+        CastSpellByName(S.Thorns, "player")
+        DruidDebug("EPIC THORNS: self")
+        return true
+    end
+
     return false
+end
+
+function AC:GetMainTankUnit()
+    for i = 1, 5 do
+        local unit = "maintank" .. i
+        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
+            return unit
+        end
+    end
+
+    return nil
 end
 
 -- =============================================
@@ -1994,36 +1934,20 @@ function AC:CheckDruidCombatBuffs()
         end
     end
     
-    -- EPIC COMBAT PRIORITY 2: Reapply Thorns on high-priority targets who lost it
+    -- Thorns: only self or the designated main tank
     if self:IsUsableSpell(S.Thorns) and self:KnowsSpell(S.Thorns) then
-        -- Find tanks and melee DPS who lost Thorns
-        for _, unit in ipairs(groupUnits) do
-            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) and
-               CheckInteractDistance(unit, 4) and not self:HasBuff(unit, S.Thorns) then
-                
-                local _, class = UnitClass(unit)
-                local needsThorns = false
-                
-                -- Priority reapplication for tanks and melee DPS
-                if self:IsTank(unit) then
-                    needsThorns = true -- Tanks always need Thorns
-                elseif class == "ROGUE" or class == "WARRIOR" or class == "DEATHKNIGHT" then
-                    needsThorns = true -- Pure melee classes
-                elseif class == "PALADIN" and not self:IsHealer(unit) then
-                    needsThorns = true -- Assume ret/prot paladin
-                elseif class == "DRUID" then
-                    -- Check if feral
-                    if self:HasBuff(unit, S.CatForm) or self:HasBuff(unit, S.BearForm) or self:HasBuff(unit, S.DireBearForm) then
-                        needsThorns = true
-                    end
-                end
-                
-                if needsThorns then
-                    CastSpellByName(S.Thorns, unit)
-                    DruidDebug("EPIC COMBAT REBUFF: Thorns on " .. (UnitName(unit) or unit) .. " (" .. class .. ")")
-                    return true
-                end
-            end
+        local mainTankUnit = self:GetMainTankUnit()
+        if mainTankUnit and not UnitIsUnit(mainTankUnit, "player") and
+           CheckInteractDistance(mainTankUnit, 4) and not self:HasBuff(mainTankUnit, S.Thorns) then
+            CastSpellByName(S.Thorns, mainTankUnit)
+            DruidDebug("EPIC COMBAT REBUFF: Thorns on " .. (UnitName(mainTankUnit) or mainTankUnit) .. " (MAIN TANK)")
+            return true
+        end
+
+        if not self:HasBuff("player", S.Thorns) then
+            CastSpellByName(S.Thorns, "player")
+            DruidDebug("EPIC COMBAT REBUFF: Thorns on self")
+            return true
         end
     end
     
