@@ -433,7 +433,13 @@ function AC:UseDruidDefensives(form)
         DruidDebug("Used health potion at " .. string.format("%.0f", health) .. "% health")
         return true
     end
-    
+
+    -- Bear-specific emergency racials act as an extra defensive layer on any-race servers.
+    if form == AC.DruidForms.BEAR and self:UseRacialsDruid(false, true) then
+        DruidDebug("Bear: emergency racial")
+        return true
+    end
+
     -- Barkskin (usable in all forms)
     if health < 50 and self:IsUsableSpell(S.Barkskin) then
         CastSpellByName(S.Barkskin)
@@ -632,8 +638,22 @@ end
 -- RESEARCH-BASED BUFF MANAGEMENT
 -- =============================================
 
+local function BuildDruidGroupUnitList()
+    local units = {}
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do
+            units[#units + 1] = "raid" .. i
+        end
+    elseif GetNumPartyMembers() > 0 then
+        for i = 1, GetNumPartyMembers() do
+            units[#units + 1] = "party" .. i
+        end
+    end
+    return units
+end
+
 function AC:CheckDruidBuffs()
-    if not Throttle("DruidBuffsOOC", 10) then return false end
+    if not Throttle("DruidBuffsOOC", 1.5) then return false end
     local inCombat = UnitAffectingCombat("player")
     if inCombat then return false end
     
@@ -1152,6 +1172,8 @@ function AC:FeralBearTankRotation()
     -- Defensive cooldowns
     if self:UseDruidDefensives(currentForm) then return true end
 
+    if self:HandleTankTargeting() then return true end
+
     -- Queue Maul proactively since it is an on-next-swing attack, not a normal GCD spender.
     if self:IsUsableSpell(S.Maul) and not IsCurrentSpell(S.Maul) then
         local shouldQueueMaul
@@ -1298,9 +1320,6 @@ function AC:FeralBearTankRotation()
         DruidDebug("EPIC THREAT: Swipe (filler threat)")
         return true
     end
-    
-    -- UNIVERSAL: Loose mob detection (only after all DPS abilities checked)
-    if self:HandleUniversalLooseMobs() then return true end
     
     return false
 end
@@ -1838,35 +1857,46 @@ end
 -- =============================================
 
 function AC:CheckDruidGroupBuffs()
-    if not Throttle("DruidGroupBuffs", 15) then return false end
+    if not Throttle("DruidGroupBuffs", 1.5) then return false end
     if UnitAffectingCombat("player") or IsMounted() then return false end
-    
-    -- Get group units
-    local groupUnits = {"player"}
-    if GetNumRaidMembers() > 0 then
-        for i = 1, GetNumRaidMembers() do
-            table.insert(groupUnits, "raid" .. i)
-        end
-    elseif GetNumPartyMembers() > 0 then
-        for i = 1, GetNumPartyMembers() do
-            table.insert(groupUnits, "party" .. i)
-        end
+
+    self.druidBuffScanState = self.druidBuffScanState or {}
+    local groupUnits = BuildDruidGroupUnitList()
+    local groupCount = #groupUnits
+    if groupCount == 0 then
+        self.druidBuffScanState.groupCursor = 1
+        return false
     end
-    
+
+    local cursor = self.druidBuffScanState.groupCursor or 1
+    if cursor > groupCount then
+        cursor = 1
+    end
+
+    local scanBudget = math.min(2, groupCount)
+
     -- EPIC PRIORITY 1: Mark of the Wild / Gift of the Wild
     local motwSpell = self:KnowsSpell(S.GiftOfTheWild) and S.GiftOfTheWild or S.MarkOfTheWild
-    for _, unit in ipairs(groupUnits) do
+    for offset = 0, scanBudget - 1 do
+        local index = cursor + offset
+        if index > groupCount then
+            index = index - groupCount
+        end
+
+        local unit = groupUnits[index]
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
             local hasMotW = self:HasBuff(unit, S.MarkOfTheWild) or self:HasBuff(unit, S.GiftOfTheWild) or
                            self:HasBuff(unit, "Blessing of Kings") -- Don't overwrite Kings
-            
             if not hasMotW and CheckInteractDistance(unit, 4) and self:IsUsableSpell(motwSpell) then
                 CastSpellByName(motwSpell, unit)
                 DruidDebug("EPIC GROUP BUFF: " .. motwSpell .. " on " .. (UnitName(unit) or unit))
+                self.druidBuffScanState.groupCursor = index % groupCount + 1
                 return true
             end
         end
     end
+
+    self.druidBuffScanState.groupCursor = (cursor + scanBudget - 1) % groupCount + 1
     
     -- Thorns: only self or the designated main tank
     if self:IsUsableSpell(S.Thorns) and self:KnowsSpell(S.Thorns) then
@@ -1900,71 +1930,70 @@ function AC:GetMainTankUnit()
 end
 
 -- =============================================
--- EPIC REBUFF SYSTEM (Combat Buff Maintenance)
--- =============================================
-
-function AC:CheckDruidCombatBuffs()
-    if UnitAffectingCombat("player") then return false end
-    if not Throttle("DruidCombatBuffs", 5) then return false end
-    
-    -- Get group units for combat rebuffing
-    local groupUnits = {"player"}
-    if GetNumRaidMembers() > 0 then
-        for i = 1, GetNumRaidMembers() do
-            table.insert(groupUnits, "raid" .. i)
-        end
-    elseif GetNumPartyMembers() > 0 then
-        for i = 1, GetNumPartyMembers() do
-            table.insert(groupUnits, "party" .. i)
-        end
-    end
-    
-    -- EPIC COMBAT PRIORITY 1: Rebuff Mark of the Wild on group members who died and were rezzed
-    local motwSpell = self:KnowsSpell(S.GiftOfTheWild) and S.GiftOfTheWild or S.MarkOfTheWild
-    for _, unit in ipairs(groupUnits) do
-        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
-            local hasMotW = self:HasBuff(unit, S.MarkOfTheWild) or self:HasBuff(unit, S.GiftOfTheWild) or
-                           self:HasBuff(unit, "Blessing of Kings") -- Don't overwrite Kings
-            
-            if not hasMotW and CheckInteractDistance(unit, 4) and self:IsUsableSpell(motwSpell) then
-                CastSpellByName(motwSpell, unit)
-                DruidDebug("EPIC COMBAT REBUFF: " .. motwSpell .. " on " .. (UnitName(unit) or unit))
-                return true
-            end
-        end
-    end
-    
-    -- Thorns: only self or the designated main tank
-    if self:IsUsableSpell(S.Thorns) and self:KnowsSpell(S.Thorns) then
-        local mainTankUnit = self:GetMainTankUnit()
-        if mainTankUnit and not UnitIsUnit(mainTankUnit, "player") and
-           CheckInteractDistance(mainTankUnit, 4) and not self:HasBuff(mainTankUnit, S.Thorns) then
-            CastSpellByName(S.Thorns, mainTankUnit)
-            DruidDebug("EPIC COMBAT REBUFF: Thorns on " .. (UnitName(mainTankUnit) or mainTankUnit) .. " (MAIN TANK)")
-            return true
-        end
-
-        if not self:HasBuff("player", S.Thorns) then
-            CastSpellByName(S.Thorns, "player")
-            DruidDebug("EPIC COMBAT REBUFF: Thorns on self")
-            return true
-        end
-    end
-    
-    return false
-end
-
--- =============================================
 -- EPIC RACIAL SYSTEM
 -- =============================================
 
 function AC:UseRacialsDruid(burst, emergency)
-    if not Throttle("DruidRacials", 3) then return false end
+    local throttleKey = emergency and "DruidRacialsEmergency" or "DruidRacials"
+    local throttleInterval = emergency and 1.0 or 3.0
+    if not Throttle(throttleKey, throttleInterval) then return false end
     local _, race = UnitRace("player")
     race = string.upper(race)
     local health = self:GetPlayerHealthPercent()
     local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
     local inCombat = UnitAffectingCombat("player")
+
+    local function getPlayerDebuffState()
+        local state = {
+            poison = false,
+            disease = false,
+            bleed = false,
+            fear = false,
+            charm = false,
+            sleep = false,
+            stun = false,
+            root = false,
+            snare = false,
+            slow = false,
+        }
+
+        for i = 1, 16 do
+            local debuffName, _, _, _, debuffType = UnitDebuff("player", i)
+            if not debuffName then break end
+
+            local lowerName = string.lower(debuffName)
+            if debuffType == "Poison" then state.poison = true end
+            if debuffType == "Disease" then state.disease = true end
+
+            if lowerName:find("bleed") or lowerName:find("rend") or lowerName:find("rake") or
+               lowerName:find("rip") or lowerName:find("lacerate") then
+                state.bleed = true
+            end
+
+            if lowerName:find("fear") or lowerName:find("charm") or lowerName:find("sleep") then
+                state.fear = true
+                state.charm = true
+                state.sleep = true
+            end
+
+            if lowerName:find("stun") or lowerName:find("polymorph") or lowerName:find("incapacitate") then
+                state.stun = true
+            end
+
+            if lowerName:find("root") then
+                state.root = true
+            end
+
+            if lowerName:find("snare") or lowerName:find("slow") or lowerName:find("cripple") then
+                state.snare = true
+                state.slow = true
+            end
+        end
+
+        return state
+    end
+
+    local debuffs = emergency and getPlayerDebuffState() or nil
     
     -- Offensive racials
     if burst and inCombat then
@@ -1988,41 +2017,45 @@ function AC:UseRacialsDruid(burst, emergency)
             DruidDebug("Racial: War Stomp")
             return true
         end
-        if race == "NIGHTELF" and self:IsUsableSpell(S.Shadowmeld) then
-            CastSpellByName(S.Shadowmeld)
-            DruidDebug("Racial: Shadowmeld")
-            return true
-        end
-        if race == "UNDEAD" and self:IsUsableSpell(S.WillOfTheForsaken) then
-            CastSpellByName(S.WillOfTheForsaken)
-            DruidDebug("Racial: Will of the Forsaken")
-            return true
-        end
+
         if race == "DWARF" and self:IsUsableSpell(S.Stoneform) then
-            CastSpellByName(S.Stoneform)
-            DruidDebug("Racial: Stoneform")
-            return true
+            if debuffs and (debuffs.poison or debuffs.disease or debuffs.bleed or health < 35) then
+                CastSpellByName(S.Stoneform)
+                DruidDebug("Racial: Stoneform")
+                return true
+            end
         end
+
+        if race == "UNDEAD" and self:IsUsableSpell(S.WillOfTheForsaken) then
+            if debuffs and (debuffs.fear or debuffs.charm or debuffs.sleep) then
+                CastSpellByName(S.WillOfTheForsaken)
+                DruidDebug("Racial: Will of the Forsaken")
+                return true
+            end
+        end
+
         if race == "GNOME" and self:IsUsableSpell(S.EscapeArtist) then
-            CastSpellByName(S.EscapeArtist)
-            DruidDebug("Racial: Escape Artist")
-            return true
+            if debuffs and (debuffs.root or debuffs.snare or debuffs.slow) then
+                CastSpellByName(S.EscapeArtist)
+                DruidDebug("Racial: Escape Artist")
+                return true
+            end
         end
+
+        if race == "HUMAN" and self:IsUsableSpell(S.EveryManForHimself) then
+            if debuffs and (debuffs.stun or debuffs.fear or debuffs.charm or debuffs.sleep) then
+                CastSpellByName(S.EveryManForHimself)
+                DruidDebug("Racial: Every Man for Himself")
+                return true
+            end
+        end
+
         if race == "DRAENEI" and health < 70 and self:IsUsableSpell(S.GiftOfTheNaaru) then
             CastSpellByName(S.GiftOfTheNaaru, "player")
             DruidDebug("Racial: Gift of the Naaru")
             return true
         end
-        if race == "BLOODELF" and manaPercent < 80 and self:IsUsableSpell(S.ArcaneTorrent) then
-            CastSpellByName(S.ArcaneTorrent)
-            DruidDebug("Racial: Arcane Torrent")
-            return true
-        end
-        if race == "HUMAN" and self:IsUsableSpell(S.EveryManForHimself) then
-            CastSpellByName(S.EveryManForHimself)
-            DruidDebug("Racial: Every Man for Himself")
-            return true
-        end
+
     end
     
     return false

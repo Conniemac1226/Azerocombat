@@ -801,6 +801,7 @@ AC.TankAbilities = {
         taunt = "Taunt",
         aoe_taunt = "Challenging Shout", 
         threat_abilities = {"Shield Slam", "Revenge", "Devastate", "Sunder Armor", "Thunder Clap"},
+        gap_closers = {"Charge", "Intercept"},
         tank_stance = function() 
             -- Defensive Stance = form 2 in WotLK
             return GetShapeshiftForm() == 2 
@@ -837,6 +838,7 @@ AC.TankAbilities = {
         pull_taunt = "Death Grip", -- Unique pull + taunt
         aoe_threat = "Death and Decay", -- AoE threat, not taunt
         threat_abilities = {"Icy Touch", "Rune Strike", "Death and Decay"},
+        gap_closers = {"Death Grip"},
         tank_stance = function() 
             -- Check for Frost Presence buff
             for i = 1, 40 do
@@ -903,6 +905,446 @@ function AC:IsTankSpec(unit)
     
     return false
 end
+
+function AC:IsAutoTargetSwitchAllowed()
+    if not self:IsTankSpec() then
+        return true
+    end
+
+    return self:GetGroupSize() <= 5
+end
+
+function AC:GetTankAbilitiesForUnit(unit)
+    unit = unit or "player"
+    local _, class = UnitClass(unit)
+    return class and self.TankAbilities[class] or nil
+end
+
+function AC:GetTankAbilitiesForPlayer()
+    return self:GetTankAbilitiesForUnit("player")
+end
+
+function AC:IsInSpellRangeSafe(spellName, unit)
+    if not spellName or not UnitExists(unit) then return false end
+    local ok, result = pcall(IsSpellInRange, spellName, unit)
+    return ok and result == 1
+end
+
+function AC:IsInMeleeRange(unit, strict)
+    unit = unit or "target"
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+        return false
+    end
+
+    local _, class = UnitClass("player")
+    local classMeleeSpells = {
+        WARRIOR = {"Shield Slam", "Revenge", "Devastate", "Heroic Strike", "Mortal Strike", "Bloodthirst"},
+        PALADIN = {"Hammer of the Righteous", "Shield of Righteousness", "Crusader Strike"},
+        DRUID = {"Maul", "Mangle (Bear)", "Swipe (Bear)", "Lacerate"},
+        DEATHKNIGHT = {"Heart Strike", "Blood Strike", "Plague Strike", "Rune Strike"},
+    }
+
+    local spells = classMeleeSpells[class]
+    if spells then
+        local sawValidRangeResult = false
+        for _, spellName in ipairs(spells) do
+            if self:KnowsSpell(spellName) or self:IsUsableSpell(spellName) then
+                local ok, inRange = pcall(IsSpellInRange, spellName, unit)
+                if ok and inRange ~= nil then
+                    sawValidRangeResult = true
+                    if inRange == 1 then
+                        return true
+                    end
+                end
+            end
+        end
+
+        if sawValidRangeResult then
+            return false
+        end
+    end
+
+    if strict then
+        return false
+    end
+
+    local success, result = pcall(CheckInteractDistance, unit, 3)
+    return success and result or false
+end
+
+function AC:GetTankMovementAbility(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+        return nil
+    end
+
+    local _, class = UnitClass("player")
+    if class == "WARRIOR" then
+        if self:KnowsSpell("Charge") and self:IsUsableSpell("Charge") and self:GetSpellCooldown("Charge") == 0 and
+           not UnitAffectingCombat("player") and self:IsInSpellRangeSafe("Charge", unit) then
+            return "Charge"
+        end
+
+        if self:KnowsSpell("Intercept") and self:IsUsableSpell("Intercept") and self:GetSpellCooldown("Intercept") == 0 and
+           ((self.HasWarbringerTalent and self:HasWarbringerTalent()) or (self.GetCurrentStance and self:GetCurrentStance() == 3)) and
+           self:IsInSpellRangeSafe("Intercept", unit) then
+            return "Intercept"
+        end
+    elseif class == "DEATHKNIGHT" then
+        if self:KnowsSpell("Death Grip") and self:IsUsableSpell("Death Grip") and self:GetSpellCooldown("Death Grip") == 0 and
+           self:IsInSpellRangeSafe("Death Grip", unit) then
+            return "Death Grip"
+        end
+    end
+
+    return nil
+end
+
+function AC:GetTankTargetPriority(unit)
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDead(unit) then
+        return 0
+    end
+
+    local priority = 0
+    local hp = self:GetTargetHealthPercent(unit)
+    local classification = UnitClassification(unit)
+    local level = UnitLevel(unit)
+    local playerLevel = UnitLevel("player")
+    local inMeleeRange = self:IsInMeleeRange(unit)
+    local movementAbility = self:GetTankMovementAbility(unit)
+    local abilities = self:GetTankAbilitiesForPlayer()
+
+    priority = 100 - hp
+
+    if inMeleeRange then
+        priority = priority + 100
+    else
+        if movementAbility then
+            priority = priority + 18
+        elseif abilities and abilities.taunt and self:IsInSpellRangeSafe(abilities.taunt, unit) then
+            priority = priority + 20
+        elseif abilities and abilities.pull_taunt and self:IsInSpellRangeSafe(abilities.pull_taunt, unit) then
+            priority = priority + 20
+        else
+            priority = priority - 200
+        end
+    end
+
+    if classification == "elite" then
+        priority = priority + 25
+    elseif classification == "rare" or classification == "rareelite" then
+        priority = priority + 35
+    elseif classification == "worldboss" then
+        priority = priority + 50
+    end
+
+    local levelDiff = level - playerLevel
+    if levelDiff > 2 then
+        priority = priority + 15
+    elseif levelDiff < -3 then
+        priority = priority - 20
+    end
+
+    local unitTarget = unit .. "target"
+    if UnitExists(unitTarget) then
+        if UnitIsUnit(unitTarget, "player") then
+            priority = priority + 30
+        elseif UnitIsFriend("player", unitTarget) then
+            local _, targetClass = UnitClass(unitTarget)
+            if targetClass == "PRIEST" or targetClass == "PALADIN" or
+               targetClass == "SHAMAN" or targetClass == "DRUID" then
+                priority = priority + 40
+            else
+                priority = priority + 25
+            end
+        end
+    end
+
+    if UnitCastingInfo(unit) then
+        priority = priority + 20
+    end
+
+    local unitGUID = UnitGUID(unit)
+    if unitGUID and self.expectedThreatTargets and self.expectedThreatTargets[unitGUID] then
+        local timeSinceMarked = GetTime() - self.expectedThreatTargets[unitGUID]
+        if timeSinceMarked < 15 then
+            priority = priority + 35
+        end
+    end
+
+    if self.lastTauntTarget and unitGUID == self.lastTauntTarget then
+        local timeSinceTaunt = GetTime() - (self.lastTauntTime or 0)
+        if timeSinceTaunt < 15 then
+            priority = priority + 50
+        end
+    end
+
+    return math.max(priority, 0)
+end
+
+function AC:FindBestTankTarget()
+    if not self:Throttle("FindBestTankTarget", 0.2) then
+        return UnitExists("target") and "target" or nil, self:GetTankTargetPriority("target")
+    end
+
+    local bestTarget = nil
+    local highestPriority = 0
+    local currentTarget = UnitExists("target") and "target" or nil
+    local currentInMelee = currentTarget and self:IsInMeleeRange(currentTarget)
+
+    if currentTarget and UnitCanAttack("player", currentTarget) and not UnitIsDead(currentTarget) then
+        local currentPriority = self:GetTankTargetPriority(currentTarget)
+        if currentInMelee then
+            currentPriority = currentPriority + 40
+        end
+        highestPriority = currentPriority
+        bestTarget = currentTarget
+    end
+
+    local candidates = {}
+    local seenGUIDs = {}
+
+    for i = 1, 20 do
+        local unit = "nameplate" .. i
+        if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) then
+            if not currentTarget or not UnitIsUnit(unit, currentTarget) then
+                local guid = UnitGUID(unit)
+                if guid and not seenGUIDs[guid] then
+                    seenGUIDs[guid] = true
+                    candidates[#candidates + 1] = {unit = unit, priority = self:GetTankTargetPriority(unit), name = UnitName(unit)}
+                end
+            end
+        end
+    end
+
+    if IsInGroup() then
+        local groupSize = math.min(self:GetGroupSize(), 40)
+        local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
+
+        for i = 1, groupSize do
+            local groupTarget = unitPrefix .. i .. "target"
+            if UnitExists(groupTarget) and UnitCanAttack("player", groupTarget) and not UnitIsDead(groupTarget) then
+                if not currentTarget or not UnitIsUnit(groupTarget, currentTarget) then
+                    local guid = UnitGUID(groupTarget)
+                    if guid and not seenGUIDs[guid] then
+                        seenGUIDs[guid] = true
+                        local priority = self:GetTankTargetPriority(groupTarget)
+                        priority = priority + 15
+                        if self:IsTankSpec(unitPrefix .. i) then
+                            priority = priority + 25
+                        end
+                        candidates[#candidates + 1] = {unit = groupTarget, priority = priority, name = UnitName(groupTarget)}
+                    end
+                end
+            end
+        end
+    end
+
+    if self.combatEnemies then
+        for guid, data in pairs(self.combatEnemies) do
+            if GetTime() - data.lastSeen <= 3 then
+                for i = 1, 20 do
+                    local unit = "nameplate" .. i
+                    if UnitExists(unit) and UnitGUID(unit) == guid then
+                        if not currentTarget or not UnitIsUnit(unit, currentTarget) then
+                            if not seenGUIDs[guid] then
+                                seenGUIDs[guid] = true
+                                candidates[#candidates + 1] = {unit = unit, priority = self:GetTankTargetPriority(unit) + 10, name = UnitName(unit)}
+                            end
+                        end
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    for _, candidate in ipairs(candidates) do
+        local candidateInMelee = self:IsInMeleeRange(candidate.unit)
+        local canReachCandidate = candidateInMelee or self:GetTankMovementAbility(candidate.unit) ~= nil
+
+        if canReachCandidate then
+            if candidateInMelee and not currentInMelee then
+                candidate.priority = candidate.priority + 100
+            elseif not candidateInMelee and currentInMelee then
+                if candidate.priority < (highestPriority + 50) then
+                    -- skip
+                elseif candidate.priority - highestPriority >= 75 and candidate.priority > highestPriority then
+                    highestPriority = candidate.priority
+                    bestTarget = candidate.unit
+                end
+            elseif candidate.priority > highestPriority then
+                highestPriority = candidate.priority
+                bestTarget = candidate.unit
+            end
+        end
+    end
+
+    return bestTarget, highestPriority
+end
+
+function AC:ShouldSwitchTankTarget()
+    if not UnitExists("target") then return true end
+    if not self:IsAutoTargetSwitchAllowed() and UnitCanAttack("player", "target") and not UnitIsDead("target") then
+        return false
+    end
+
+    local currentTarget = "target"
+    local currentInMelee = self:IsInMeleeRange(currentTarget)
+    local currentPriority = self:GetTankTargetPriority(currentTarget)
+
+    if UnitCanAttack("player", currentTarget) and not UnitIsDead(currentTarget) then
+        local bestTarget, bestPriority = self:FindBestTankTarget()
+        if bestTarget and not UnitIsUnit(bestTarget, currentTarget) then
+            local bestInMelee = self:IsInMeleeRange(bestTarget)
+            if currentInMelee then
+                if not bestInMelee and bestPriority >= 200 then
+                    local threatTarget = bestTarget .. "target"
+                    if UnitExists(threatTarget) and UnitIsFriend("player", threatTarget) and not UnitIsUnit(threatTarget, "player") then
+                        return true
+                    end
+                end
+                return false
+            end
+
+            if bestInMelee then
+                return true
+            end
+
+            if bestPriority > currentPriority + 50 then
+                return true
+            end
+        end
+        return false
+    end
+
+    return true
+end
+
+function AC:UpdateTankTargeting()
+    if not UnitAffectingCombat("player") then return false end
+    if not self:Throttle("TankTargeting", 0.5) then return false end
+
+    if self:ShouldSwitchTankTarget() then
+        local bestTarget, priority = self:FindBestTankTarget()
+        if bestTarget then
+            local oldTarget = UnitExists("target") and UnitName("target") or "None"
+            TargetUnit(bestTarget)
+            self:Debug("Tank target switch: " .. oldTarget .. " -> " .. (UnitName("target") or "Unknown") .. " (Priority: " .. priority .. ")")
+            self:MarkAsOurTarget(UnitGUID("target"))
+            return true
+        end
+    end
+
+    return false
+end
+
+function AC:HandleTankTargeting()
+    if not self:IsTankSpec() then return false end
+    if self:HandleTauntedLooseMobGapClosing() then return true end
+
+    if self:HandleUniversalLooseMobs() then return true end
+
+    if UnitAffectingCombat("player") and self:UpdateTankTargeting() then
+        return true
+    end
+
+    local threatLoss = self.DetectThreatLoss and self:DetectThreatLoss() or nil
+    if threatLoss and threatLoss.priority and threatLoss.priority >= 150 then
+        if UnitExists(threatLoss.lostTarget) and UnitCanAttack("player", threatLoss.lostTarget) then
+            TargetUnit(threatLoss.lostTarget)
+            self.lastTargetSwitch = GetTime()
+            self:MarkAsOurTarget(UnitGUID("target"))
+            return true
+        end
+    end
+
+    return false
+end
+
+function AC:TrackTauntedLooseMob(guid, targetName)
+    if not guid then return end
+
+    self.tauntedLooseMobs = self.tauntedLooseMobs or {}
+    self.tauntedLooseMobs[guid] = {
+        name = targetName or "Unknown",
+        tauntTime = GetTime(),
+        needsGapCloser = true
+    }
+end
+
+function AC:CleanupTauntedLooseMobs()
+    if not self.tauntedLooseMobs then return end
+
+    local now = GetTime()
+    local toRemove = {}
+    for guid, data in pairs(self.tauntedLooseMobs) do
+        if now - data.tauntTime > 10 then
+            toRemove[#toRemove + 1] = guid
+        end
+    end
+
+    for _, guid in ipairs(toRemove) do
+        self.tauntedLooseMobs[guid] = nil
+    end
+end
+
+function AC:HandleTauntedLooseMobGapClosing()
+    if not self.tauntedLooseMobs or not UnitExists("target") then return false end
+
+    local targetGUID = UnitGUID("target")
+    local tauntedData = self.tauntedLooseMobs[targetGUID]
+    if not tauntedData or not tauntedData.needsGapCloser then
+        return false
+    end
+
+    local timeSinceTaunt = GetTime() - tauntedData.tauntTime
+    if timeSinceTaunt >= 8 then
+        tauntedData.needsGapCloser = false
+        return false
+    end
+
+    if self:IsInMeleeRange("target") then
+        tauntedData.needsGapCloser = false
+        return false
+    end
+
+    local movementAbility = self:GetTankMovementAbility("target")
+    if movementAbility then
+        CastSpellByName(movementAbility, "target")
+        tauntedData.needsGapCloser = false
+        self:MarkAsOurTarget(targetGUID)
+        if self.RecordUniversalTaunt then
+            self:RecordUniversalTaunt(targetGUID)
+        end
+        return true
+    end
+
+    tauntedData.needsGapCloser = false
+    return false
+end
+
+function AC:ShouldSkipTankRepeatTaunt(mobGUID, victimUnit)
+    if self.WasRecentlyUniversalTaunted then
+        local recentlyTaunted, elapsed = self:WasRecentlyUniversalTaunted(mobGUID, victimUnit)
+        if recentlyTaunted then
+            return true
+        end
+    end
+    return false
+end
+
+function AC:RecordTankTaunt(mobGUID)
+    if self.RecordUniversalTaunt then
+        self:RecordUniversalTaunt(mobGUID)
+    end
+end
+
+AC.SharedTrackTauntedLooseMob = AC.TrackTauntedLooseMob
+AC.SharedCleanupTauntedLooseMobs = AC.CleanupTauntedLooseMobs
+AC.SharedHandleTauntedLooseMobGapClosing = AC.HandleTauntedLooseMobGapClosing
+AC.SharedShouldSkipTankRepeatTaunt = AC.ShouldSkipTankRepeatTaunt
+AC.SharedRecordTankTaunt = AC.RecordTankTaunt
 
 -- Group utilities
 function AC:GetGroupSize()

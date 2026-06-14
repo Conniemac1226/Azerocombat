@@ -316,6 +316,8 @@ function AC:BloodDeathKnightRotation()
     
     if not hasTarget then return false end
     StartAttack()
+
+    if self:HandleTankTargeting() then return true end
     
     -- Emergency defensives
     if health < 30 then
@@ -442,9 +444,6 @@ function AC:BloodDeathKnightRotation()
         DeathKnightDebug("BLOOD: Horn of Winter (RP generation)")
         return true
     end
-    
-    -- UNIVERSAL: Loose mob detection (only after all DPS abilities checked)
-    if self:HandleUniversalLooseMobs() then return true end
     
     return false
 end

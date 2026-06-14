@@ -1140,6 +1140,8 @@ end
 -- UPDATED: Combat rotation that prioritizes judgement usage and uses new CastPaladinSpell function
 function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent, enemies)
     if spec == "Protection" then
+        if self:HandleTankTargeting() then return true end
+
         local ability, targetUnit = self:Protection969Rotation(level, UnitPower("player",0), manaPercent, enemies, hasTarget)
         if ability then
             if ability == "CAST_JUDGEMENT" then
@@ -1440,9 +1442,6 @@ function AC:PaladinRotation()
 
         local targetHP = UnitHealth("target") / UnitHealthMax("target") * 100
 
-        -- UNIVERSAL: Loose mob detection before normal threat fillers.
-        if spec == "Protection" and self:HandleUniversalLooseMobs() then return true end
-        
         -- Main DPS rotation FIRST - tanks need to be beasts with excellent DPS
         local rotationResult = self:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent, enemies)
         if rotationResult then return true end
