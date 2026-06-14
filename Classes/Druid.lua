@@ -121,6 +121,89 @@ local function DruidDebug(msg)
     end
 end
 
+-- Bear tank needs a stricter pack check than the shared enemy counter.
+-- Party/raid target scans are useful for general awareness, but they can
+-- inflate Swipe decisions on small pulls when other players are tab-targeting.
+function AC:GetBearThreatEnemyCount()
+    if not self:Throttle("BearThreatEnemyCountMain", 0.5) then
+        return self.lastBearThreatEnemyCount or 1
+    end
+
+    local count = 0
+    local processedGUIDs = {}
+    local detailedDebug = self.debugMode and self:Throttle("BearThreatEnemyCountDebug", 3.0)
+
+    if detailedDebug then
+        self:Debug("=== BEAR ENEMY COUNT START ===")
+    end
+
+    local function countUnit(unit, label)
+        if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDead(unit) then
+            return
+        end
+
+        local guid = UnitGUID(unit)
+        if not guid or processedGUIDs[guid] then
+            return
+        end
+
+        count = count + 1
+        processedGUIDs[guid] = true
+        if detailedDebug then
+            self:Debug(label .. ": " .. (UnitName(unit) or "Unknown"))
+        end
+    end
+
+    countUnit("target", "Target")
+    countUnit("focus", "Focus")
+    countUnit("targettarget", "TargetTarget")
+    countUnit("mouseover", "Mouseover")
+
+    if UnitExists("pet") then
+        countUnit("pettarget", "Pet target")
+    end
+
+    for i = 1, 40 do
+        local unit = "nameplate" .. i
+        if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) then
+            local guid = UnitGUID(unit)
+            if guid and not processedGUIDs[guid] and CheckInteractDistance(unit, 3) then
+                count = count + 1
+                processedGUIDs[guid] = true
+                if detailedDebug then
+                    self:Debug("Nearby nameplate: " .. (UnitName(unit) or "Unknown"))
+                end
+            end
+        end
+    end
+
+    local combatLogCount = 0
+    local now = GetTime()
+    for guid, data in pairs(self.combatEnemies or {}) do
+        if not processedGUIDs[guid] and (now - data.lastSeen) <= 3 then
+            count = count + 1
+            combatLogCount = combatLogCount + 1
+            processedGUIDs[guid] = true
+            if detailedDebug then
+                self:Debug("Combat log enemy: " .. (data.name or "Unknown"))
+            end
+        end
+    end
+
+    count = math.min(count, 10)
+    self.lastBearThreatEnemyCount = count
+
+    if detailedDebug then
+        self:Debug("=== BEAR ENEMY COUNT SUMMARY ===")
+        self:Debug("Total enemies: " .. count)
+        self:Debug("Combat log enemies: " .. combatLogCount)
+        self:Debug("Should use AoE: " .. (count >= 3 and "YES" or "NO"))
+        self:Debug("===============================")
+    end
+
+    return count
+end
+
 local function NormalizeFeralRole(role)
     if not role then return "auto" end
     role = string.lower(tostring(role))
@@ -1154,7 +1237,7 @@ function AC:FeralBearTankRotation()
     local currentForm = self:GetCurrentDruidForm()
     local rage = UnitPower("player", 1)
     local health = self:GetPlayerHealthPercent()
-    local enemies = self:GetEnemyCount()
+    local enemies = self:GetBearThreatEnemyCount()
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     local autoTauntAllowed = self:IsAutoTauntAllowed()
     
