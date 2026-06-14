@@ -1178,9 +1178,17 @@ function AC:FeralBearTankRotation()
     if self:IsUsableSpell(S.Maul) and not IsCurrentSpell(S.Maul) then
         local shouldQueueMaul
         if UnitLevel("player") < 20 then
-            shouldQueueMaul = rage >= 14
+            if enemies >= 3 then
+                shouldQueueMaul = rage >= 45
+            else
+                shouldQueueMaul = rage >= 14
+            end
         else
-            shouldQueueMaul = (enemies <= 1 and rage >= 30) or rage >= 45
+            if enemies >= 3 then
+                shouldQueueMaul = rage >= 45
+            else
+                shouldQueueMaul = (enemies <= 1 and rage >= 30) or rage >= 45
+            end
         end
         if shouldQueueMaul then
             CastSpellByName(S.Maul, "target")
@@ -1267,7 +1275,8 @@ function AC:FeralBearTankRotation()
     end
     
     -- EPIC PRIORITY 3: Advanced AoE threat management
-    if enemies >= 2 and self:IsUsableSpell(S.SwipeBear) and rage >= 15 then
+    -- With Glyph of Maul, 2-target cleave is covered by Maul, so Swipe starts at 3+.
+    if enemies >= 3 and self:IsUsableSpell(S.SwipeBear) and rage >= 15 then
         CastSpellByName(S.SwipeBear)
         DruidDebug("EPIC AoE THREAT: Swipe (" .. enemies .. " enemies)")
         return true
@@ -1315,7 +1324,7 @@ function AC:FeralBearTankRotation()
     end
     
     -- EPIC PRIORITY 7: Swipe as efficient filler threat
-    if self:IsUsableSpell(S.SwipeBear) and rage >= 15 then
+    if enemies >= 3 and self:IsUsableSpell(S.SwipeBear) and rage >= 15 then
         CastSpellByName(S.SwipeBear, "target")
         DruidDebug("EPIC THREAT: Swipe (filler threat)")
         return true

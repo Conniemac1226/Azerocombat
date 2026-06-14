@@ -736,6 +736,10 @@ function AC:GetBestAvailableSeal(spec, level, manaPercent, combatContext, enemie
         if self:CanUsePaladinSpell(S.SealCommand) then return S.SealCommand end
         if self:CanUsePaladinSpell(S.SealRighteousness) then return S.SealRighteousness end
     elseif spec == "Protection" then
+        -- Low-mana fallback: Wisdom keeps Protection stable before later mana-return tools are available.
+        if manaPercent < 40 and self:CanUsePaladinSpell(S.SealWisdom) then
+            return S.SealWisdom
+        end
         -- Seal of Command is the best snap-threat seal for short multi-target pulls if talented.
         if enemies >= 3 and self:CanUsePaladinSpell(S.SealCommand) then
             return S.SealCommand
@@ -1015,7 +1019,7 @@ function AC:GetProtectionNineSecondAbility(level, manaPercent, enemies, targetHP
     end
 
     local judgementToUse = nil
-    if manaPercent < 45 and level >= 12 and self:CanUsePaladinSpell(S.JudgementOfWisdom) then
+    if manaPercent < 60 and level >= 12 and self:CanUsePaladinSpell(S.JudgementOfWisdom) then
         judgementToUse = S.JudgementOfWisdom
     elseif level >= 12 and self:CanUsePaladinSpell(S.JudgementOfWisdom) then
         judgementToUse = S.JudgementOfWisdom
@@ -1870,6 +1874,15 @@ function AC:ManageManaEfficiency(spec, manaPercent, inCombat)
     end
     
     -- Avoid fighting the Protection threat seal logic in combat; use Divine Plea/Judgement instead.
+    if spec == "Protection" and inCombat and manaPercent < 40 and level >= 30 then
+        if self:CanUsePaladinSpell(S.SealWisdom) and not self:HasBuff("player", S.SealWisdom) then
+            if self:CastPaladinSpell(S.SealWisdom, "player") then
+                PaladinDebug("Protection mana sustain: switched to Seal of Wisdom")
+                return true
+            end
+        end
+    end
+
     if spec == "Protection" and not inCombat and manaPercent < 20 and level >= 30 then
         if self:CanUsePaladinSpell(S.SealWisdom) and not self:HasBuff("player", S.SealWisdom) then
             if self:CastPaladinSpell(S.SealWisdom, "player") then
