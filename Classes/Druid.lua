@@ -1228,6 +1228,24 @@ end
 -- RESEARCH-BASED FERAL BEAR TANK ROTATION
 -- =============================================
 
+local function GetBearMaulThreshold(level, enemies)
+    if enemies >= 3 then
+        return 45
+    end
+
+    if level < 20 then
+        return 14
+    end
+
+    -- Low-level bear has very few rage spenders, so let Maul come online as soon
+    -- as it is available and only ramp the threshold slowly with level.
+    return math.min(30, 10 + math.floor((level - 20) / 2))
+end
+
+local function GetBearSwipeThreshold(level)
+    return 15
+end
+
 function AC:FeralBearTankRotation()
     -- Initialize threat tracking variables
     self.expectedThreatTargets = self.expectedThreatTargets or {}
@@ -1235,6 +1253,7 @@ function AC:FeralBearTankRotation()
     self.lastTauntTarget = self.lastTauntTarget or ""
     
     local currentForm = self:GetCurrentDruidForm()
+    local level = UnitLevel("player")
     local rage = UnitPower("player", 1)
     local health = self:GetPlayerHealthPercent()
     local enemies = self:GetBearThreatEnemyCount()
@@ -1259,20 +1278,7 @@ function AC:FeralBearTankRotation()
 
     -- Queue Maul proactively since it is an on-next-swing attack, not a normal GCD spender.
     if self:IsUsableSpell(S.Maul) and not IsCurrentSpell(S.Maul) then
-        local shouldQueueMaul
-        if UnitLevel("player") < 20 then
-            if enemies >= 3 then
-                shouldQueueMaul = rage >= 45
-            else
-                shouldQueueMaul = rage >= 14
-            end
-        else
-            if enemies >= 3 then
-                shouldQueueMaul = rage >= 45
-            else
-                shouldQueueMaul = (enemies <= 1 and rage >= 30) or rage >= 45
-            end
-        end
+        local shouldQueueMaul = rage >= GetBearMaulThreshold(level, enemies)
         if shouldQueueMaul then
             CastSpellByName(S.Maul, "target")
             DruidDebug("Bear: Queued Maul")
@@ -1363,8 +1369,8 @@ function AC:FeralBearTankRotation()
     end
     
     -- EPIC PRIORITY 3: Advanced AoE threat management
-    -- With Glyph of Maul, 2-target cleave is covered by Maul, so Swipe starts at 3+.
-    if enemies >= 3 and self:IsUsableSpell(S.SwipeBear) and rage >= 15 then
+    -- Swipe is the primary AoE rage dump on 3+ targets, especially while leveling.
+    if enemies >= 3 and self:IsUsableSpell(S.SwipeBear) and rage >= GetBearSwipeThreshold(level) then
         CastSpellByName(S.SwipeBear)
         DruidDebug("EPIC AoE THREAT: Swipe (" .. enemies .. " enemies)")
         return true
@@ -1412,7 +1418,7 @@ function AC:FeralBearTankRotation()
     end
     
     -- EPIC PRIORITY 7: Swipe as efficient filler threat
-    if enemies >= 3 and self:IsUsableSpell(S.SwipeBear) and rage >= 15 then
+    if enemies >= 3 and self:IsUsableSpell(S.SwipeBear) and rage >= GetBearSwipeThreshold(level) then
         CastSpellByName(S.SwipeBear, "target")
         DruidDebug("EPIC THREAT: Swipe (filler threat)")
         return true
