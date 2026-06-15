@@ -1209,9 +1209,17 @@ function AC:DeathKnightAutoUtility()
     if inCombat and UnitExists("target") and UnitCanAttack("player", "target") then
         local distance = CheckInteractDistance("target", 3) and 5 or 25
         local isCasting = UnitCastingInfo("target") ~= nil
+        local canUseDeathGrip = true
+
+        if self:GetGroupSize() > 5 and UnitExists("targettarget") and UnitIsFriend("player", "targettarget") and not UnitIsUnit("targettarget", "player") then
+            canUseDeathGrip = self:IsRaidTauntSafeVictim("targettarget")
+            if not canUseDeathGrip then
+                DeathKnightDebug("BLOCKED raid Death Grip - target is on confirmed tank victim: " .. (UnitName("targettarget") or "Unknown"))
+            end
+        end
         
         -- Pull casters or distant enemies
-        if distance > 15 and distance <= 30 and self:IsUsableSpell(S.DeathGrip) and
+        if canUseDeathGrip and distance > 15 and distance <= 30 and self:IsUsableSpell(S.DeathGrip) and
            (isCasting or UnitClassification("target") == "rare" or UnitClassification("target") == "elite") then
             CastSpellByName(S.DeathGrip, "target")
             DeathKnightDebug("AUTO-UTILITY: Death Grip pull")

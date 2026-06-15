@@ -1340,6 +1340,11 @@ function AC:FeralBearTankRotation()
         -- CRITICAL FIX: Only Growl if we actually HAD threat on this target before
         -- Don't use Growl as a pull ability - that's wasteful!
         if not UnitIsUnit("target", "player") and UnitExists("targettarget") then
+            if self:GetGroupSize() > 5 and not self:IsRaidTauntSafeVictim("targettarget") then
+                DruidDebug("BLOCKED raid Growl - target is on confirmed tank victim: " .. (UnitName("targettarget") or "Unknown"))
+                return false
+            end
+
             local targetGUID = UnitGUID("target")
             local hadThreatBefore = (self.expectedThreatTargets and self.expectedThreatTargets[targetGUID]) or
                                   (self.lastTauntTarget == targetGUID and (GetTime() - self.lastTauntTime) < 15)

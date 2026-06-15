@@ -393,6 +393,11 @@ function AC:UseRangedAbilityAndReturn(ability, target)
         -- ENHANCED: Prevent wasteful Taunt usage - only for threat emergencies
         local targetTarget = target .. "target"
         if UnitExists(targetTarget) and UnitIsFriend("player", targetTarget) and not UnitIsUnit(targetTarget, "player") then
+            if self:GetGroupSize() > 5 and not self:IsRaidTauntSafeVictim(targetTarget) then
+                WarriorDebug("BLOCKED raid Taunt - target is on confirmed tank victim: " .. (UnitName(targetTarget) or "Unknown"))
+                return false
+            end
+
             -- Target is attacking an ally - legitimate Taunt use
             if self:IsInTauntRange(target) then
                 local targetGUID = UnitGUID(target)

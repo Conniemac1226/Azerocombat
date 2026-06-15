@@ -1379,15 +1379,39 @@ function AC:IsProtectedRaidTankVictim(victimUnit, mobGUID)
     end
 
     local _, victimClass = UnitClass(victimUnit)
-    local isTankClass = victimClass == "WARRIOR" or victimClass == "PALADIN" or
-                        victimClass == "DRUID" or victimClass == "DEATHKNIGHT"
-    if not isTankClass then
+    if not victimClass then
         return false
     end
 
-    local victimHP = UnitHealth(victimUnit) / UnitHealthMax(victimUnit) * 100
-    local hadThreatBefore = mobGUID and self.expectedThreatTargets and self.expectedThreatTargets[mobGUID]
-    return victimHP >= 35 and not hadThreatBefore
+    if victimClass == "WARRIOR" then
+        return self:HasBuff(victimUnit, "Defensive Stance")
+    end
+
+    if victimClass == "PALADIN" then
+        return self:HasBuff(victimUnit, "Righteous Fury")
+    end
+
+    if victimClass == "DRUID" then
+        return self:HasBuff(victimUnit, "Bear Form") or self:HasBuff(victimUnit, "Dire Bear Form")
+    end
+
+    if victimClass == "DEATHKNIGHT" then
+        return self:HasBuff(victimUnit, "Frost Presence")
+    end
+
+    return false
+end
+
+function AC:IsRaidTauntSafeVictim(victimUnit)
+    if not victimUnit or not UnitExists(victimUnit) then
+        return false
+    end
+
+    if self:GetGroupSize() <= 5 then
+        return true
+    end
+
+    return not self:IsProtectedRaidTankVictim(victimUnit)
 end
 
 -- Universal loose mob priority calculation
@@ -1508,19 +1532,23 @@ function AC:GetUniversalLooseMobs()
                     -- Check if mob is attacking group member but not us
                     local mobTarget = attacker .. "target"
                     if UnitExists(mobTarget) and UnitIsUnit(mobTarget, unit) and not UnitIsUnit(mobTarget, "player") then
-                        local priority = self:CalculateUniversalLooseMobPriority(attacker, unit)
-                        if priority > 100 then -- Lowered threshold for better loose mob detection
-                            local tauntAbility = self:CanTauntTarget(attacker, abilities)
-                            if tauntAbility then
-                                table.insert(looseMobs, {
-                                    unit = attacker,
-                                    priority = priority,
-                                    source = "group_scan",
-                                    tauntAbility = tauntAbility,
-                                    victimUnit = unit
-                                })
-                                self:Debug("Found loose mob via group scan: " .. (UnitName(attacker) or "Unknown") .. " attacking " .. (UnitName(unit) or "Unknown"))
+                        if self:IsRaidTauntSafeVictim(unit) then
+                            local priority = self:CalculateUniversalLooseMobPriority(attacker, unit)
+                            if priority > 100 then -- Lowered threshold for better loose mob detection
+                                local tauntAbility = self:CanTauntTarget(attacker, abilities)
+                                if tauntAbility then
+                                    table.insert(looseMobs, {
+                                        unit = attacker,
+                                        priority = priority,
+                                        source = "group_scan",
+                                        tauntAbility = tauntAbility,
+                                        victimUnit = unit
+                                    })
+                                    self:Debug("Found loose mob via group scan: " .. (UnitName(attacker) or "Unknown") .. " attacking " .. (UnitName(unit) or "Unknown"))
+                                end
                             end
+                        else
+                            self:Debug("Skipped raid tank victim for loose mob handling: " .. (UnitName(unit) or "Unknown"))
                         end
                     end
                 end
@@ -1535,30 +1563,34 @@ function AC:GetUniversalLooseMobs()
             local target = unit .. "target"
             if UnitExists(target) and UnitIsFriend("player", target) and not UnitIsUnit(target, "player") then
                 -- Enemy attacking friendly = potential loose mob
-                local priority = self:CalculateUniversalLooseMobPriority(unit, target)
-                if priority > 75 then
-                    local tauntAbility = self:CanTauntTarget(unit, abilities)
-                    if tauntAbility then
-                        -- Check if not already in list
-                        local exists = false
-                        for _, existing in ipairs(looseMobs) do
-                            if UnitIsUnit(existing.unit, unit) then
-                                exists = true
-                                break
+                if self:IsRaidTauntSafeVictim(target) then
+                    local priority = self:CalculateUniversalLooseMobPriority(unit, target)
+                    if priority > 75 then
+                        local tauntAbility = self:CanTauntTarget(unit, abilities)
+                        if tauntAbility then
+                            -- Check if not already in list
+                            local exists = false
+                            for _, existing in ipairs(looseMobs) do
+                                if UnitIsUnit(existing.unit, unit) then
+                                    exists = true
+                                    break
+                                end
+                            end
+                            
+                            if not exists then
+                                table.insert(looseMobs, {
+                                    unit = unit,
+                                    priority = priority,
+                                    source = "nameplate",
+                                    tauntAbility = tauntAbility,
+                                    victimUnit = target
+                                })
+                                self:Debug("Found loose mob via nameplate: " .. (UnitName(unit) or "Unknown") .. " attacking " .. (UnitName(target) or "Unknown"))
                             end
                         end
-                        
-                        if not exists then
-                            table.insert(looseMobs, {
-                                unit = unit,
-                                priority = priority,
-                                source = "nameplate",
-                                tauntAbility = tauntAbility,
-                                victimUnit = target
-                            })
-                            self:Debug("Found loose mob via nameplate: " .. (UnitName(unit) or "Unknown") .. " attacking " .. (UnitName(target) or "Unknown"))
-                        end
                     end
+                else
+                    self:Debug("Skipped raid tank victim for loose mob handling: " .. (UnitName(target) or "Unknown"))
                 end
             end
         end
@@ -1670,35 +1702,24 @@ function AC:HandleUniversalLooseMobs()
     
     -- Handle highest priority loose mob first
     local highestPriority = looseMobs[1]
-    
-    if highestPriority.priority > 350 and highestPriority.tauntAbility then
-        local mobGUID = UnitGUID(highestPriority.unit)
-        local victimUnit = highestPriority.victimUnit
-        local hadThreatBefore = (self.expectedThreatTargets and self.expectedThreatTargets[mobGUID]) or
-                              (self.lastTauntTarget == mobGUID and (GetTime() - self.lastTauntTime) < 15)
-        local protectedRaidTank = self:IsProtectedRaidTankVictim(victimUnit, mobGUID)
-        local recentlyTaunted, tauntElapsed = self:WasRecentlyUniversalTaunted(mobGUID, victimUnit)
-        if recentlyTaunted then
-            self:Debug("Skipped repeat universal taunt on " .. (UnitName(highestPriority.unit) or "Unknown") ..
-                       " (" .. string.format("%.1f", tauntElapsed) .. "s since last taunt)")
+    local function castSingleTargetTaunt(looseMob)
+        if not looseMob or not looseMob.tauntAbility then
             return false
         end
-        
-        if hadThreatBefore or not protectedRaidTank then
-            CastSpellByName(highestPriority.tauntAbility, highestPriority.unit)
-            self.lastTauntTime = GetTime()
-            self.lastTauntTarget = UnitGUID(highestPriority.unit)
-            self:RecordUniversalTaunt(mobGUID)
-            self:MarkAsOurTarget(UnitGUID(highestPriority.unit))
-            if self.TrackTauntedLooseMob then
-                self:TrackTauntedLooseMob(UnitGUID(highestPriority.unit), UnitName(highestPriority.unit))
+
+        if looseMob.tauntAbility == "Righteous Defense" then
+            if looseMob.victimUnit and UnitExists(looseMob.victimUnit) then
+                return self:CastSpell(looseMob.tauntAbility, looseMob.victimUnit)
             end
-            self:Debug("Universal HIGH PRIORITY taunt: " .. highestPriority.tauntAbility .. " on " .. (UnitName(highestPriority.unit) or "Unknown") .. " (Priority: " .. highestPriority.priority .. ")")
-            return true
-        else
-            self:Debug("Skipped universal Taunt on protected raid tank target: " .. (UnitName(highestPriority.unit) or "Unknown"))
             return false
         end
+
+        if not looseMob.unit or not UnitExists(looseMob.unit) then
+            return false
+        end
+
+        TargetUnit(looseMob.unit)
+        return self:CastSpell(looseMob.tauntAbility, "target")
     end
     
     -- Strategic AoE taunt usage - less restrictive but smart conditions
@@ -1769,31 +1790,21 @@ function AC:HandleUniversalLooseMobs()
                 return true
             end
         end
+    end
+    
+    if highestPriority.priority >= 200 and highestPriority.tauntAbility then
+        local mobGUID = UnitGUID(highestPriority.unit)
+        local victimUnit = highestPriority.victimUnit
+        local raidTauntSafe = self:IsRaidTauntSafeVictim(victimUnit)
+        local recentlyTaunted, tauntElapsed = self:WasRecentlyUniversalTaunted(mobGUID, victimUnit)
+        if recentlyTaunted then
+            self:Debug("Skipped repeat universal taunt on " .. (UnitName(highestPriority.unit) or "Unknown") ..
+                       " (" .. string.format("%.1f", tauntElapsed) .. "s since last taunt)")
+            return false
+        end
         
-        -- STRATEGIC FALLBACK: Only for meaningful threats (tanks, low health situations)
-        if highestPriority.priority >= 300 and highestPriority.tauntAbility then
-            -- Additional validation: ensure this is actually a worthwhile taunt
-            local victimUnit = highestPriority.victimUnit
-            if not victimUnit or not UnitExists(victimUnit) then
-                return false
-            end
-
-            local _, targetClass = UnitClass(victimUnit)
-            local targetHP = UnitHealth(victimUnit) / UnitHealthMax(victimUnit) * 100
-            
-            local mobGUID = UnitGUID(highestPriority.unit)
-            local hadThreatBefore = (self.expectedThreatTargets and self.expectedThreatTargets[mobGUID]) or
-                                  (self.lastTauntTarget == mobGUID and (GetTime() - self.lastTauntTime) < 15)
-            local protectedRaidTank = self:IsProtectedRaidTankVictim(victimUnit, mobGUID)
-            local recentlyTaunted, tauntElapsed = self:WasRecentlyUniversalTaunted(mobGUID, victimUnit)
-            if recentlyTaunted then
-                self:Debug("Skipped repeat strategic taunt on " .. (UnitName(highestPriority.unit) or "Unknown") ..
-                           " (" .. string.format("%.1f", tauntElapsed) .. "s since last taunt)")
-                return false
-            end
-            
-            if (hadThreatBefore or not protectedRaidTank) and ((targetClass == "WARRIOR" or targetClass == "PALADIN" or targetClass == "DRUID" or targetClass == "DEATHKNIGHT") or targetHP < 50 or highestPriority.priority >= 400) then
-                CastSpellByName(highestPriority.tauntAbility, highestPriority.unit)
+        if raidTauntSafe then
+            if castSingleTargetTaunt(highestPriority) then
                 self.lastTauntTime = GetTime()
                 self.lastTauntTarget = UnitGUID(highestPriority.unit)
                 self:RecordUniversalTaunt(mobGUID)
@@ -1801,16 +1812,53 @@ function AC:HandleUniversalLooseMobs()
                 if self.TrackTauntedLooseMob then
                     self:TrackTauntedLooseMob(UnitGUID(highestPriority.unit), UnitName(highestPriority.unit))
                 end
+                self:Debug("Universal HIGH PRIORITY taunt: " .. highestPriority.tauntAbility .. " on " .. (UnitName(highestPriority.unit) or "Unknown") .. " (Priority: " .. highestPriority.priority .. ")")
+                return true
+            end
+        else
+            self:Debug("Skipped raid tank victim for universal taunt: " .. (UnitName(victimUnit) or "Unknown"))
+            return false
+        end
+    end
+    
+    -- Strategic fallback: handle harder-to-prioritize threats if they still warrant attention
+    if highestPriority.priority >= 300 and highestPriority.tauntAbility then
+        -- Additional validation: ensure this is actually a worthwhile taunt
+        local victimUnit = highestPriority.victimUnit
+        if not victimUnit or not UnitExists(victimUnit) then
+            return false
+        end
+
+            local targetHP = UnitHealth(victimUnit) / UnitHealthMax(victimUnit) * 100
+            
+            local mobGUID = UnitGUID(highestPriority.unit)
+            local raidTauntSafe = self:IsRaidTauntSafeVictim(victimUnit)
+            local recentlyTaunted, tauntElapsed = self:WasRecentlyUniversalTaunted(mobGUID, victimUnit)
+            if recentlyTaunted then
+                self:Debug("Skipped repeat strategic taunt on " .. (UnitName(highestPriority.unit) or "Unknown") ..
+                           " (" .. string.format("%.1f", tauntElapsed) .. "s since last taunt)")
+                return false
+            end
+            
+            if raidTauntSafe and (targetHP < 50 or highestPriority.priority >= 400) then
+                if castSingleTargetTaunt(highestPriority) then
+                    self.lastTauntTime = GetTime()
+                    self.lastTauntTarget = UnitGUID(highestPriority.unit)
+                    self:RecordUniversalTaunt(mobGUID)
+                    self:MarkAsOurTarget(UnitGUID(highestPriority.unit))
+                if self.TrackTauntedLooseMob then
+                    self:TrackTauntedLooseMob(UnitGUID(highestPriority.unit), UnitName(highestPriority.unit))
+                end
                 self:Debug("Universal STRATEGIC taunt: " .. highestPriority.tauntAbility .. " on " .. (UnitName(highestPriority.unit) or "Unknown") .. " (Priority: " .. highestPriority.priority .. ", HP: " .. string.format("%.0f", targetHP) .. "%)")
                 return true
-            elseif protectedRaidTank then
-                self:Debug("Skipped strategic Taunt on protected raid tank target: " .. (UnitName(highestPriority.unit) or "Unknown"))
+                end
+            elseif not raidTauntSafe then
+                self:Debug("Skipped strategic Taunt on raid tank victim: " .. (UnitName(victimUnit) or "Unknown"))
                 return false
             else
                 self:Debug("Skipped non-critical taunt: " .. (UnitName(highestPriority.unit) or "Unknown") .. " (Priority: " .. highestPriority.priority .. ", HP: " .. string.format("%.0f", targetHP) .. "%) - not critical enough")
             end
         end
-    end
     
     return false
 end

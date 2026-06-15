@@ -51,3 +51,14 @@
 - The main risk area is warrior Protection behavior, since that path was simplified aggressively.
 - If a regression shows up, restore the removed warrior-only code locally before pushing anything.
 - Fixed a live regression where `Core.lua` `FindBestTankTarget()` was calling bare `Throttle` instead of `self:Throttle`.
+- Loose mob pickup was tightened too much; `Core.lua` now targets and taunts party-member threats again, with a lower single-target threshold and explicit `TargetUnit()` before enemy taunts.
+- Raid-safe auto-taunt filtering now blocks confirmed tank victims in groups larger than 5.
+- The raid filter is conservative and only treats explicit tank auras/forms as tanking:
+  - Warrior: `Defensive Stance`
+  - Paladin: `Righteous Fury`
+  - Druid: `Bear Form` / `Dire Bear Form`
+  - Death Knight: `Frost Presence`
+- Direct class taunts were also guarded:
+  - Druid `Growl`
+  - Death Knight `Death Grip` combat utility
+  - Warrior `Taunt` helper
