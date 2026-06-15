@@ -1318,10 +1318,10 @@ function AC:FeralBearTankRotation()
         end
     end
     
-    -- EPIC PRIORITY 1: Faerie Fire (Feral) - MASSIVE threat + armor reduction
-    if self:DebuffTimeRemaining("target", S.FaerieFireFeral) < 5 and self:IsUsableSpell(S.FaerieFireFeral) then
+    -- EPIC PRIORITY 1: Faerie Fire (Feral) - single-target snap threat and armor reduction
+    if enemies < 3 and self:DebuffTimeRemaining("target", S.FaerieFireFeral) < 5 and self:IsUsableSpell(S.FaerieFireFeral) then
         CastSpellByName(S.FaerieFireFeral, "target")
-        DruidDebug("EPIC THREAT: Faerie Fire (MASSIVE threat + armor reduction)")
+        DruidDebug("EPIC THREAT: Faerie Fire (snap threat + armor reduction)")
         return true
     end
     
