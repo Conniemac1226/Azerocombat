@@ -269,8 +269,11 @@ function AC:HasItem(itemName)
     for bag = 0, 4 do
         for slot = 1, GetContainerNumSlots(bag) do
             local itemLink = GetContainerItemLink(bag, slot)
-            if itemLink and itemLink:find(itemName) then
-                return true, bag, slot
+            if itemLink then
+                local linkName = itemLink:match("%[(.+)%]")
+                if linkName == itemName then
+                    return true, bag, slot
+                end
             end
         end
     end
@@ -334,6 +337,40 @@ local manaPotions = {
     "Crystal Restore",             -- 500-700 MP (health/mana)
     "Major Rejuvenation Potion"    -- 900-1500 MP (health/mana)
 }
+
+local function UsePotionFromBag(itemName, bag, slot)
+    if not bag or not slot then
+        return false
+    end
+
+    local preLink = GetContainerItemLink(bag, slot)
+    local preCount = select(2, GetContainerItemInfo(bag, slot)) or 1
+
+    UseContainerItem(bag, slot)
+
+    local postLink = GetContainerItemLink(bag, slot)
+    local postCount = select(2, GetContainerItemInfo(bag, slot)) or 0
+    if preLink and (not postLink or postLink ~= preLink or postCount < preCount) then
+        return true
+    end
+
+    local bagStart = GetContainerItemCooldown and select(1, GetContainerItemCooldown(bag, slot))
+    if bagStart and bagStart > 0 then
+        return true
+    end
+
+    local itemStart = GetItemCooldown and select(1, GetItemCooldown(itemName))
+    return itemStart and itemStart > 0 or false
+end
+
+local function IsGlobalCooldownActive()
+    local gcdStart, gcdDuration = GetSpellCooldown("61304")
+    if gcdStart and gcdDuration and gcdDuration > 0 then
+        return (gcdStart + gcdDuration - GetTime()) > 0.1
+    end
+
+    return false
+end
 
 -- All offensive potions (damage/stats boosting) (verified 3.3.5)
 local offensivePotions = {
@@ -458,28 +495,37 @@ local utilityPotions = {
 function AC:UseHealthPotion(threshold)
     threshold = threshold or 30  -- Default to 30% health
     
-    if self:GetPlayerHealthPercent() >= threshold then
+    local healthPercent = self:GetPlayerHealthPercent()
+    if self.debugMode then
+        self:Debug(string.format("Health potion check: HP %.0f%% / threshold %d%%", healthPercent, threshold))
+    end
+
+    if healthPercent >= threshold then
+        return false
+    end
+
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
         return false
     end
     
     -- Throttle potion attempts to prevent spam
-    if not self:ActionThrottle("HealthPotionUse", 5.0) then
+    if not self:ActionThrottle("HealthPotionUse", 0.5) then
         return false
     end
     
     for _, potion in ipairs(healingPotions) do
-        if self:HasItem(potion) then
-            -- Check if potion is off cooldown with error handling
-            local success, start, duration = pcall(GetItemCooldown, potion)
-            if success and start == 0 then
-                UseItemByName(potion)
+        local hasItem, bag, slot = self:HasItem(potion)
+        if hasItem then
+            if self.debugMode then
+                self:Debug("Health potion candidate found: " .. potion)
+            end
+            if UsePotionFromBag(potion, bag, slot) then
                 self:Print("Using " .. potion)
                 return true
-            else
-                -- Potion on cooldown, continue checking other potions
-                if self.debugMode then
-                    self:Debug("Potion " .. potion .. " on cooldown or error checking")
-                end
+            end
+
+            if self.debugMode then
+                self:Debug("Health potion " .. potion .. " use attempt did not take")
             end
         end
     end
@@ -498,25 +544,22 @@ function AC:UseManaPotion(threshold)
     if manaPercent >= threshold then
         return false
     end
+
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return false
+    end
     
     -- Throttle potion attempts to prevent spam
-    if not self:ActionThrottle("ManaPotionUse", 5.0) then
+    if not self:ActionThrottle("ManaPotionUse", 0.5) then
         return false
     end
     
     for _, potion in ipairs(manaPotions) do
-        if self:HasItem(potion) then
-            -- Check if potion is off cooldown with error handling
-            local success, start, duration = pcall(GetItemCooldown, potion)
-            if success and start == 0 then
-                UseItemByName(potion)
+        local hasItem, bag, slot = self:HasItem(potion)
+        if hasItem then
+            if UsePotionFromBag(potion, bag, slot) then
                 self:Print("Using " .. potion)
                 return true
-            else
-                -- Potion on cooldown, continue checking other potions
-                if self.debugMode then
-                    self:Debug("Potion " .. potion .. " on cooldown or error checking")
-                end
             end
         end
     end
@@ -540,7 +583,11 @@ function AC:UseComboPotion(healthThreshold, manaThreshold)
     end
     
     -- Throttle potion attempts to prevent spam
-    if not self:ActionThrottle("ComboPotionUse", 5.0) then
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return false
+    end
+
+    if not self:ActionThrottle("ComboPotionUse", 0.5) then
         return false
     end
     
@@ -553,18 +600,11 @@ function AC:UseComboPotion(healthThreshold, manaThreshold)
     }
     
     for _, potion in ipairs(comboPotions) do
-        if self:HasItem(potion) then
-            -- Check if potion is off cooldown with error handling
-            local success, start, duration = pcall(GetItemCooldown, potion)
-            if success and start == 0 then
-                UseItemByName(potion)
+        local hasItem, bag, slot = self:HasItem(potion)
+        if hasItem then
+            if UsePotionFromBag(potion, bag, slot) then
                 self:Print("Using " .. potion .. " (combo)")
                 return true
-            else
-                -- Potion on cooldown, continue checking other potions
-                if self.debugMode then
-                    self:Debug("Combo potion " .. potion .. " on cooldown or error checking")
-                end
             end
         end
     end
@@ -582,23 +622,20 @@ function AC:UseOffensivePotion(buffsActive)
     end
     
     -- Throttle offensive potion attempts to prevent spam (longer interval)
-    if not self:ActionThrottle("OffensivePotionUse", 10.0) then
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return false
+    end
+
+    if not self:ActionThrottle("OffensivePotionUse", 0.5) then
         return false
     end
     
     for _, potion in ipairs(offensivePotions) do
-        if self:HasItem(potion) then
-            -- Check if potion is off cooldown with error handling
-            local success, start, duration = pcall(GetItemCooldown, potion)
-            if success and start == 0 then
-                UseItemByName(potion)
+        local hasItem, bag, slot = self:HasItem(potion)
+        if hasItem then
+            if UsePotionFromBag(potion, bag, slot) then
                 self:Print("Using " .. potion)
                 return true
-            else
-                -- Potion on cooldown, continue checking other potions
-                if self.debugMode then
-                    self:Debug("Offensive potion " .. potion .. " on cooldown or error checking")
-                end
             end
         end
     end
@@ -619,23 +656,20 @@ function AC:UseDefensivePotion(dangerLevel)
     end
     
     -- Throttle defensive potion attempts to prevent spam
-    if not self:ActionThrottle("DefensivePotionUse", 5.0) then
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return false
+    end
+
+    if not self:ActionThrottle("DefensivePotionUse", 0.5) then
         return false
     end
     
     for _, potion in ipairs(defensivePotions) do
-        if self:HasItem(potion) then
-            -- Check if potion is off cooldown with error handling
-            local success, start, duration = pcall(GetItemCooldown, potion)
-            if success and start == 0 then
-                UseItemByName(potion)
+        local hasItem, bag, slot = self:HasItem(potion)
+        if hasItem then
+            if UsePotionFromBag(potion, bag, slot) then
                 self:Print("Using " .. potion)
                 return true
-            else
-                -- Potion on cooldown, continue checking other potions
-                if self.debugMode then
-                    self:Debug("Defensive potion " .. potion .. " on cooldown or error checking")
-                end
             end
         end
     end
@@ -657,10 +691,16 @@ function AC:UseUtilityPotion(situation)
     }
     
     local potion = potionMap[situation]
-    if potion and self:HasItem(potion) then
-        UseItemByName(potion)
-        self:Print("Using " .. potion)
-        return true
+    if potion then
+        if UnitCastingInfo("player") or UnitChannelInfo("player") then
+            return false
+        end
+
+        local hasItem, bag, slot = self:HasItem(potion)
+        if hasItem and UsePotionFromBag(potion, bag, slot) then
+            self:Print("Using " .. potion)
+            return true
+        end
     end
     return false
 end

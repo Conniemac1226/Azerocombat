@@ -526,7 +526,7 @@ function AC:UseDruidDefensives(form)
     if not inCombat then return false end
     
     -- Emergency health potion first
-    if health < 35 and self.UseHealthPotion and self:UseHealthPotion(35) then
+    if health < 50 and self.UseHealthPotion and self:UseHealthPotion(50) then
         DruidDebug("Used health potion at " .. string.format("%.0f", health) .. "% health")
         return true
     end
@@ -547,14 +547,14 @@ function AC:UseDruidDefensives(form)
     -- Bear Form specific
     if form == AC.DruidForms.BEAR then
         -- Survival Instincts
-        if health < 30 and self:IsUsableSpell(S.SurvivalInstincts) then
+        if health < 30 and self:KnowsSpell(S.SurvivalInstincts) and self:IsUsableSpell(S.SurvivalInstincts) and self:GetSpellCooldown(S.SurvivalInstincts) == 0 then
             CastSpellByName(S.SurvivalInstincts)
             DruidDebug("Survival Instincts")
             return true
         end
         
         -- Frenzied Regeneration
-        if health < 40 and UnitPower("player", 1) > 10 and self:IsUsableSpell(S.FrenziedRegeneration) then
+        if health < 40 and UnitPower("player", 1) > 10 and self:KnowsSpell(S.FrenziedRegeneration) and self:IsUsableSpell(S.FrenziedRegeneration) and self:GetSpellCooldown(S.FrenziedRegeneration) == 0 then
             CastSpellByName(S.FrenziedRegeneration)
             DruidDebug("Frenzied Regeneration")
             return true
@@ -1261,6 +1261,23 @@ local function GetBearSwipeThreshold(level)
     return 15
 end
 
+local function GetDemoralizingDebuffTimeRemaining(ac, unit)
+    if not ac then return 0 end
+
+    local roarTime = ac:DebuffTimeRemaining(unit, S.DemoralizingRoar)
+    local shoutTime = ac:DebuffTimeRemaining(unit, "Demoralizing Shout")
+
+    if roarTime > 0 then
+        return roarTime
+    end
+
+    if shoutTime > 0 then
+        return shoutTime
+    end
+
+    return 0
+end
+
 function AC:FeralBearTankRotation()
     -- Initialize threat tracking variables
     self.expectedThreatTargets = self.expectedThreatTargets or {}
@@ -1349,10 +1366,12 @@ function AC:FeralBearTankRotation()
     end
     
     -- REMOVED: Challenging Roar AoE taunt - handled by universal system
-    
+
     -- EPIC PRIORITY 2: Demoralizing Roar - survivability and threat
-    if enemies >= 1 and self:DebuffTimeRemaining("target", S.DemoralizingRoar) < 5 and 
-       self:IsUsableSpell(S.DemoralizingRoar) and rage >= 10 then
+    local roarGuid = UnitGUID("target") or "no-target"
+    local roarThrottleKey = "BearDemoralizingRoar_" .. roarGuid
+    if enemies >= 1 and GetDemoralizingDebuffTimeRemaining(self, "target") < 5 and
+       self:IsUsableSpell(S.DemoralizingRoar) and rage >= 10 and Throttle(roarThrottleKey, 8) then
         CastSpellByName(S.DemoralizingRoar)
         DruidDebug("EPIC SURVIVABILITY: Demoralizing Roar (damage reduction + threat)")
         return true
@@ -1360,8 +1379,6 @@ function AC:FeralBearTankRotation()
     
     -- EPIC PRIORITY 2.5: Growl for single target threat emergency
     if autoTauntAllowed and enemies == 1 and self:IsUsableSpell(S.Growl) and Throttle("Growl", 8) then
-        -- CRITICAL FIX: Only Growl if we actually HAD threat on this target before
-        -- Don't use Growl as a pull ability - that's wasteful!
         if not UnitIsUnit("target", "player") and UnitExists("targettarget") then
             if self:GetGroupSize() > 5 and not self:IsRaidTauntSafeVictim("targettarget") then
                 DruidDebug("BLOCKED raid Growl - target is on confirmed tank victim: " .. (UnitName("targettarget") or "Unknown"))
@@ -1371,12 +1388,13 @@ function AC:FeralBearTankRotation()
             local targetGUID = UnitGUID("target")
             local hadThreatBefore = (self.expectedThreatTargets and self.expectedThreatTargets[targetGUID]) or
                                   (self.lastTauntTarget == targetGUID and (GetTime() - self.lastTauntTime) < 15)
+            local canGrowl = self:GetGroupSize() <= 5 or hadThreatBefore
             
-            if hadThreatBefore then
+            if canGrowl then
                 CastSpellByName(S.Growl, "target")
                 self.lastTauntTime = GetTime()
                 self.lastTauntTarget = UnitGUID("target")
-                DruidDebug("EPIC THREAT: Growl (threat recovery)")
+                DruidDebug(self:GetGroupSize() <= 5 and "EPIC THREAT: Growl (5-man snap threat)" or "EPIC THREAT: Growl (threat recovery)")
                 return true
             else
                 DruidDebug("BLOCKED wasteful Growl - we never had threat on this target")
@@ -2142,7 +2160,7 @@ function AC:UseRacialsDruid(burst, emergency)
             return true
         end
 
-        if race == "DWARF" and self:IsUsableSpell(S.Stoneform) then
+        if race == "DWARF" and self:IsUsableSpell(S.Stoneform) and self:GetSpellCooldown(S.Stoneform) == 0 then
             if debuffs and (debuffs.poison or debuffs.disease or debuffs.bleed or health < 35) then
                 CastSpellByName(S.Stoneform)
                 DruidDebug("Racial: Stoneform")
