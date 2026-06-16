@@ -739,6 +739,7 @@ function AC:CheckDruidBuffs()
     if not Throttle("DruidBuffsOOC", 1.5) then return false end
     local inCombat = UnitAffectingCombat("player")
     if inCombat then return false end
+    local isFeralBuild = self:IsFeralBuild()
     
     -- Group buffing first (out of combat)
     if self:CheckDruidGroupBuffs() then return true end
@@ -753,20 +754,19 @@ function AC:CheckDruidBuffs()
         end
     end
     
-    -- Thorns: only self or the designated main tank
+    -- Thorns: feral build keeps this self-only; non-feral can still support the tank.
     if self:IsUsableSpell(S.Thorns) then
-        -- In group: prioritize tanks for thorns
-            if IsDruidInGroup() then
-                local groupUnits = {}
-                if GetNumRaidMembers() > 0 then
-                    for i = 1, GetNumRaidMembers() do
-                        table.insert(groupUnits, "raid" .. i)
-                    end
-                elseif GetNumPartyMembers() > 0 then
-                    for i = 1, GetNumPartyMembers() do
-                        table.insert(groupUnits, "party" .. i)
-                    end
+        if IsDruidInGroup() and not isFeralBuild then
+            local groupUnits = {}
+            if GetNumRaidMembers() > 0 then
+                for i = 1, GetNumRaidMembers() do
+                    table.insert(groupUnits, "raid" .. i)
                 end
+            elseif GetNumPartyMembers() > 0 then
+                for i = 1, GetNumPartyMembers() do
+                    table.insert(groupUnits, "party" .. i)
+                end
+            end
             
             -- Find tanks without thorns
             for _, unit in ipairs(groupUnits) do
@@ -779,10 +779,10 @@ function AC:CheckDruidBuffs()
             end
         end
         
-        -- No tanks need thorns, buff self
+        -- No tanks need thorns, or we are feral and only want self-buffing.
         if not self:HasBuff("player", S.Thorns) then
             CastSpellByName(S.Thorns, "player")
-            DruidDebug("Buffing: Thorns (self)")
+            DruidDebug(isFeralBuild and "Buffing: Thorns (self, feral only)" or "Buffing: Thorns (self)")
             return true
         end
     end
@@ -1290,7 +1290,7 @@ function AC:FeralBearTankRotation()
     -- Combat rebuffs are disabled to avoid dropping out of Bear Form.
     
     -- Interrupt with Bash
-    if UnitCastingInfo("target") and self:IsUsableSpell(S.Bash) and rage >= 10 then
+    if UnitCastingInfo("target") and self:IsUsableSpell(S.Bash) and self:GetSpellCooldown(S.Bash) == 0 and rage >= 10 then
         CastSpellByName(S.Bash, "target")
         DruidDebug("Bear: Bash interrupt")
         return true
@@ -1964,6 +1964,7 @@ end
 function AC:CheckDruidGroupBuffs()
     if not Throttle("DruidGroupBuffs", 1.5) then return false end
     if UnitAffectingCombat("player") or IsMounted() then return false end
+    local isFeralBuild = self:IsFeralBuild()
 
     self.druidBuffScanState = self.druidBuffScanState or {}
     local groupUnits = BuildDruidGroupUnitList()
@@ -2003,14 +2004,16 @@ function AC:CheckDruidGroupBuffs()
 
     self.druidBuffScanState.groupCursor = (cursor + scanBudget - 1) % groupCount + 1
     
-    -- Thorns: only self or the designated main tank
+    -- Thorns: feral build keeps this self-only; non-feral can still support the tank.
     if self:IsUsableSpell(S.Thorns) and self:KnowsSpell(S.Thorns) then
-        local mainTankUnit = self:GetMainTankUnit()
-        if mainTankUnit and not UnitIsUnit(mainTankUnit, "player") and
-           CheckInteractDistance(mainTankUnit, 4) and not self:HasBuff(mainTankUnit, S.Thorns) then
-            CastSpellByName(S.Thorns, mainTankUnit)
-            DruidDebug("EPIC THORNS: " .. (UnitName(mainTankUnit) or mainTankUnit) .. " (MAIN TANK)")
-            return true
+        if not isFeralBuild then
+            local mainTankUnit = self:GetMainTankUnit()
+            if mainTankUnit and not UnitIsUnit(mainTankUnit, "player") and
+               CheckInteractDistance(mainTankUnit, 4) and not self:HasBuff(mainTankUnit, S.Thorns) then
+                CastSpellByName(S.Thorns, mainTankUnit)
+                DruidDebug("EPIC THORNS: " .. (UnitName(mainTankUnit) or mainTankUnit) .. " (MAIN TANK)")
+                return true
+            end
         end
     end
     
@@ -2220,8 +2223,10 @@ function AC:DruidRotation()
             return false
         end
 
+        local pulledTarget = isFeralBuild and hasTarget and UnitAffectingCombat("target")
+
         -- Buffs
-        if self:CheckDruidBuffs() then return true end
+        if not pulledTarget and self:CheckDruidBuffs() then return true end
         
         -- Travel forms management
         if not hasTarget then
@@ -2238,6 +2243,28 @@ function AC:DruidRotation()
                                   currentForm == AC.DruidForms.SWIFT_FLIGHT or currentForm == AC.DruidForms.AQUATIC) then
                 -- Cancel travel form when stopped
                 if self:ShiftToForm("Caster") then return true end
+            end
+        end
+
+        -- If a group member already pulled the target, feral should engage immediately instead of idling out of combat.
+        if pulledTarget then
+            if feralRole == "bear" or not self:KnowsSpell(S.CatForm) then
+                local desiredBearForm = self:KnowsSpell(S.DireBearForm) and S.DireBearForm or S.BearForm
+                if currentForm ~= AC.DruidForms.BEAR then
+                    if self:ShiftToForm(desiredBearForm) then return true end
+                end
+
+                if self:HandleTankTargeting() then return true end
+            elseif feralRole == "cat" then
+                if currentForm ~= AC.DruidForms.CAT then
+                    if self:ShiftToForm(S.CatForm) then return true end
+                end
+            end
+
+            if self:IsInMeleeRange("target") then
+                StartAttack()
+                DruidDebug("Feral: engaging already-pulled target")
+                return true
             end
         end
         
