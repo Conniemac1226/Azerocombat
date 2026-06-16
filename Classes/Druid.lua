@@ -500,6 +500,20 @@ function AC:IsInMeleeRange(unit)
     return CheckInteractDistance(unit, 3)
 end
 
+function AC:IsEatingOrDrinking()
+    local channel = UnitChannelInfo("player")
+    local cast = UnitCastingInfo("player")
+    local action = channel or cast
+    if not action then return false end
+
+    local lowerAction = string.lower(action)
+    return lowerAction:find("drink", 1, true) or
+           lowerAction:find("eat", 1, true) or
+           lowerAction:find("food", 1, true) or
+           lowerAction:find("refreshment", 1, true) or
+           lowerAction:find("well fed", 1, true)
+end
+
 -- =============================================
 -- RESEARCH-BASED DEFENSIVE COOLDOWNS
 -- =============================================
@@ -739,6 +753,7 @@ function AC:CheckDruidBuffs()
     if not Throttle("DruidBuffsOOC", 1.5) then return false end
     local inCombat = UnitAffectingCombat("player")
     if inCombat then return false end
+    if self:IsEatingOrDrinking() then return false end
     local isFeralBuild = self:IsFeralBuild()
     
     -- Group buffing first (out of combat)
@@ -1964,6 +1979,7 @@ end
 function AC:CheckDruidGroupBuffs()
     if not Throttle("DruidGroupBuffs", 1.5) then return false end
     if UnitAffectingCombat("player") or IsMounted() then return false end
+    if self:IsEatingOrDrinking() then return false end
     local isFeralBuild = self:IsFeralBuild()
 
     self.druidBuffScanState = self.druidBuffScanState or {}
@@ -2210,6 +2226,8 @@ function AC:DruidRotation()
     
     -- Out of combat actions
     if not inCombat then
+        if self:IsEatingOrDrinking() then return false end
+
         -- Balance pre-pull: keep this minimal for stable combat entry.
         if spec == "Balance" and hasTarget then
             if self:KnowsSpell(S.MoonkinForm) and currentForm ~= AC.DruidForms.MOONKIN then

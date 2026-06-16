@@ -1006,6 +1006,7 @@ function AC:GetTankTargetPriority(unit)
     end
 
     local priority = 0
+    local groupSize = self:GetGroupSize()
     local hp = self:GetTargetHealthPercent(unit)
     local classification = UnitClassification(unit)
     local level = UnitLevel(unit)
@@ -1067,14 +1068,14 @@ function AC:GetTankTargetPriority(unit)
     local unitGUID = UnitGUID(unit)
     if unitGUID and self.expectedThreatTargets and self.expectedThreatTargets[unitGUID] then
         local timeSinceMarked = GetTime() - self.expectedThreatTargets[unitGUID]
-        if timeSinceMarked < 15 then
+        if timeSinceMarked < 15 and (inMeleeRange or groupSize > 5) then
             priority = priority + 35
         end
     end
 
     if self.lastTauntTarget and unitGUID == self.lastTauntTarget then
         local timeSinceTaunt = GetTime() - (self.lastTauntTime or 0)
-        if timeSinceTaunt < 15 then
+        if timeSinceTaunt < 15 and (inMeleeRange or groupSize > 5) then
             priority = priority + 50
         end
     end
@@ -1082,8 +1083,8 @@ function AC:GetTankTargetPriority(unit)
     return math.max(priority, 0)
 end
 
-function AC:FindBestTankTarget()
-    if not self:Throttle("FindBestTankTarget", 0.2) then
+function AC:FindBestTankTarget(meleeOnly, ignoreThrottle)
+    if not ignoreThrottle and not self:Throttle("FindBestTankTarget", 0.2) then
         return UnitExists("target") and "target" or nil, self:GetTankTargetPriority("target")
     end
 
@@ -1093,12 +1094,14 @@ function AC:FindBestTankTarget()
     local currentInMelee = currentTarget and self:IsInMeleeRange(currentTarget)
 
     if currentTarget and UnitCanAttack("player", currentTarget) and not UnitIsDead(currentTarget) then
-        local currentPriority = self:GetTankTargetPriority(currentTarget)
-        if currentInMelee then
-            currentPriority = currentPriority + 40
+        if not meleeOnly or currentInMelee then
+            local currentPriority = self:GetTankTargetPriority(currentTarget)
+            if currentInMelee then
+                currentPriority = currentPriority + 40
+            end
+            highestPriority = currentPriority
+            bestTarget = currentTarget
         end
-        highestPriority = currentPriority
-        bestTarget = currentTarget
     end
 
     local candidates = {}
@@ -1162,6 +1165,9 @@ function AC:FindBestTankTarget()
     for _, candidate in ipairs(candidates) do
         local candidateInMelee = self:IsInMeleeRange(candidate.unit)
         local canReachCandidate = candidateInMelee or self:GetTankMovementAbility(candidate.unit) ~= nil
+        if meleeOnly then
+            canReachCandidate = candidateInMelee
+        end
 
         if canReachCandidate then
             if candidateInMelee and not currentInMelee then
@@ -1711,6 +1717,23 @@ function AC:HandleUniversalLooseMobs()
             StartAttack()
         end
     end
+
+    local function swapToBestMeleeTargetAfterTaunt()
+        if not self:IsAutoTargetSwitchAllowed() then return false end
+
+        local meleeTarget, meleePriority = self:FindBestTankTarget(true, true)
+        if meleeTarget and UnitExists(meleeTarget) and not UnitIsUnit(meleeTarget, "target") then
+            TargetUnit(meleeTarget)
+            self.lastTargetSwitch = GetTime()
+            self:MarkAsOurTarget(UnitGUID("target"))
+            startAttackOnCurrentTarget()
+            self:Debug("Swapped back to melee target after taunt: " .. (UnitName(meleeTarget) or "Unknown") ..
+                       " (Priority: " .. tostring(meleePriority or 0) .. ")")
+            return true
+        end
+
+        return false
+    end
     
     -- Handle highest priority loose mob first
     local highestPriority = looseMobs[1]
@@ -1725,7 +1748,9 @@ function AC:HandleUniversalLooseMobs()
                     if looseMob.unit and UnitExists(looseMob.unit) then
                         TargetUnit(looseMob.unit)
                     end
-                    startAttackOnCurrentTarget()
+                    if not swapToBestMeleeTargetAfterTaunt() then
+                        startAttackOnCurrentTarget()
+                    end
                     return true
                 end
             end
@@ -1738,7 +1763,9 @@ function AC:HandleUniversalLooseMobs()
 
         TargetUnit(looseMob.unit)
         if self:CastSpell(looseMob.tauntAbility, "target") then
-            startAttackOnCurrentTarget()
+            if not swapToBestMeleeTargetAfterTaunt() then
+                startAttackOnCurrentTarget()
+            end
             return true
         end
 
