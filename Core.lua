@@ -1230,6 +1230,9 @@ function AC:UpdateTankTargeting()
         if bestTarget then
             local oldTarget = UnitExists("target") and UnitName("target") or "None"
             TargetUnit(bestTarget)
+            if not IsCurrentSpell("Attack") then
+                StartAttack()
+            end
             self:Debug("Tank target switch: " .. oldTarget .. " -> " .. (UnitName("target") or "Unknown") .. " (Priority: " .. priority .. ")")
             self:MarkAsOurTarget(UnitGUID("target"))
             return true
@@ -1253,6 +1256,9 @@ function AC:HandleTankTargeting()
     if threatLoss and threatLoss.priority and threatLoss.priority >= 150 then
         if UnitExists(threatLoss.lostTarget) and UnitCanAttack("player", threatLoss.lostTarget) then
             TargetUnit(threatLoss.lostTarget)
+            if not IsCurrentSpell("Attack") then
+                StartAttack()
+            end
             self.lastTargetSwitch = GetTime()
             self:MarkAsOurTarget(UnitGUID("target"))
             return true
@@ -1699,6 +1705,12 @@ function AC:HandleUniversalLooseMobs()
     local abilities = self.TankAbilities[class]
     
     self:Debug("Found " .. #looseMobs .. " loose mobs to handle")
+
+    local function startAttackOnCurrentTarget()
+        if UnitExists("target") and UnitCanAttack("player", "target") and not IsCurrentSpell("Attack") then
+            StartAttack()
+        end
+    end
     
     -- Handle highest priority loose mob first
     local highestPriority = looseMobs[1]
@@ -1709,7 +1721,13 @@ function AC:HandleUniversalLooseMobs()
 
         if looseMob.tauntAbility == "Righteous Defense" then
             if looseMob.victimUnit and UnitExists(looseMob.victimUnit) then
-                return self:CastSpell(looseMob.tauntAbility, looseMob.victimUnit)
+                if self:CastSpell(looseMob.tauntAbility, looseMob.victimUnit) then
+                    if looseMob.unit and UnitExists(looseMob.unit) then
+                        TargetUnit(looseMob.unit)
+                    end
+                    startAttackOnCurrentTarget()
+                    return true
+                end
             end
             return false
         end
@@ -1719,7 +1737,12 @@ function AC:HandleUniversalLooseMobs()
         end
 
         TargetUnit(looseMob.unit)
-        return self:CastSpell(looseMob.tauntAbility, "target")
+        if self:CastSpell(looseMob.tauntAbility, "target") then
+            startAttackOnCurrentTarget()
+            return true
+        end
+
+        return false
     end
     
     -- Strategic AoE taunt usage - less restrictive but smart conditions
@@ -1786,6 +1809,7 @@ function AC:HandleUniversalLooseMobs()
             
             if canUseAoE then
                 CastSpellByName(abilities.aoe_taunt)
+                startAttackOnCurrentTarget()
                 self:Debug("Universal AoE taunt: " .. abilities.aoe_taunt .. " - " .. reason .. " (" .. #looseMobs .. " loose mobs)")
                 return true
             end

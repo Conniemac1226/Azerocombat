@@ -63,3 +63,5 @@
   - Death Knight `Death Grip` combat utility
   - Warrior `Taunt` helper
 - Bear tank `Faerie Fire (Feral)` is now single-target only for `enemies < 3`, so AoE packs can spend GCDs on `Swipe`/`Maul` instead of debuffing every mob first.
+- Bear tank now runs the shared tank targeting before the no-target exit, and `UpdateTankTargeting()` starts auto-attack after it selects a new target.
+- Shared loose-mob taunts now start auto-attack immediately after a successful taunt, including the `Righteous Defense` path.

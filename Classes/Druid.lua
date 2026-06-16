@@ -1266,15 +1266,17 @@ function AC:FeralBearTankRotation()
         if self:ShiftToForm(bearForm) then return true end
     end
     
-    -- Auto-attack
-    if hasTarget then StartAttack() end
-    
-    if not hasTarget then return false end
-    
     -- Defensive cooldowns
     if self:UseDruidDefensives(currentForm) then return true end
 
     if self:HandleTankTargeting() then return true end
+
+    hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
+    if hasTarget and not IsCurrentSpell("Attack") then
+        StartAttack()
+    end
+
+    if not hasTarget then return false end
 
     -- Queue Maul proactively since it is an on-next-swing attack, not a normal GCD spender.
     if self:IsUsableSpell(S.Maul) and not IsCurrentSpell(S.Maul) then
