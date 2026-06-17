@@ -343,6 +343,24 @@ local function UsePotionFromBag(itemName, bag, slot)
         return false
     end
 
+    local function isOnCooldown(start, duration)
+        if not start or not duration or duration <= 0 then
+            return false
+        end
+
+        return (start + duration - GetTime()) > 0.1
+    end
+
+    local bagStart, bagDuration = GetContainerItemCooldown and select(1, GetContainerItemCooldown(bag, slot))
+    if isOnCooldown(bagStart, bagDuration) then
+        return false
+    end
+
+    local itemStart, itemDuration = GetItemCooldown and select(1, GetItemCooldown(itemName))
+    if isOnCooldown(itemStart, itemDuration) then
+        return false
+    end
+
     local preLink = GetContainerItemLink(bag, slot)
     local preCount = select(2, GetContainerItemInfo(bag, slot)) or 1
 
@@ -354,13 +372,13 @@ local function UsePotionFromBag(itemName, bag, slot)
         return true
     end
 
-    local bagStart = GetContainerItemCooldown and select(1, GetContainerItemCooldown(bag, slot))
-    if bagStart and bagStart > 0 then
+    bagStart, bagDuration = GetContainerItemCooldown and select(1, GetContainerItemCooldown(bag, slot))
+    if isOnCooldown(bagStart, bagDuration) then
         return true
     end
 
-    local itemStart = GetItemCooldown and select(1, GetItemCooldown(itemName))
-    return itemStart and itemStart > 0 or false
+    itemStart, itemDuration = GetItemCooldown and select(1, GetItemCooldown(itemName))
+    return isOnCooldown(itemStart, itemDuration)
 end
 
 local function IsGlobalCooldownActive()
