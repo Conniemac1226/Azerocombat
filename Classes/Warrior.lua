@@ -493,7 +493,14 @@ function AC:UseRangedAbilityAndReturn(ability, target)
         -- Intervene requires a friendly target
         if UnitIsFriend("player", target) and self:IsInInterveneRange(target) then
             CastSpellByName(S.Intervene, target)
-            WarriorDebug("Used Intervene to protect ally")
+            self:MarkWarriorChargeCast()
+            if UnitExists("target") and UnitCanAttack("player", "target") and not IsCurrentSpell("Attack") then
+                StartAttack()
+            end
+            if UnitExists("target") and UnitCanAttack("player", "target") then
+                self:MarkAsOurTarget(UnitGUID("target"))
+            end
+            WarriorDebug("Used Intervene gap closer via ally")
             success = true
         end
     end
@@ -535,6 +542,37 @@ function AC:FindMeleeTarget()
         end
     end
     
+    return nil
+end
+
+function AC:FindWarriorInterveneTarget(hostileTarget)
+    if self:GetPlayerSpec() ~= "Protection" then return nil end
+    if GetGroupSize() > 5 then return nil end
+    if not UnitAffectingCombat("player") then return nil end
+    if not self:KnowsSpell(S.Intervene) or not self:IsUsableSpell(S.Intervene) then return nil end
+    if self:GetSpellCooldown(S.Intervene) > 0 then return nil end
+    if not hostileTarget or not UnitExists(hostileTarget) or not UnitCanAttack("player", hostileTarget) or UnitIsDeadOrGhost(hostileTarget) then
+        return nil
+    end
+
+    local victimUnit = hostileTarget .. "target"
+    if UnitExists(victimUnit) and UnitIsFriend("player", victimUnit) and not UnitIsUnit(victimUnit, "player") and
+       not UnitIsDeadOrGhost(victimUnit) and self:IsInInterveneRange(victimUnit) then
+        return victimUnit
+    end
+
+    local groupSize = GetGroupSize()
+    for i = 1, groupSize do
+        local unit = "party" .. i
+        if UnitExists(unit) and UnitIsFriend("player", unit) and not UnitIsUnit(unit, "player") and
+           not UnitIsDeadOrGhost(unit) and self:IsInInterveneRange(unit) then
+            local unitTarget = unit .. "target"
+            if UnitExists(unitTarget) and UnitIsUnit(unitTarget, hostileTarget) then
+                return unit
+            end
+        end
+    end
+
     return nil
 end
 
@@ -1443,6 +1481,25 @@ function AC:TryProtectionWarbringerCharge(target)
     return true
 end
 
+function AC:TryProtectionInterveneGapCloser(target)
+    target = target or "target"
+    if self:GetPlayerSpec() ~= "Protection" then return false end
+    if GetGroupSize() > 5 then return false end
+    if not UnitAffectingCombat("player") then return false end
+    if not UnitExists(target) or not UnitCanAttack("player", target) or UnitIsDeadOrGhost(target) then return false end
+    if self:IsInMeleeRange(target) then return false end
+
+    local interveneTarget = self:FindWarriorInterveneTarget(target)
+    if not interveneTarget then return false end
+
+    if self:UseRangedAbilityAndReturn("Intervene", interveneTarget) then
+        WarriorDebug("Prot: Intervene gap closer via " .. (UnitName(interveneTarget) or "Unknown"))
+        return true
+    end
+
+    return false
+end
+
 -- Arms Juggernaut combat charge (WotLK: in-combat Charge while in Battle Stance).
 function AC:TryArmsCombatCharge(target)
     target = target or "target"
@@ -1876,7 +1933,12 @@ function AC:ProtectionWarriorRotation()
     -- Auto-attack
     if hasTarget then StartAttack() end
 
-    -- Warbringer allows Protection to Charge from Defensive Stance and in combat.
+    -- Protection prefers Intervene in combat as the primary gap closer.
+    if inCombat and hasTarget and level >= 70 and self:TryProtectionInterveneGapCloser("target") then
+        return true
+    end
+
+    -- Warbringer Charge is the fallback when Intervene is unavailable or on cooldown.
     if hasTarget and level >= 4 and self:TryProtectionWarbringerCharge("target") then
         return true
     end

@@ -861,6 +861,75 @@ AC.lastTauntTime = AC.lastTauntTime or 0
 AC.lastTauntTarget = AC.lastTauntTarget or ""
 AC.universalTauntHistory = AC.universalTauntHistory or {}
 
+function AC:GetTankThreatState(unit)
+    if self:GetGroupSize() > 5 then return nil end
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDead(unit) then return nil end
+
+    local threatState = nil
+    if type(UnitDetailedThreatSituation) == "function" then
+        local ok, isTanking, status, scaledPercent, rawPercent, threatValue = pcall(UnitDetailedThreatSituation, "player", unit)
+        if ok and status ~= nil then
+            threatState = {
+                isTanking = isTanking,
+                status = status,
+                scaledPercent = scaledPercent,
+                rawPercent = rawPercent,
+                threatValue = threatValue
+            }
+        end
+    end
+
+    if not threatState and type(UnitThreatSituation) == "function" then
+        local ok, status = pcall(UnitThreatSituation, "player", unit)
+        if ok then
+            threatState = {
+                status = status
+            }
+        end
+    end
+
+    return threatState
+end
+
+function AC:GetTankThreatPriorityBonus(unit, inMeleeRange, groupSize, threatState)
+    if groupSize > 5 then return 0 end
+
+    threatState = threatState or self:GetTankThreatState(unit)
+    if not threatState or threatState.status == nil then return 0 end
+
+    local status = threatState.status
+    local bonus = 0
+
+    if inMeleeRange then
+        if status <= 0 then
+            bonus = 75
+        elseif status == 1 then
+            bonus = 55
+        elseif status == 2 then
+            bonus = 30
+        else
+            bonus = 10
+        end
+    else
+        if status <= 0 then
+            bonus = 28
+        elseif status == 1 then
+            bonus = 18
+        elseif status == 2 then
+            bonus = 10
+        else
+            bonus = 0
+        end
+    end
+
+    local targetUnit = unit .. "target"
+    if UnitExists(targetUnit) and UnitIsFriend("player", targetUnit) and not UnitIsUnit(targetUnit, "player") then
+        bonus = bonus + 12
+    end
+
+    return bonus
+end
+
 -- Universal tank detection (WotLK 3.3.5a compatible)
 function AC:IsTankSpec(unit)
     unit = unit or "player"
@@ -980,9 +1049,25 @@ function AC:GetTankMovementAbility(unit)
 
     local _, class = UnitClass("player")
     if class == "WARRIOR" then
+        local isProtection = self.GetPlayerSpec and self:GetPlayerSpec() == "Protection"
+        local inCombat = UnitAffectingCombat("player")
+
+        if inCombat and isProtection and self.GetGroupSize and self:GetGroupSize() <= 5 and self.FindWarriorInterveneTarget then
+            local interveneTarget = self:FindWarriorInterveneTarget(unit)
+            if interveneTarget then
+                return "Intervene"
+            end
+        end
+
         if self:KnowsSpell("Charge") and self:IsUsableSpell("Charge") and self:GetSpellCooldown("Charge") == 0 and
-           not UnitAffectingCombat("player") and self:IsInSpellRangeSafe("Charge", unit) then
-            return "Charge"
+           self:IsInSpellRangeSafe("Charge", unit) then
+            if not inCombat then
+                return "Charge"
+            end
+
+            if isProtection and self.HasWarbringerTalent and self:HasWarbringerTalent() then
+                return "Charge"
+            end
         end
 
         if self:KnowsSpell("Intercept") and self:IsUsableSpell("Intercept") and self:GetSpellCooldown("Intercept") == 0 and
@@ -1012,6 +1097,7 @@ function AC:GetTankTargetPriority(unit)
     local level = UnitLevel(unit)
     local playerLevel = UnitLevel("player")
     local inMeleeRange = self:IsInMeleeRange(unit)
+    local threatState = self:GetTankThreatState(unit)
     local movementAbility = self:GetTankMovementAbility(unit)
     local abilities = self:GetTankAbilitiesForPlayer()
 
@@ -1078,6 +1164,11 @@ function AC:GetTankTargetPriority(unit)
         if timeSinceTaunt < 15 and (inMeleeRange or groupSize > 5) then
             priority = priority + 50
         end
+    end
+
+    local threatBonus = self:GetTankThreatPriorityBonus(unit, inMeleeRange, groupSize, threatState)
+    if threatBonus > 0 then
+        priority = priority + threatBonus
     end
 
     return math.max(priority, 0)
@@ -1196,13 +1287,14 @@ function AC:ShouldSwitchTankTarget()
         return false
     end
 
-    local _, playerClass = UnitClass("player")
     local currentTarget = "target"
     local currentGUID = UnitGUID(currentTarget)
     local currentInMelee = self:IsInMeleeRange(currentTarget)
     local currentPriority = self:GetTankTargetPriority(currentTarget)
+    local groupSize = self:GetGroupSize()
+    local currentThreatState = groupSize <= 5 and self:GetTankThreatState(currentTarget) or nil
 
-    if playerClass == "DRUID" and currentGUID and self.lastTauntTarget == currentGUID then
+    if currentGUID and self.lastTauntTarget == currentGUID then
         local recentTaunt = (GetTime() - (self.lastTauntTime or 0)) < 8
         if recentTaunt then
             local meleeTarget = self:FindBestTankTarget(true, true, currentGUID)
@@ -1224,9 +1316,7 @@ function AC:ShouldSwitchTankTarget()
         local bestTarget, bestPriority = self:FindBestTankTarget(false, false, currentGUID)
         if bestTarget and not UnitIsUnit(bestTarget, currentTarget) then
             local bestInMelee = self:IsInMeleeRange(bestTarget)
-            if playerClass == "DRUID" and currentInMelee and not bestInMelee then
-                return false
-            end
+            local bestThreatState = groupSize <= 5 and self:GetTankThreatState(bestTarget) or nil
 
             if currentInMelee then
                 if not bestInMelee and bestPriority >= 200 then
@@ -1240,6 +1330,18 @@ function AC:ShouldSwitchTankTarget()
 
             if bestInMelee then
                 return true
+            end
+
+            if groupSize <= 5 then
+                local currentThreatStatus = currentThreatState and currentThreatState.status
+                local bestThreatStatus = bestThreatState and bestThreatState.status
+                if bestThreatStatus ~= nil and currentThreatStatus ~= nil and bestThreatStatus < currentThreatStatus then
+                    if self.debugMode then
+                        self:Debug("Threat switch: " .. (UnitName(bestTarget) or "Unknown") .. " (status " .. tostring(bestThreatStatus) .. ") over " ..
+                                   (UnitName(currentTarget) or "Unknown") .. " (status " .. tostring(currentThreatStatus) .. ")")
+                    end
+                    return true
+                end
             end
 
             if bestPriority > currentPriority + 50 then
@@ -1745,6 +1847,10 @@ function AC:HandleUniversalLooseMobs()
     end
 
     local function swapToBestMeleeTargetAfterTaunt()
+        if not self:IsAutoTargetSwitchAllowed() then
+            return false
+        end
+
         local excludeGUID = UnitGUID("target")
         local meleeTarget, meleePriority = self:FindBestTankTarget(true, true, excludeGUID)
         if meleeTarget and UnitExists(meleeTarget) and not UnitIsUnit(meleeTarget, "target") then
