@@ -518,17 +518,40 @@ end
 -- RESEARCH-BASED DEFENSIVE COOLDOWNS
 -- =============================================
 
+local CanRetryDruidConsumable
+local MarkDruidConsumableAttempt
+
 function AC:UseDruidDefensives(form)
     local health = self:GetPlayerHealthPercent()
     local inCombat = UnitAffectingCombat("player")
     local enemies = self:GetEnemyCount()
+    local gcdStart, gcdDuration = GetSpellCooldown("61304")
+    local onGlobalCooldown = gcdStart and gcdDuration and gcdDuration > 0 and
+                             ((gcdStart + gcdDuration - GetTime()) > 0.1)
     
     if not inCombat then return false end
-    
+
+    if not Throttle("DruidDefensives", 1.0) then return false end
+
     -- Emergency health potion first
-    if health < 50 and self.UseHealthPotion and self:UseHealthPotion(50) then
-        DruidDebug("Used health potion at " .. string.format("%.0f", health) .. "% health")
-        return true
+    if health < 50 and self.UseHealthPotion then
+        if onGlobalCooldown then
+            if self.debugMode then
+                DruidDebug("Druid health potion delayed: global cooldown active")
+            end
+            return true
+        end
+
+        if CanRetryDruidConsumable(self, "healthPotion", 20) then
+            if self:UseHealthPotion(50) then
+                MarkDruidConsumableAttempt(self, "healthPotion")
+                DruidDebug("Used health potion at " .. string.format("%.0f", health) .. "% health")
+                return true
+            end
+            if self.debugMode then
+                DruidDebug("Druid health potion unavailable; will retry")
+            end
+        end
     end
 
     -- Bear-specific emergency racials act as an extra defensive layer on any-race servers.
@@ -879,9 +902,15 @@ function AC:BalanceDruidRotation()
     end
     
     -- Mana management
-    if manaPercent < 30 and self.UseManaPotion and self:UseManaPotion(30) then
-        DruidDebug("Used mana potion")
-        return true
+    if manaPercent < 30 and self.UseManaPotion and CanRetryDruidConsumable(self, "manaPotion", 15) then
+        if self:UseManaPotion(30) then
+            MarkDruidConsumableAttempt(self, "manaPotion")
+            DruidDebug("Used mana potion")
+            return true
+        end
+        if self.debugMode then
+            DruidDebug("Druid mana potion unavailable; will retry")
+        end
     end
     
     local targetHP = self:GetTargetHealthPercent("target")
@@ -1278,6 +1307,25 @@ local function GetDemoralizingDebuffTimeRemaining(ac, unit)
     return 0
 end
 
+CanRetryDruidConsumable = function(ac, key, retryAfter)
+    if not ac then return false end
+
+    ac.druidConsumableAttempts = ac.druidConsumableAttempts or {}
+    local lastAttempt = ac.druidConsumableAttempts[key]
+    if not lastAttempt then
+        return true
+    end
+
+    return (GetTime() - lastAttempt) >= (retryAfter or 10)
+end
+
+MarkDruidConsumableAttempt = function(ac, key)
+    if not ac then return end
+
+    ac.druidConsumableAttempts = ac.druidConsumableAttempts or {}
+    ac.druidConsumableAttempts[key] = GetTime()
+end
+
 function AC:FeralBearTankRotation()
     -- Initialize threat tracking variables
     self.expectedThreatTargets = self.expectedThreatTargets or {}
@@ -1553,9 +1601,15 @@ function AC:RestorationDruidRotation()
     end
     
     -- Mana potion
-    if manaPercent < 20 and self.UseManaPotion and self:UseManaPotion(20) then
-        DruidDebug("Used mana potion")
-        return true
+    if manaPercent < 20 and self.UseManaPotion and CanRetryDruidConsumable(self, "manaPotion", 15) then
+        if self:UseManaPotion(20) then
+            MarkDruidConsumableAttempt(self, "manaPotion")
+            DruidDebug("Used mana potion")
+            return true
+        end
+        if self.debugMode then
+            DruidDebug("Druid mana potion unavailable; will retry")
+        end
     end
     
     -- SMART HEALING PRIORITY 2: INTELLIGENT HEALING ALGORITHM
@@ -2383,6 +2437,7 @@ function AC:InitDruidRotations()
     self.rotations = self.rotations or {}
     self.rotations["DRUID"] = {}
     self.druidFeralCombatRole = nil
+    self.druidConsumableAttempts = self.druidConsumableAttempts or {}
     
     self.rotations["DRUID"]["Balance"] = function(s) return s:DruidRotation() end
     self.rotations["DRUID"]["Feral"] = function(s) return s:DruidRotation() end
@@ -2406,6 +2461,7 @@ function AC:InitDruidRotations()
                 self.druidFeralCombatRole = nil
                 DruidDebug("Feral combat role unlocked")
             end
+            self.druidConsumableAttempts = {}
         end)
     end
 
@@ -2413,6 +2469,7 @@ function AC:InitDruidRotations()
         self:RegisterEvent("PLAYER_TALENT_UPDATE", function()
             self.druidTalentCache = nil
             self.druidFeralCombatRole = nil
+            self.druidConsumableAttempts = {}
         end)
     end
 end
