@@ -376,6 +376,11 @@ function AC:UseRangedAbilityAndReturn(ability, target)
     
     local success = false
 
+    local function castAttempt(spellName, unit)
+        CastSpellByName(spellName, unit)
+        return true
+    end
+
     if (ability == "Taunt" or ability == "Mocking Blow") and not self:IsAutoTauntAllowed() then
         if Throttle("AutoTauntSuppressed", 2.0) then
             WarriorDebug("Skipping " .. ability .. " - auto taunt disabled for large groups")
@@ -402,14 +407,18 @@ function AC:UseRangedAbilityAndReturn(ability, target)
             if self:IsInTauntRange(target) then
                 local targetGUID = UnitGUID(target)
                 if self:ShouldSkipTankRepeatTaunt(targetGUID, targetTarget) then return false end
-                CastSpellByName(S.Taunt, target)
-                self.lastTauntTime = GetTime()
-                self.lastTauntTarget = targetGUID
-                self:RecordTankTaunt(targetGUID)
-                self:MarkAsOurTarget(targetGUID)
-                self:TrackTauntedLooseMob(targetGUID, UnitName(target))
-                WarriorDebug("Used EMERGENCY Taunt - target attacking ally: " .. (UnitName(targetTarget) or "Unknown"))
-                success = true
+                if castAttempt(S.Taunt, target) then
+                    self.lastTauntTime = GetTime()
+                    self.lastTauntTarget = targetGUID
+                    self:RecordTankTaunt(targetGUID)
+                    self:MarkAsOurTarget(targetGUID)
+                    self:TrackTauntedLooseMob(targetGUID, UnitName(target))
+                    WarriorDebug("Used EMERGENCY Taunt - target attacking ally: " .. (UnitName(targetTarget) or "Unknown"))
+                    success = true
+                else
+                    WarriorDebug("Taunt cast attempt failed")
+                    return false
+                end
             end
         else
             -- Target is not attacking anyone or attacking the player - don't waste Taunt
@@ -424,10 +433,14 @@ function AC:UseRangedAbilityAndReturn(ability, target)
         end
         
         if self:IsInHeroicThrowRange(target) then
-            CastSpellByName(S.HeroicThrow, target)
-            self:MarkAsOurTarget(UnitGUID(target))
-            WarriorDebug("Used Heroic Throw on distant target")
-            success = true
+            if castAttempt(S.HeroicThrow, target) then
+                self:MarkAsOurTarget(UnitGUID(target))
+                WarriorDebug("Used Heroic Throw on distant target")
+                success = true
+            else
+                WarriorDebug("Heroic Throw cast attempt failed")
+                return false
+            end
         end
     elseif ability == "Charge" and self:IsUsableSpell(S.Charge) then
         -- Charge is normally out-of-combat only; Warbringer allows in-combat usage.
@@ -444,11 +457,15 @@ function AC:UseRangedAbilityAndReturn(ability, target)
         end
 
         if self:IsInChargeRange(target) then
-            CastSpellByName(S.Charge, target)
-            self:MarkWarriorChargeCast()
-            self:MarkAsOurTarget(UnitGUID(target))
-            WarriorDebug("Used Charge on distant target" .. (hasWarbringer and " (Warbringer)" or ""))
-            success = true
+            if castAttempt(S.Charge, target) then
+                self:MarkWarriorChargeCast()
+                self:MarkAsOurTarget(UnitGUID(target))
+                WarriorDebug("Used Charge on distant target" .. (hasWarbringer and " (Warbringer)" or ""))
+                success = true
+            else
+                WarriorDebug("Charge cast attempt failed")
+                return false
+            end
         end
     elseif ability == "Intercept" and self:IsUsableSpell(S.Intercept) then
         -- FIXED: Check cooldown and stance requirements
@@ -465,10 +482,14 @@ function AC:UseRangedAbilityAndReturn(ability, target)
         end
         
         if self:IsInInterceptRange(target) then
-            CastSpellByName(S.Intercept, target)
-            self:MarkAsOurTarget(UnitGUID(target))
-            WarriorDebug("Used Intercept on distant target")
-            success = true
+            if castAttempt(S.Intercept, target) then
+                self:MarkAsOurTarget(UnitGUID(target))
+                WarriorDebug("Used Intercept on distant target")
+                success = true
+            else
+                WarriorDebug("Intercept cast attempt failed")
+                return false
+            end
         end
     elseif ability == "Mocking Blow" and self:IsUsableSpell(S.MockingBlow) then
         -- FIXED: Check cooldown
@@ -477,11 +498,15 @@ function AC:UseRangedAbilityAndReturn(ability, target)
             return false
         end
         
-        if self:IsInMeleeRange(target) then  -- Mocking Blow is melee range
-            CastSpellByName(S.MockingBlow, target)
-            self:MarkAsOurTarget(UnitGUID(target))
-            WarriorDebug("Used Mocking Blow")
-            success = true
+        if self:IsInMeleeRange(target, true) then  -- Mocking Blow is melee range
+            if castAttempt(S.MockingBlow, target) then
+                self:MarkAsOurTarget(UnitGUID(target))
+                WarriorDebug("Used Mocking Blow")
+                success = true
+            else
+                WarriorDebug("Mocking Blow cast attempt failed")
+                return false
+            end
         end
     elseif ability == "Intervene" and self:IsUsableSpell(S.Intervene) then
         -- FIXED: Check cooldown
@@ -489,24 +514,28 @@ function AC:UseRangedAbilityAndReturn(ability, target)
             WarriorDebug("Intervene on cooldown, skipping")
             return false
         end
-        
-        -- Intervene requires a friendly target
-        if UnitIsFriend("player", target) and self:IsInInterveneRange(target) then
-            CastSpellByName(S.Intervene, target)
-            self:MarkWarriorChargeCast()
-            if UnitExists("target") and UnitCanAttack("player", "target") and not IsCurrentSpell("Attack") then
-                StartAttack()
+
+        local interveneUnit = self:ResolveWarriorInterveneFriendlyUnit(target)
+        if interveneUnit then
+            if castAttempt(S.Intervene, interveneUnit) then
+                self:MarkWarriorChargeCast()
+                if UnitExists("target") and UnitCanAttack("player", "target") then
+                    if not IsCurrentSpell("Attack") then
+                        StartAttack()
+                    end
+                    self:MarkAsOurTarget(UnitGUID("target"))
+                end
+                WarriorDebug("Used Intervene gap closer via " .. (UnitName(interveneUnit) or "Unknown"))
+                success = true
+            else
+                WarriorDebug("Intervene cast attempt failed on " .. (UnitName(interveneUnit) or interveneUnit))
+                return false
             end
-            if UnitExists("target") and UnitCanAttack("player", "target") then
-                self:MarkAsOurTarget(UnitGUID("target"))
-            end
-            WarriorDebug("Used Intervene gap closer via ally")
-            success = true
         end
     end
     
-    -- FIXED: Only switch back to melee if we successfully used a ranged ability and current target is out of melee
-    if success and self:IsAutoTargetSwitchAllowed() and not self:IsInMeleeRange(target) then
+    -- Intervene movement needs the hostile target preserved so follow-up threat can resume.
+    if success and ability ~= "Intervene" and self:IsAutoTargetSwitchAllowed() and not self:IsInMeleeRange(target) then
         local meleeTarget = self:FindMeleeTarget()
         if meleeTarget and not UnitIsUnit(meleeTarget, target) then
             TargetUnit(meleeTarget)
@@ -523,7 +552,7 @@ function AC:FindMeleeTarget()
     for i = 1, 15 do  -- Reduced from 40 for performance
         local unit = "nameplate" .. i
         if UnitExists(unit) and UnitCanAttack("player", unit) and 
-           not UnitIsDead(unit) and self:IsInMeleeRange(unit) then
+           not UnitIsDead(unit) and self:IsInMeleeRange(unit, true) then
             return unit
         end
     end
@@ -536,13 +565,47 @@ function AC:FindMeleeTarget()
         for i = 1, groupSize do
             local groupTarget = unitPrefix .. i .. "target"
             if UnitExists(groupTarget) and UnitCanAttack("player", groupTarget) and 
-               not UnitIsDead(groupTarget) and self:IsInMeleeRange(groupTarget) then
+               not UnitIsDead(groupTarget) and self:IsInMeleeRange(groupTarget, true) then
                 return groupTarget
             end
         end
     end
     
     return nil
+end
+
+function AC:ResolveWarriorInterveneFriendlyUnit(unit)
+    if not unit or not UnitExists(unit) or UnitIsUnit(unit, "player") or UnitIsDeadOrGhost(unit) then
+        return nil
+    end
+
+    local resolvedUnit = unit
+
+    if UnitCanAttack("player", unit) then
+        local victimUnit = unit .. "target"
+        if not UnitExists(victimUnit) or not UnitIsFriend("player", victimUnit) or UnitIsUnit(victimUnit, "player") or
+           UnitIsDeadOrGhost(victimUnit) then
+            return nil
+        end
+
+        local groupSize = GetGroupSize()
+        local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
+        for i = 1, groupSize do
+            local groupUnit = unitPrefix .. i
+            if UnitExists(groupUnit) and UnitIsUnit(groupUnit, victimUnit) then
+                resolvedUnit = groupUnit
+                break
+            end
+        end
+    elseif not UnitIsFriend("player", unit) then
+        return nil
+    end
+
+    if not self:IsInInterveneRange(resolvedUnit) then
+        return nil
+    end
+
+    return resolvedUnit
 end
 
 function AC:FindWarriorInterveneTarget(hostileTarget)
@@ -555,20 +618,21 @@ function AC:FindWarriorInterveneTarget(hostileTarget)
         return nil
     end
 
-    local victimUnit = hostileTarget .. "target"
-    if UnitExists(victimUnit) and UnitIsFriend("player", victimUnit) and not UnitIsUnit(victimUnit, "player") and
-       not UnitIsDeadOrGhost(victimUnit) and self:IsInInterveneRange(victimUnit) then
-        return victimUnit
+    local groupSize = GetGroupSize()
+    local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
+
+    local directInterveneUnit = self:ResolveWarriorInterveneFriendlyUnit(hostileTarget)
+    if directInterveneUnit then
+        return directInterveneUnit
     end
 
-    local groupSize = GetGroupSize()
     for i = 1, groupSize do
-        local unit = "party" .. i
-        if UnitExists(unit) and UnitIsFriend("player", unit) and not UnitIsUnit(unit, "player") and
-           not UnitIsDeadOrGhost(unit) and self:IsInInterveneRange(unit) then
-            local unitTarget = unit .. "target"
+        local unit = unitPrefix .. i
+        local interveneUnit = self:ResolveWarriorInterveneFriendlyUnit(unit)
+        if interveneUnit then
+            local unitTarget = interveneUnit .. "target"
             if UnitExists(unitTarget) and UnitIsUnit(unitTarget, hostileTarget) then
-                return unit
+                return interveneUnit
             end
         end
     end
@@ -692,12 +756,24 @@ function AC:UseWarriorDefensives()
     local function markAttempt(key)
         self.defensiveAttempts[key] = now
     end
+
+    local function shouldDelayConsumableRetry(reason)
+        return reason == "attempted" or reason == "gcd" or reason == "locked" or
+               reason == "blocked" or reason == "cooldown"
+    end
     
     if health < 35 and canRetry("healthPotion", 20) then
-        if self:UseHealthPotion(35) then
+        local usedPotion, reason = self:UseHealthPotion(35)
+        if usedPotion then
             markAttempt("healthPotion")
             WarriorDebug("Used health potion at " .. string.format("%.0f", health) .. "% health")
             return true
+        end
+        if shouldDelayConsumableRetry(reason) then
+            markAttempt("healthPotion")
+        end
+        if self.debugMode then
+            WarriorDebug("Health potion unavailable: " .. tostring(reason or "none"))
         end
     end
     
@@ -777,10 +853,17 @@ function AC:UseWarriorDefensives()
     end
     
     if (health < 30 or (spec == "Protection" and underHeavyPressure and health < 40)) and canRetry("defensivePotion", 20) then
-        if self:UseDefensivePotion(3) then
+        local usedPotion, reason = self:UseDefensivePotion(3)
+        if usedPotion then
             markAttempt("defensivePotion")
             WarriorDebug("Used defensive potion")
             return true
+        end
+        if shouldDelayConsumableRetry(reason) then
+            markAttempt("defensivePotion")
+        end
+        if self.debugMode then
+            WarriorDebug("Defensive potion unavailable: " .. tostring(reason or "none"))
         end
     end
     
@@ -1471,6 +1554,7 @@ function AC:TryProtectionWarbringerCharge(target)
     if self:GetPlayerSpec() ~= "Protection" then return false end
     if not self:HasWarbringerTalent() or not self:KnowsSpell(S.Charge) then return false end
     if not UnitExists(target) or not UnitCanAttack("player", target) or UnitIsDeadOrGhost(target) then return false end
+    if self:IsInMeleeRange(target, true) then return false end
     if self:GetSpellCooldown(S.Charge) > 0 or not self:IsUsableSpell(S.Charge) then return false end
     if not self:IsInChargeRange(target) then return false end
 
@@ -1487,14 +1571,23 @@ function AC:TryProtectionInterveneGapCloser(target)
     if GetGroupSize() > 5 then return false end
     if not UnitAffectingCombat("player") then return false end
     if not UnitExists(target) or not UnitCanAttack("player", target) or UnitIsDeadOrGhost(target) then return false end
-    if self:IsInMeleeRange(target) then return false end
+    if self:IsInMeleeRange(target, true) then return false end
 
     local interveneTarget = self:FindWarriorInterveneTarget(target)
-    if not interveneTarget then return false end
+    if not interveneTarget then
+        if Throttle("ProtInterveneNoTarget", 2.0) then
+            WarriorDebug("Prot: Intervene unavailable - no valid ally path")
+        end
+        return false
+    end
 
     if self:UseRangedAbilityAndReturn("Intervene", interveneTarget) then
         WarriorDebug("Prot: Intervene gap closer via " .. (UnitName(interveneTarget) or "Unknown"))
         return true
+    end
+
+    if Throttle("ProtInterveneFailed", 2.0) then
+        WarriorDebug("Prot: Intervene path found but cast failed on " .. (UnitName(interveneTarget) or interveneTarget))
     end
 
     return false
@@ -1933,6 +2026,12 @@ function AC:ProtectionWarriorRotation()
     -- Auto-attack
     if hasTarget then StartAttack() end
 
+    if inCombat then
+        if self:HandleTankTargeting() then return true end
+        hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
+        if not hasTarget then return true end
+    end
+
     -- Protection prefers Intervene in combat as the primary gap closer.
     if inCombat and hasTarget and level >= 70 and self:TryProtectionInterveneGapCloser("target") then
         return true
@@ -1941,6 +2040,21 @@ function AC:ProtectionWarriorRotation()
     -- Warbringer Charge is the fallback when Intervene is unavailable or on cooldown.
     if hasTarget and level >= 4 and self:TryProtectionWarbringerCharge("target") then
         return true
+    end
+
+    if inCombat and hasTarget and not self:IsInMeleeRange("target", true) then
+        local currentGUID = UnitGUID("target")
+        local meleeTarget = self.FindBestTankTarget and self:FindBestTankTarget(true, true, currentGUID)
+        if meleeTarget and UnitExists(meleeTarget) and not UnitIsUnit(meleeTarget, "target") then
+            TargetUnit(meleeTarget)
+            if not IsCurrentSpell("Attack") then
+                StartAttack()
+            end
+            self.lastTargetSwitch = GetTime()
+            self:MarkAsOurTarget(UnitGUID("target"))
+            WarriorDebug("Prot: Returned to melee target after failed gap close")
+            return true
+        end
     end
     
     -- Out of combat charge
@@ -1961,9 +2075,6 @@ function AC:ProtectionWarriorRotation()
     end
 
     if inCombat then
-        if self:HandleTankTargeting() then return true end
-        if not hasTarget then return true end
-
         -- FIXED: Use defensive cooldowns when needed
         if self:UseWarriorDefensives() then return true end
         

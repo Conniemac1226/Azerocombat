@@ -520,14 +520,12 @@ end
 
 local CanRetryDruidConsumable
 local MarkDruidConsumableAttempt
+local ShouldDelayDruidConsumableRetry
 
 function AC:UseDruidDefensives(form)
     local health = self:GetPlayerHealthPercent()
     local inCombat = UnitAffectingCombat("player")
     local enemies = self:GetEnemyCount()
-    local gcdStart, gcdDuration = GetSpellCooldown("61304")
-    local onGlobalCooldown = gcdStart and gcdDuration and gcdDuration > 0 and
-                             ((gcdStart + gcdDuration - GetTime()) > 0.1)
     
     if not inCombat then return false end
 
@@ -535,21 +533,18 @@ function AC:UseDruidDefensives(form)
 
     -- Emergency health potion first
     if health < 50 and self.UseHealthPotion then
-        if onGlobalCooldown then
-            if self.debugMode then
-                DruidDebug("Druid health potion delayed: global cooldown active")
-            end
-            return true
-        end
-
         if CanRetryDruidConsumable(self, "healthPotion", 20) then
-            if self:UseHealthPotion(50) then
+            local usedPotion, reason = self:UseHealthPotion(50)
+            if usedPotion then
                 MarkDruidConsumableAttempt(self, "healthPotion")
                 DruidDebug("Used health potion at " .. string.format("%.0f", health) .. "% health")
                 return true
             end
+            if ShouldDelayDruidConsumableRetry(reason) then
+                MarkDruidConsumableAttempt(self, "healthPotion")
+            end
             if self.debugMode then
-                DruidDebug("Druid health potion unavailable; will retry")
+                DruidDebug("Druid health potion unavailable: " .. tostring(reason or "none"))
             end
         end
     end
@@ -903,13 +898,17 @@ function AC:BalanceDruidRotation()
     
     -- Mana management
     if manaPercent < 30 and self.UseManaPotion and CanRetryDruidConsumable(self, "manaPotion", 15) then
-        if self:UseManaPotion(30) then
+        local usedPotion, reason = self:UseManaPotion(30)
+        if usedPotion then
             MarkDruidConsumableAttempt(self, "manaPotion")
             DruidDebug("Used mana potion")
             return true
         end
+        if ShouldDelayDruidConsumableRetry(reason) then
+            MarkDruidConsumableAttempt(self, "manaPotion")
+        end
         if self.debugMode then
-            DruidDebug("Druid mana potion unavailable; will retry")
+            DruidDebug("Druid mana potion unavailable: " .. tostring(reason or "none"))
         end
     end
     
@@ -1326,6 +1325,11 @@ MarkDruidConsumableAttempt = function(ac, key)
     ac.druidConsumableAttempts[key] = GetTime()
 end
 
+ShouldDelayDruidConsumableRetry = function(reason)
+    return reason == "attempted" or reason == "gcd" or reason == "locked" or
+           reason == "blocked" or reason == "cooldown"
+end
+
 function AC:FeralBearTankRotation()
     -- Initialize threat tracking variables
     self.expectedThreatTargets = self.expectedThreatTargets or {}
@@ -1602,13 +1606,17 @@ function AC:RestorationDruidRotation()
     
     -- Mana potion
     if manaPercent < 20 and self.UseManaPotion and CanRetryDruidConsumable(self, "manaPotion", 15) then
-        if self:UseManaPotion(20) then
+        local usedPotion, reason = self:UseManaPotion(20)
+        if usedPotion then
             MarkDruidConsumableAttempt(self, "manaPotion")
             DruidDebug("Used mana potion")
             return true
         end
+        if ShouldDelayDruidConsumableRetry(reason) then
+            MarkDruidConsumableAttempt(self, "manaPotion")
+        end
         if self.debugMode then
-            DruidDebug("Druid mana potion unavailable; will retry")
+            DruidDebug("Druid mana potion unavailable: " .. tostring(reason or "none"))
         end
     end
     

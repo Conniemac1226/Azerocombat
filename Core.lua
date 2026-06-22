@@ -930,6 +930,43 @@ function AC:GetTankThreatPriorityBonus(unit, inMeleeRange, groupSize, threatStat
     return bonus
 end
 
+function AC:GetTankThreatRiskScore(unit, threatState)
+    if self:GetGroupSize() > 5 then return 0 end
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDead(unit) then return 0 end
+
+    threatState = threatState or self:GetTankThreatState(unit)
+    if not threatState or threatState.status == nil then return 0 end
+
+    local status = threatState.status
+    local score = 0
+
+    if status <= 0 then
+        score = score + 90
+    elseif status == 1 then
+        score = score + 75
+    elseif status == 2 then
+        score = score + 45
+    end
+
+    local scaledPercent = threatState.scaledPercent or threatState.rawPercent
+    if scaledPercent then
+        if scaledPercent >= 95 then
+            score = score + 60
+        elseif scaledPercent >= 80 then
+            score = score + 40
+        elseif scaledPercent >= 65 then
+            score = score + 20
+        end
+    end
+
+    local targetUnit = unit .. "target"
+    if UnitExists(targetUnit) and UnitIsFriend("player", targetUnit) and not UnitIsUnit(targetUnit, "player") then
+        score = score + 70
+    end
+
+    return score
+end
+
 -- Universal tank detection (WotLK 3.3.5a compatible)
 function AC:IsTankSpec(unit)
     unit = unit or "player"
@@ -1085,6 +1122,27 @@ function AC:GetTankMovementAbility(unit)
     return nil
 end
 
+function AC:GetTankActionResponse(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+        return nil
+    end
+
+    if self:IsInMeleeRange(unit, true) then
+        return "melee"
+    end
+
+    local abilities = self:GetTankAbilitiesForPlayer()
+    if abilities and self.CanTauntTarget then
+        local tauntAbility = self:CanTauntTarget(unit, abilities)
+        if tauntAbility then
+            return tauntAbility
+        end
+    end
+
+    return self:GetTankMovementAbility(unit)
+end
+
 function AC:GetTankTargetPriority(unit)
     if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDead(unit) then
         return 0
@@ -1096,7 +1154,7 @@ function AC:GetTankTargetPriority(unit)
     local classification = UnitClassification(unit)
     local level = UnitLevel(unit)
     local playerLevel = UnitLevel("player")
-    local inMeleeRange = self:IsInMeleeRange(unit)
+    local inMeleeRange = self:IsInMeleeRange(unit, true)
     local threatState = self:GetTankThreatState(unit)
     local movementAbility = self:GetTankMovementAbility(unit)
     local abilities = self:GetTankAbilitiesForPlayer()
@@ -1171,6 +1229,15 @@ function AC:GetTankTargetPriority(unit)
         priority = priority + threatBonus
     end
 
+    local threatRisk = self:GetTankThreatRiskScore(unit, threatState)
+    if threatRisk > 0 then
+        if inMeleeRange then
+            priority = priority + threatRisk
+        else
+            priority = priority + math.floor(threatRisk * 0.5)
+        end
+    end
+
     return math.max(priority, 0)
 end
 
@@ -1182,7 +1249,7 @@ function AC:FindBestTankTarget(meleeOnly, ignoreThrottle, excludeGUID)
     local bestTarget = nil
     local highestPriority = 0
     local currentTarget = UnitExists("target") and "target" or nil
-    local currentInMelee = currentTarget and self:IsInMeleeRange(currentTarget)
+    local currentInMelee = currentTarget and self:IsInMeleeRange(currentTarget, true)
 
     local currentGUID = currentTarget and UnitGUID(currentTarget)
     if currentTarget and currentGUID ~= excludeGUID and UnitCanAttack("player", currentTarget) and not UnitIsDead(currentTarget) then
@@ -1255,8 +1322,8 @@ function AC:FindBestTankTarget(meleeOnly, ignoreThrottle, excludeGUID)
     end
 
     for _, candidate in ipairs(candidates) do
-        local candidateInMelee = self:IsInMeleeRange(candidate.unit)
-        local canReachCandidate = candidateInMelee or self:GetTankMovementAbility(candidate.unit) ~= nil
+        local candidateInMelee = self:IsInMeleeRange(candidate.unit, true)
+        local canReachCandidate = candidateInMelee or self:GetTankActionResponse(candidate.unit) ~= nil
         if meleeOnly then
             canReachCandidate = candidateInMelee
         end
@@ -1289,13 +1356,14 @@ function AC:ShouldSwitchTankTarget()
 
     local currentTarget = "target"
     local currentGUID = UnitGUID(currentTarget)
-    local currentInMelee = self:IsInMeleeRange(currentTarget)
+    local currentInMelee = self:IsInMeleeRange(currentTarget, true)
     local currentPriority = self:GetTankTargetPriority(currentTarget)
     local groupSize = self:GetGroupSize()
     local currentThreatState = groupSize <= 5 and self:GetTankThreatState(currentTarget) or nil
 
     if currentGUID and self.lastTauntTarget == currentGUID then
-        local recentTaunt = (GetTime() - (self.lastTauntTime or 0)) < 8
+        local tauntAge = GetTime() - (self.lastTauntTime or 0)
+        local recentTaunt = tauntAge < 6
         if recentTaunt then
             local meleeTarget = self:FindBestTankTarget(true, true, currentGUID)
             if meleeTarget and not UnitIsUnit(meleeTarget, currentTarget) then
@@ -1303,6 +1371,14 @@ function AC:ShouldSwitchTankTarget()
                     self:Debug("Recent taunt: returning to melee target " .. (UnitName(meleeTarget) or "Unknown"))
                 end
                 return true
+            end
+
+            if not currentInMelee then
+                if self.debugMode then
+                    self:Debug("Recent taunt: ranged target not in melee, releasing hold")
+                end
+                self.lastTauntTarget = nil
+                return false
             end
 
             if self.debugMode then
@@ -1315,14 +1391,24 @@ function AC:ShouldSwitchTankTarget()
     if UnitCanAttack("player", currentTarget) and not UnitIsDead(currentTarget) then
         local bestTarget, bestPriority = self:FindBestTankTarget(false, false, currentGUID)
         if bestTarget and not UnitIsUnit(bestTarget, currentTarget) then
-            local bestInMelee = self:IsInMeleeRange(bestTarget)
+            local bestInMelee = self:IsInMeleeRange(bestTarget, true)
             local bestThreatState = groupSize <= 5 and self:GetTankThreatState(bestTarget) or nil
+            local currentThreatRisk = groupSize <= 5 and self:GetTankThreatRiskScore(currentTarget, currentThreatState) or 0
+            local bestThreatRisk = groupSize <= 5 and self:GetTankThreatRiskScore(bestTarget, bestThreatState) or 0
 
             if currentInMelee then
+                if bestInMelee and groupSize <= 5 and bestThreatRisk >= currentThreatRisk + 35 and bestPriority > currentPriority + 20 then
+                    if self.debugMode then
+                        self:Debug("Proactive threat switch: " .. (UnitName(bestTarget) or "Unknown") ..
+                                   " risk " .. tostring(bestThreatRisk) .. " over " ..
+                                   (UnitName(currentTarget) or "Unknown") .. " risk " .. tostring(currentThreatRisk))
+                    end
+                    return true
+                end
+
                 if not bestInMelee and bestPriority >= 200 then
-                    local threatTarget = bestTarget .. "target"
-                    if UnitExists(threatTarget) and UnitIsFriend("player", threatTarget) and not UnitIsUnit(threatTarget, "player") then
-                        return true
+                    if self.debugMode then
+                        self:Debug("Proactive ranged switch blocked while current target is in melee")
                     end
                 end
                 return false
@@ -1360,7 +1446,19 @@ function AC:UpdateTankTargeting()
 
     if self:ShouldSwitchTankTarget() then
         local currentGUID = UnitGUID("target")
-        local bestTarget, priority = self:FindBestTankTarget(false, false, currentGUID)
+        local bestTarget, priority
+
+        if UnitExists("target") and UnitCanAttack("player", "target") and not self:IsInMeleeRange("target", true) then
+            bestTarget, priority = self:FindBestTankTarget(true, true, currentGUID)
+            if not bestTarget then
+                return false
+            end
+        end
+
+        if not bestTarget then
+            bestTarget, priority = self:FindBestTankTarget(false, true, currentGUID)
+        end
+
         if bestTarget then
             local oldTarget = UnitExists("target") and UnitName("target") or "None"
             TargetUnit(bestTarget)
@@ -1382,13 +1480,30 @@ function AC:HandleTankTargeting()
 
     if self:HandleUniversalLooseMobs() then return true end
 
-    if UnitAffectingCombat("player") and self:UpdateTankTargeting() then
-        return true
-    end
-
     local threatLoss = self.DetectThreatLoss and self:DetectThreatLoss() or nil
     if threatLoss and threatLoss.priority and threatLoss.priority >= 150 then
         if UnitExists(threatLoss.lostTarget) and UnitCanAttack("player", threatLoss.lostTarget) then
+            local sameAsCurrentTarget = UnitExists("target") and UnitIsUnit(threatLoss.lostTarget, "target")
+            local actionResponse = self.GetTankActionResponse and self:GetTankActionResponse(threatLoss.lostTarget) or nil
+
+            if sameAsCurrentTarget then
+                if self.TryImmediateTankTaunt and self:TryImmediateTankTaunt("target", threatLoss.newTarget) then
+                    return true
+                end
+
+                if self.debugMode and self:Throttle("ThreatLossCurrentTargetDebug", 1.0) then
+                    self:Debug("Threat loss on current target; allowing combat logic to act (" .. tostring(actionResponse or "none") .. ")")
+                end
+                return false
+            end
+
+            if not actionResponse then
+                if self.debugMode then
+                    self:Debug("Skipped threat-loss retarget to unreachable ranged enemy: " .. (UnitName(threatLoss.lostTarget) or "Unknown"))
+                end
+                return false
+            end
+
             TargetUnit(threatLoss.lostTarget)
             if not IsCurrentSpell("Attack") then
                 StartAttack()
@@ -1397,6 +1512,10 @@ function AC:HandleTankTargeting()
             self:MarkAsOurTarget(UnitGUID("target"))
             return true
         end
+    end
+
+    if UnitAffectingCombat("player") and self:UpdateTankTargeting() then
+        return true
     end
 
     return false
@@ -1439,28 +1558,101 @@ function AC:HandleTauntedLooseMobGapClosing()
     end
 
     local timeSinceTaunt = GetTime() - tauntedData.tauntTime
-    if timeSinceTaunt >= 8 then
+    if timeSinceTaunt >= 6 then
         tauntedData.needsGapCloser = false
-        return false
-    end
-
-    if self:IsInMeleeRange("target") then
-        tauntedData.needsGapCloser = false
+        local meleeTarget = self:FindBestTankTarget(true, true, targetGUID)
+        if meleeTarget and UnitExists(meleeTarget) and not UnitIsUnit(meleeTarget, "target") then
+            TargetUnit(meleeTarget)
+            self.lastTargetSwitch = GetTime()
+            self:MarkAsOurTarget(UnitGUID("target"))
+            if not IsCurrentSpell("Attack") then
+                StartAttack()
+            end
+            self:Debug("Taunted ranged mob timed out; returned to melee target " .. (UnitName("target") or "Unknown"))
+            return true
+        end
         return false
     end
 
     local movementAbility = self:GetTankMovementAbility("target")
-    if movementAbility then
-        CastSpellByName(movementAbility, "target")
+    if not movementAbility and self:IsInMeleeRange("target", true) then
         tauntedData.needsGapCloser = false
-        self:MarkAsOurTarget(targetGUID)
-        if self.RecordUniversalTaunt then
-            self:RecordUniversalTaunt(targetGUID)
+        return false
+    end
+    if movementAbility then
+        local moved = false
+        local function castMovementAttempt(spellName, unit)
+            if not spellName or not unit or not UnitExists(unit) then
+                return false
+            end
+
+            if not self:IsUsableSpell(spellName) or self:GetSpellCooldown(spellName) > 0 then
+                return false
+            end
+
+            CastSpellByName(spellName, unit)
+            return true
         end
-        return true
+
+        if movementAbility == "Intervene" and self.FindWarriorInterveneTarget then
+            local interveneTarget = self:FindWarriorInterveneTarget("target")
+            if interveneTarget and UnitExists(interveneTarget) then
+                if self.UseRangedAbilityAndReturn then
+                    moved = self:UseRangedAbilityAndReturn("Intervene", interveneTarget)
+                else
+                    CastSpellByName(movementAbility, interveneTarget)
+                    moved = true
+                end
+            end
+
+            if not moved then
+                if self:KnowsSpell("Charge") and self:IsUsableSpell("Charge") and self:GetSpellCooldown("Charge") == 0 and
+                   self:IsInSpellRangeSafe("Charge", "target") and
+                   self.HasWarbringerTalent and self:HasWarbringerTalent() then
+                    if castMovementAttempt("Charge", "target") then
+                        if self.MarkWarriorChargeCast then
+                            self:MarkWarriorChargeCast()
+                        end
+                        moved = true
+                        self:Debug("Intervene failed; used Charge fallback on taunted ranged mob")
+                    end
+                elseif self:KnowsSpell("Intercept") and self:IsUsableSpell("Intercept") and self:GetSpellCooldown("Intercept") == 0 and
+                       self:IsInSpellRangeSafe("Intercept", "target") and
+                       ((self.HasWarbringerTalent and self:HasWarbringerTalent()) or
+                        (self.GetCurrentStance and self:GetCurrentStance() == 3)) then
+                    if castMovementAttempt("Intercept", "target") then
+                        moved = true
+                        self:Debug("Intervene failed; used Intercept fallback on taunted ranged mob")
+                    end
+                end
+            end
+        else
+            moved = castMovementAttempt(movementAbility, "target")
+        end
+
+        if moved then
+            tauntedData.needsGapCloser = false
+            self:MarkAsOurTarget(targetGUID)
+            if self.RecordUniversalTaunt then
+                self:RecordUniversalTaunt(targetGUID)
+            end
+            return true
+        end
     end
 
     tauntedData.needsGapCloser = false
+    local meleeTarget = self:FindBestTankTarget(true, true, targetGUID)
+    if meleeTarget and UnitExists(meleeTarget) and not UnitIsUnit(meleeTarget, "target") then
+        TargetUnit(meleeTarget)
+        self.lastTargetSwitch = GetTime()
+        self:MarkAsOurTarget(UnitGUID("target"))
+        if not IsCurrentSpell("Attack") then
+            StartAttack()
+        end
+        self:Debug("No gap closer for taunted ranged mob; returned to melee target " .. (UnitName("target") or "Unknown"))
+        return true
+    end
+
     return false
 end
 
@@ -1648,6 +1840,50 @@ function AC:CanTauntTarget(unit, abilities)
     end
     
     return false
+end
+
+function AC:TryImmediateTankTaunt(unit, victimUnit)
+    if not unit or not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+        return false
+    end
+
+    local abilities = self:GetTankAbilitiesForPlayer()
+    if not abilities then return false end
+
+    local tauntAbility = self:CanTauntTarget(unit, abilities)
+    if not tauntAbility then return false end
+
+    local mobGUID = UnitGUID(unit)
+    if mobGUID and self:ShouldSkipTankRepeatTaunt(mobGUID, victimUnit) then
+        if self.debugMode and self:Throttle("ImmediateTankTauntSkip", 1.0) then
+            self:Debug("Immediate tank taunt skipped on " .. (UnitName(unit) or "Unknown") .. " - recently taunted")
+        end
+        return false
+    end
+
+    local castUnit = unit
+    if tauntAbility == "Righteous Defense" and victimUnit and UnitExists(victimUnit) then
+        castUnit = victimUnit
+    end
+
+    CastSpellByName(tauntAbility, castUnit)
+
+    if mobGUID then
+        self.lastTauntTime = GetTime()
+        self.lastTauntTarget = mobGUID
+        self:RecordTankTaunt(mobGUID)
+        self:MarkAsOurTarget(mobGUID)
+        if self.TrackTauntedLooseMob then
+            self:TrackTauntedLooseMob(mobGUID, UnitName(unit))
+        end
+    end
+
+    if self.debugMode then
+        self:Debug("Immediate tank taunt: " .. tauntAbility .. " on " .. (UnitName(unit) or "Unknown") ..
+                   " for " .. (victimUnit and UnitName(victimUnit) or "Unknown"))
+    end
+
+    return true
 end
 
 -- Universal loose mob detection with WotLK 3.3.5a group functions
@@ -1871,20 +2107,104 @@ function AC:HandleUniversalLooseMobs()
     
     -- Handle highest priority loose mob first
     local highestPriority = looseMobs[1]
+    local function recordTauntedLooseMob(unit)
+        if not unit or not UnitExists(unit) then
+            return nil
+        end
+
+        local mobGUID = UnitGUID(unit)
+        if mobGUID then
+            self.lastTauntTarget = mobGUID
+            self.lastTauntTime = GetTime()
+            self:RecordUniversalTaunt(mobGUID)
+            self:MarkAsOurTarget(mobGUID)
+            if self.TrackTauntedLooseMob then
+                self:TrackTauntedLooseMob(mobGUID, UnitName(unit))
+            end
+        end
+
+        return mobGUID
+    end
+
+    local function handlePostTauntTargeting()
+        if not UnitExists("target") then
+            return false
+        end
+
+        local currentGUID = UnitGUID("target")
+        local tauntedData = currentGUID and self.tauntedLooseMobs and self.tauntedLooseMobs[currentGUID] or nil
+        if tauntedData and tauntedData.needsGapCloser then
+            local movementAbility = self.GetTankMovementAbility and self:GetTankMovementAbility("target") or nil
+            if movementAbility then
+                if self.debugMode then
+                    self:Debug("Holding taunted ranged mob for gap closer: " .. (UnitName("target") or "Unknown") ..
+                               " via " .. tostring(movementAbility))
+                end
+                return true
+            end
+        end
+
+        if not swapToBestMeleeTargetAfterTaunt() then
+            startAttackOnCurrentTarget()
+        end
+
+        return true
+    end
+
+    local function tryWarriorInterveneAfterTaunt(looseMob)
+        local _, class = UnitClass("player")
+        if class ~= "WARRIOR" then
+            return false
+        end
+
+        if not looseMob or not looseMob.victimUnit or not UnitExists(looseMob.victimUnit) then
+            return false
+        end
+
+        if self:IsInMeleeRange("target", true) then
+            return false
+        end
+
+        if self.UseRangedAbilityAndReturn and self:UseRangedAbilityAndReturn("Intervene", looseMob.victimUnit) then
+            self:Debug("Warrior Intervene after taunt on " .. (UnitName(looseMob.victimUnit) or looseMob.victimUnit))
+            return true
+        end
+
+        if self.debugMode then
+            self:Debug("Warrior Intervene after taunt unavailable for " .. (UnitName(looseMob.victimUnit) or looseMob.victimUnit))
+        end
+        return false
+    end
+
     local function castSingleTargetTaunt(looseMob)
         if not looseMob or not looseMob.tauntAbility then
             return false
         end
 
+        local function castTauntAttempt(spellName, unit)
+            if not spellName or not unit or not UnitExists(unit) then
+                return false
+            end
+
+            if not self:IsUsableSpell(spellName) or self:GetSpellCooldown(spellName) > 0 then
+                return false
+            end
+
+            CastSpellByName(spellName, unit)
+            return true
+        end
+
         if looseMob.tauntAbility == "Righteous Defense" then
             if looseMob.victimUnit and UnitExists(looseMob.victimUnit) then
-                if self:CastSpell(looseMob.tauntAbility, looseMob.victimUnit) then
+                if castTauntAttempt(looseMob.tauntAbility, looseMob.victimUnit) then
                     if looseMob.unit and UnitExists(looseMob.unit) then
                         TargetUnit(looseMob.unit)
+                        recordTauntedLooseMob("target")
                     end
-                    if not swapToBestMeleeTargetAfterTaunt() then
-                        startAttackOnCurrentTarget()
+                    if tryWarriorInterveneAfterTaunt(looseMob) then
+                        return true
                     end
+                    handlePostTauntTargeting()
                     return true
                 end
             end
@@ -1896,17 +2216,18 @@ function AC:HandleUniversalLooseMobs()
         end
 
         TargetUnit(looseMob.unit)
-        if self:CastSpell(looseMob.tauntAbility, "target") then
-            if looseMob.unit and UnitExists(looseMob.unit) then
-                self.lastTauntTarget = UnitGUID(looseMob.unit)
-                self.lastTauntTime = GetTime()
+        if castTauntAttempt(looseMob.tauntAbility, "target") then
+            recordTauntedLooseMob("target")
+            if tryWarriorInterveneAfterTaunt(looseMob) then
+                return true
             end
-            if not swapToBestMeleeTargetAfterTaunt() then
-                startAttackOnCurrentTarget()
-            end
+            handlePostTauntTargeting()
             return true
         end
 
+        if not self:IsInMeleeRange("target", true) then
+            swapToBestMeleeTargetAfterTaunt()
+        end
         return false
     end
     
@@ -1994,13 +2315,6 @@ function AC:HandleUniversalLooseMobs()
         
         if raidTauntSafe then
             if castSingleTargetTaunt(highestPriority) then
-                self.lastTauntTime = GetTime()
-                self.lastTauntTarget = UnitGUID(highestPriority.unit)
-                self:RecordUniversalTaunt(mobGUID)
-                self:MarkAsOurTarget(UnitGUID(highestPriority.unit))
-                if self.TrackTauntedLooseMob then
-                    self:TrackTauntedLooseMob(UnitGUID(highestPriority.unit), UnitName(highestPriority.unit))
-                end
                 self:Debug("Universal HIGH PRIORITY taunt: " .. highestPriority.tauntAbility .. " on " .. (UnitName(highestPriority.unit) or "Unknown") .. " (Priority: " .. highestPriority.priority .. ")")
                 return true
             end
@@ -2031,13 +2345,6 @@ function AC:HandleUniversalLooseMobs()
             
             if raidTauntSafe and (targetHP < 50 or highestPriority.priority >= 400) then
                 if castSingleTargetTaunt(highestPriority) then
-                    self.lastTauntTime = GetTime()
-                    self.lastTauntTarget = UnitGUID(highestPriority.unit)
-                    self:RecordUniversalTaunt(mobGUID)
-                    self:MarkAsOurTarget(UnitGUID(highestPriority.unit))
-                if self.TrackTauntedLooseMob then
-                    self:TrackTauntedLooseMob(UnitGUID(highestPriority.unit), UnitName(highestPriority.unit))
-                end
                 self:Debug("Universal STRATEGIC taunt: " .. highestPriority.tauntAbility .. " on " .. (UnitName(highestPriority.unit) or "Unknown") .. " (Priority: " .. highestPriority.priority .. ", HP: " .. string.format("%.0f", targetHP) .. "%)")
                 return true
                 end
