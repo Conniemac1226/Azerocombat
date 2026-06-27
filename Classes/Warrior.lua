@@ -2027,13 +2027,13 @@ function AC:ProtectionWarriorRotation()
     if hasTarget then StartAttack() end
 
     if inCombat then
-        if self:HandleTankTargeting() then return true end
+        if not largeGroupMode and self:HandleTankTargeting() then return true end
         hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
         if not hasTarget then return true end
     end
 
     -- Protection prefers Intervene in combat as the primary gap closer.
-    if inCombat and hasTarget and level >= 70 and self:TryProtectionInterveneGapCloser("target") then
+    if inCombat and not largeGroupMode and hasTarget and level >= 70 and self:TryProtectionInterveneGapCloser("target") then
         return true
     end
 
@@ -2042,7 +2042,7 @@ function AC:ProtectionWarriorRotation()
         return true
     end
 
-    if inCombat and hasTarget and not self:IsInMeleeRange("target", true) then
+    if inCombat and not largeGroupMode and hasTarget and not self:IsInMeleeRange("target", true) then
         local currentGUID = UnitGUID("target")
         local meleeTarget = self.FindBestTankTarget and self:FindBestTankTarget(true, true, currentGUID)
         if meleeTarget and UnitExists(meleeTarget) and not UnitIsUnit(meleeTarget, "target") then

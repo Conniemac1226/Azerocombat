@@ -342,7 +342,7 @@ function AC:SafeCastGroundAOE(spellName)
         end
     end)
     
-    return true
+    return self:GetGroupSize() <= 5
 end
 
 -- SIMPLIFIED: Remove the aggressive blocking
@@ -1476,6 +1476,7 @@ end
 
 function AC:HandleTankTargeting()
     if not self:IsTankSpec() then return false end
+    if self:GetGroupSize() > 5 then return false end
     if self:HandleTauntedLooseMobGapClosing() then return true end
 
     if self:HandleUniversalLooseMobs() then return true end
