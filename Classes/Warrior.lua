@@ -776,6 +776,14 @@ function AC:UseWarriorDefensives()
             WarriorDebug("Health potion unavailable: " .. tostring(reason or "none"))
         end
     end
+
+    if (health < 40 or (spec == "Protection" and underHeavyPressure and health < 50)) and canRetry("defensiveRacial", 10) then
+        if self:UseRacialsWarrior(false, true) then
+            markAttempt("defensiveRacial")
+            WarriorDebug("Used defensive racial")
+            return true
+        end
+    end
     
     -- Last Stand is the first major survivability button for prot pressure.
     if self:KnowsSpell(S.LastStand) and self:GetSpellCooldown(S.LastStand) == 0 and canRetry("lastStand", 8) then
@@ -1103,6 +1111,40 @@ function AC:UseRacialsWarrior(burst, emergency)
             end
         end
     end
+    return false
+end
+
+function AC:UseProtectionWarriorCombatRacials(nearbyEnemies)
+    if self:GetPlayerSpec() ~= "Protection" then return false end
+    if not UnitAffectingCombat("player") then return false end
+    if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then
+        return false
+    end
+
+    local _, race = UnitRace("player")
+    race = string.upper(race or "")
+    local targetClass = UnitClassification("target")
+    local targetHP = self:GetTargetHealthPercent("target")
+    local burstWindow = targetClass == "elite" or targetClass == "rareelite" or
+                        targetClass == "worldboss" or nearbyEnemies >= 2 or
+                        (IsInGroup() and targetHP > 50)
+
+    if not burstWindow and nearbyEnemies < 2 and UnitPower("player", 1) >= 20 and not UnitCastingInfo("target") then
+        return false
+    end
+
+    if not Throttle("ProtCombatRacials", 12.0) then
+        return false
+    end
+
+    if self:UseRacialsWarrior(burstWindow, false) then
+        WarriorDebug("Prot: Used " .. (burstWindow and "combat" or "utility") .. " racial")
+        if burstWindow and (race == "ORC" or race == "TROLL") then
+            return false
+        end
+        return true
+    end
+
     return false
 end
 
@@ -2032,12 +2074,7 @@ function AC:ProtectionWarriorRotation()
         if not hasTarget then return true end
     end
 
-    -- Protection prefers Intervene in combat as the primary gap closer.
-    if inCombat and not largeGroupMode and hasTarget and level >= 70 and self:TryProtectionInterveneGapCloser("target") then
-        return true
-    end
-
-    -- Warbringer Charge is the fallback when Intervene is unavailable or on cooldown.
+    -- Intervene disabled; use Warbringer Charge as the primary combat gap closer.
     if hasTarget and level >= 4 and self:TryProtectionWarbringerCharge("target") then
         return true
     end
@@ -2150,6 +2187,11 @@ function AC:ProtectionWarriorRotation()
         if Throttle("ProtAOEDebug", 3.0) then
             WarriorDebug("AoE Check: nearbyEnemies=" .. nearbyEnemies .. " inMelee=" .. (inMeleeRange and "Y" or "N"))
         end
+
+        if self:UseProtectionWarriorCombatRacials(nearbyEnemies) then
+            return true
+        end
+
         if nearbyEnemies >= 2 and inMeleeRange then
             -- Thunder Clap FIRST (highest priority for initial AoE threat)
             -- FIXED: Only use Thunderclap when in proper melee range, not just when enemies are detectable
