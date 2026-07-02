@@ -47,8 +47,7 @@ local S = { -- Spells
     FrenziedRegeneration = "Frenzied Regeneration", 
     SurvivalInstincts = "Survival Instincts",
     Lacerate = "Lacerate", 
-    MangleBear = "Mangle (Bear)", 
-    Pulverize = "Pulverize",
+    MangleBear = "Mangle (Bear)",
 
     -- Restoration
     TreeOfLife = "Tree of Life", 
@@ -177,18 +176,9 @@ function AC:GetBearThreatEnemyCount()
         end
     end
 
+    -- Combat-log entries do not expose range by GUID, so do not use them for
+    -- Bear Swipe decisions. Nameplates/current units above are range-checked.
     local combatLogCount = 0
-    local now = GetTime()
-    for guid, data in pairs(self.combatEnemies or {}) do
-        if not processedGUIDs[guid] and (now - data.lastSeen) <= 3 then
-            count = count + 1
-            combatLogCount = combatLogCount + 1
-            processedGUIDs[guid] = true
-            if detailedDebug then
-                self:Debug("Combat log enemy: " .. (data.name or "Unknown"))
-            end
-        end
-    end
 
     count = math.min(count, 10)
     self.lastBearThreatEnemyCount = count
@@ -412,7 +402,7 @@ function AC:GetCurrentDruidForm()
 end
 
 function AC:ShiftToForm(targetFormSpell)
-    if not targetFormSpell or not self:KnowsSpell(targetFormSpell) then return false end
+    if not targetFormSpell then return false end
     
     -- Special handling for shifting to caster form
     if targetFormSpell == "Caster" then
@@ -424,38 +414,16 @@ function AC:ShiftToForm(targetFormSpell)
         end
         return false
     end
+
+    if not self:KnowsSpell(targetFormSpell) then return false end
     
     -- Check if already in the target form
     if self:HasBuff("player", targetFormSpell) then return false end
     
     -- Use the spell if it's usable
-    if self:IsUsableSpell(targetFormSpell) then
+    if self:IsUsableSpell(targetFormSpell) and self:GetSpellCooldown(targetFormSpell) == 0 then
         CastSpellByName(targetFormSpell)
         DruidDebug("Shifting to " .. targetFormSpell)
-        return true
-    end
-    -- Final Balance filler fallback (only after all higher-priority logic fails)
-    if hasSolarEclipse and self:IsUsableSpell(S.Wrath) and self:GetSpellCooldown(S.Wrath) == 0 then
-        CastSpellByName(S.Wrath, "target")
-        DruidDebug("Balance: Filler Wrath")
-        return true
-    end
-
-    if hasLunarEclipse and self:IsUsableSpell(S.Starfire) and self:GetSpellCooldown(S.Starfire) == 0 then
-        CastSpellByName(S.Starfire, "target")
-        DruidDebug("Balance: Filler Starfire")
-        return true
-    end
-
-    if self:IsUsableSpell(S.Wrath) and self:GetSpellCooldown(S.Wrath) == 0 then
-        CastSpellByName(S.Wrath, "target")
-        DruidDebug("Balance: Filler Wrath")
-        return true
-    end
-
-    if self:IsUsableSpell(S.Starfire) and self:GetSpellCooldown(S.Starfire) == 0 then
-        CastSpellByName(S.Starfire, "target")
-        DruidDebug("Balance: Filler Starfire")
         return true
     end
 
@@ -630,10 +598,10 @@ function AC:UseDruidOffensives(spec, form)
     -- Feral Cat
     if form == AC.DruidForms.CAT then
         -- RESEARCH: Berserk is the most powerful cooldown (15 seconds, 50% energy cost reduction)
-        if self:IsUsableSpell(S.Berserk) and Throttle("Berserk", 180) then
-            -- Use when Tiger's Fury has >15s cooldown remaining
+        if self:IsUsableSpell(S.Berserk) and self:GetSpellCooldown(S.Berserk) == 0 then
             local tigersFuryCD = self:GetSpellCooldown(S.TigersFury)
-            if tigersFuryCD > 15 then
+            -- Use when Tiger's Fury has >15s cooldown remaining.
+            if tigersFuryCD > 15 and Throttle("Berserk", 180) then
                 CastSpellByName(S.Berserk)
                 DruidDebug("Berserk - burst")
                 if self.UseTrinkets then self:UseTrinkets() end
@@ -832,7 +800,6 @@ function AC:BalanceDruidRotation()
     local mana = UnitPower("player", 0)
     local maxMana = UnitPowerMax("player", 0)
     local manaPercent = (maxMana > 0) and (mana/maxMana*100) or 100
-    local health = self:GetPlayerHealthPercent()
     local enemies = self:GetEnemyCount()
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     
@@ -843,49 +810,7 @@ function AC:BalanceDruidRotation()
         end
     end
     
-    -- 2x Wrath opener (immediately after Moonkin Form, before ALL other logic)
     self.druidRotationState = self.druidRotationState or {}
-    
-    -- Track combat state transitions for new combat detection
-    local wasInCombat = self.druidRotationState.wasInCombat or false
-    local isInCombat = UnitAffectingCombat("player")
-    
-    -- Reset opener when entering combat (transition from not-in-combat to in-combat)
-    if not wasInCombat and isInCombat then
-        DruidDebug("Balance: New combat detected, resetting Wrath opener")
-        self.druidRotationState.wrathOpenerCount = 0
-        self.druidRotationState.openerComplete = false
-    end
-    
-    -- Reset opener when leaving combat (player no longer in combat)
-    if wasInCombat and not isInCombat then
-        DruidDebug("Balance: Left combat, resetting Wrath opener")
-        self.druidRotationState.wrathOpenerCount = 0
-        self.druidRotationState.openerComplete = false
-    end
-    
-    self.druidRotationState.wasInCombat = isInCombat
-    
-    -- Reset opener when target changes
-    local targetGUID = hasTarget and UnitGUID("target") or nil
-    if self.druidRotationState.lastTargetGUID and targetGUID and self.druidRotationState.lastTargetGUID ~= targetGUID then
-        DruidDebug("Balance: Target changed, resetting Wrath opener")
-        self.druidRotationState.wrathOpenerCount = 0
-        self.druidRotationState.openerComplete = false
-    end
-    self.druidRotationState.lastTargetGUID = targetGUID
-    
-    -- Cast Wrath opener (before Force of Nature, Starfall, Faerie Fire, DoTs, etc.)
-    -- Best-effort only: never block normal rotation if opener cannot fire.
-    if not self.druidRotationState.openerComplete and hasTarget and self:IsUsableSpell(S.Wrath) and self:GetSpellCooldown(S.Wrath) == 0 and manaPercent > 10 and not UnitCastingInfo("player") then
-        CastSpellByName(S.Wrath, "target")
-        DruidDebug("Balance: Wrath opener (" .. tostring(self.druidRotationState.wrathOpenerCount or 0) .. "/2)")
-        self.druidRotationState.wrathOpenerCount = (self.druidRotationState.wrathOpenerCount or 0) + 1
-        if (self.druidRotationState.wrathOpenerCount or 0) >= 2 then
-            self.druidRotationState.openerComplete = true
-        end
-        return true
-    end
     
     if not hasTarget then
         return false
@@ -912,13 +837,7 @@ function AC:BalanceDruidRotation()
         end
     end
     
-    local targetHP = self:GetTargetHealthPercent("target")
     local isFastDying = self:IsFastDyingMob("target")
-    
-    -- Offensive cooldowns
-    if self:UseDruidOffensives("Balance", currentForm) then
-        return true
-    end
     
     -- RESEARCH PRIORITY 1: Faerie Fire (Improved Faerie Fire debuff)
     if not self:HasDebuff("target", S.FaerieFireFeral) and not self:HasDebuff("target", "Sunder Armor") then
@@ -928,8 +847,13 @@ function AC:BalanceDruidRotation()
             return true
         end
     end
-    
-        -- AoE rotation (3+ enemies)
+
+    -- Offensive cooldowns after raid debuff setup.
+    if self:UseDruidOffensives("Balance", currentForm) then
+        return true
+    end
+
+    -- AoE rotation (3+ enemies)
     if enemies >= 3 then
         -- RESEARCH: Starfall on cooldown for AoE
         if self:IsUsableSpell(S.Starfall) and self:GetSpellCooldown(S.Starfall) == 0 and Throttle("StarfallAoe", 3) then
@@ -937,95 +861,81 @@ function AC:BalanceDruidRotation()
             DruidDebug("Balance: Starfall (AoE)")
             return true
         end
-        
-        -- Hurricane channeling
-        if self:IsUsableSpell(S.Hurricane) and manaPercent > 30 and not self:IsChanneling() and not self:IsPlayerMoving() then
-            DruidDebug("Balance: Hurricane (channel)")
-            CastSpellByName(S.Hurricane)
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
-            return true
-        end
-        
-        -- Typhoon for knockback/damage
-        if self:IsUsableSpell(S.Typhoon) and self:IsInMeleeRange("target") then
+
+        -- Typhoon before committing to Hurricane's channel.
+        if self:IsUsableSpell(S.Typhoon) and self:GetSpellCooldown(S.Typhoon) == 0 and self:IsInMeleeRange("target") then
             CastSpellByName(S.Typhoon)
             DruidDebug("Balance: Typhoon")
             return true
         end
-    end
-    
-    -- ENHANCED DOT MANAGEMENT WITH PANDEMIC TIMING
-    local complexity = self:GetRotationComplexity()
-    
-    local function shouldRefreshBalanceDot(debuffName, baseDuration)
-        if not self:HasDebuff("target", debuffName) then
-            return true -- Missing DoT
-        end
-        
-        -- Pandemic timing for advanced rotations (30% rule)
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            local timeRemaining = self:DebuffTimeRemaining("target", debuffName)
-            local pandemicThreshold = baseDuration * 0.3
-            return timeRemaining <= pandemicThreshold
-        end
-        
-        -- Simple refresh for basic rotations
-        return self:DebuffTimeRemaining("target", debuffName) < 3
-    end
-    
-    -- Refresh DoTs on targets <=25% only if NOT fast-dying (execute phase DoT refresh)
-    if not isFastDying then
-        -- Maintain Moonfire as part of the normal single-target DoT package.
-        if shouldRefreshBalanceDot(S.Moonfire, 12) and self:IsUsableSpell(S.Moonfire) and self:GetSpellCooldown(S.Moonfire) == 0 then
-            CastSpellByName(S.Moonfire, "target")
-            DruidDebug("Balance: Moonfire (pandemic-aware)")
-            return true
-        end
-        
-        -- RESEARCH: Insect Swarm (12s base) - important DPS DoT
-        if shouldRefreshBalanceDot(S.InsectSwarm, 12) and self:IsUsableSpell(S.InsectSwarm) and self:GetSpellCooldown(S.InsectSwarm) == 0 then
-            CastSpellByName(S.InsectSwarm, "target")
-            DruidDebug("Balance: Insect Swarm (pandemic-aware)")
-            return true
+
+        -- Hurricane is ground-targeted; use Core.lua's standardized placement helper.
+        if self:IsUsableSpell(S.Hurricane) and manaPercent > 30 and not self:IsChanneling() and not self:IsPlayerMoving() then
+            if self:SafeCastGroundAOE(S.Hurricane) then
+                DruidDebug("Balance: Hurricane (ground AoE)")
+                return true
+            end
         end
     end
-    
+
     -- ENHANCED ECLIPSE MANAGEMENT WITH COMPLEXITY AWARENESS
+    local complexity = self:GetRotationComplexity()
     local hasLunarEclipse = self:HasBuff("player", S.EclipseLunarBuff)
     local hasSolarEclipse = self:HasBuff("player", S.EclipseSolarBuff)
-    self.druidRotationState = self.druidRotationState or {}
 
     if hasLunarEclipse then
         self.druidRotationState.lastBalanceEclipse = "lunar"
     elseif hasSolarEclipse then
         self.druidRotationState.lastBalanceEclipse = "solar"
     end
-    
-    -- Don't cast if already casting
+
     if UnitCastingInfo("player") then
         return false
     end
+
+    local lunarTime = hasLunarEclipse and self:BuffTimeRemaining("player", S.EclipseLunarBuff) or 0
+    local solarTime = hasSolarEclipse and self:BuffTimeRemaining("player", S.EclipseSolarBuff) or 0
+
+    -- Eclipse-buffed nukes outrank DoT refreshes in WotLK.
+    if hasLunarEclipse and lunarTime > 1.5 and self:IsUsableSpell(S.Starfire) and self:GetSpellCooldown(S.Starfire) == 0 and manaPercent > 15 then
+        CastSpellByName(S.Starfire, "target")
+        DruidDebug("Balance: Starfire (Lunar Eclipse - " .. string.format("%.1f", lunarTime) .. "s left)")
+        return true
+    end
+
+    if hasSolarEclipse and solarTime > 1.5 and self:IsUsableSpell(S.Wrath) and self:GetSpellCooldown(S.Wrath) == 0 and manaPercent > 10 then
+        CastSpellByName(S.Wrath, "target")
+        DruidDebug("Balance: Wrath (Solar Eclipse - " .. string.format("%.1f", solarTime) .. "s left)")
+        return true
+    end
     
+    local function shouldRefreshBalanceDot(debuffName)
+        if not self:HasDebuff("target", debuffName) then
+            return true -- Missing DoT
+        end
+
+        -- WotLK DoTs do not have Pandemic; avoid clipping active ticks.
+        return self:DebuffTimeRemaining("target", debuffName) < 0.5
+    end
+
+    if not isFastDying then
+        -- Moonfire is mainly a movement filler in WotLK unless gear bonuses justify it.
+        if self:IsPlayerMoving() and shouldRefreshBalanceDot(S.Moonfire) and self:IsUsableSpell(S.Moonfire) and self:GetSpellCooldown(S.Moonfire) == 0 then
+            CastSpellByName(S.Moonfire, "target")
+            DruidDebug("Balance: Moonfire (movement)")
+            return true
+        end
+
+        -- RESEARCH: Insect Swarm unless Lunar Eclipse is active.
+        if not hasLunarEclipse and shouldRefreshBalanceDot(S.InsectSwarm) and self:IsUsableSpell(S.InsectSwarm) and self:GetSpellCooldown(S.InsectSwarm) == 0 then
+            CastSpellByName(S.InsectSwarm, "target")
+            DruidDebug("Balance: Insect Swarm")
+            return true
+        end
+    end
+
     -- Advanced Eclipse tracking with duration awareness
     if complexity == "ADVANCED" or complexity == "MODERATE" then
-        local lunarTime = hasLunarEclipse and self:BuffTimeRemaining("player", S.EclipseLunarBuff) or 0
-        local solarTime = hasSolarEclipse and self:BuffTimeRemaining("player", S.EclipseSolarBuff) or 0
-        
-        -- RESEARCH: During Lunar Eclipse - spam Starfire (prioritize when >3s left)
-        if hasLunarEclipse and lunarTime > 1.5 and self:IsUsableSpell(S.Starfire) and self:GetSpellCooldown(S.Starfire) == 0 and manaPercent > 15 then
-            CastSpellByName(S.Starfire, "target")
-            DruidDebug("Balance: Starfire (Lunar Eclipse - " .. string.format("%.1f", lunarTime) .. "s left)")
-            return true
-        end
-        
-        -- RESEARCH: During Solar Eclipse - spam Wrath (prioritize when >3s left)
-        if hasSolarEclipse and solarTime > 1.5 and self:IsUsableSpell(S.Wrath) and self:GetSpellCooldown(S.Wrath) == 0 and manaPercent > 10 then
-            CastSpellByName(S.Wrath, "target")
-            DruidDebug("Balance: Wrath (Solar Eclipse - " .. string.format("%.1f", solarTime) .. "s left)")
-            return true
-        end
-        
         -- Alternate builders based on the last Eclipse we consumed.
         local preferWrath = self.druidRotationState.lastBalanceEclipse ~= "lunar"
 
@@ -1070,13 +980,13 @@ function AC:FeralCatDpsRotation()
     local currentForm = self:GetCurrentDruidForm()
     local energy = UnitPower("player", 3)
     local cp = self:GetComboPoints()
-    local health = self:GetPlayerHealthPercent()
     local enemies = self:GetEnemyCount()
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     
     -- Shift to Cat if not already
     if currentForm ~= AC.DruidForms.CAT then
         if self:ShiftToForm(S.CatForm) then return true end
+        if not self:KnowsSpell(S.CatForm) then return self:LevelingDruidRotation() end
     end
     
     if not hasTarget then return false end
@@ -1088,102 +998,70 @@ function AC:FeralCatDpsRotation()
     if self:UseDruidDefensives(currentForm) then return true end
     
     local targetHP = self:GetTargetHealthPercent("target")
-    local isBehind = self:IsBehindTarget()
     local isFastDying = self:IsFastDyingMob("target")
     local hasOOC = self:HasOmenOfClarity()
+
+    -- Offensive cooldowns are top priority for Cat when the target is worth it.
+    if self:UseDruidOffensives("Feral", currentForm) then return true end
+
+    -- Omen of Clarity should be spent on Shred when position allows.
+    if hasOOC and cp < 5 and self:IsUsableSpell(S.Shred) then
+        CastSpellByName(S.Shred, "target")
+        DruidDebug("Cat: Shred (Clearcasting)")
+        return true
+    end
     
     -- RESEARCH PRIORITY 1: Faerie Fire (Feral) - armor reduction
     if self:DebuffTimeRemaining("target", S.FaerieFireFeral) < 5 and self:IsUsableSpell(S.FaerieFireFeral)
-       and self:GetSpellCooldown(S.FaerieFireFeral) == 0 and Throttle("CatFaerieFire", 0.8) then
+       and self:GetSpellCooldown(S.FaerieFireFeral) == 0 and not hasOOC and Throttle("CatFaerieFire", 0.8) then
         CastSpellByName(S.FaerieFireFeral, "target")
         DruidDebug("Cat: Faerie Fire (armor reduction)")
         return true
     end
-    
-    -- AoE rotation (3+ enemies)
-    if enemies >= 3 then
-        -- RESEARCH: Swipe spam for AoE (only AoE ability for cats)
+
+    -- Savage Roar should be refreshed only as it falls off.
+    local srTime = self:BuffTimeRemaining("player", S.SavageRoar)
+
+    if srTime < 1.0 and cp >= 1 and energy >= 25 and self:IsUsableSpell(S.SavageRoar)
+       and self:GetSpellCooldown(S.SavageRoar) == 0 and Throttle("CatSavageRoar", 0.8) then
+        CastSpellByName(S.SavageRoar)
+        DruidDebug("Cat: Savage Roar (" .. cp .. "CP)")
+        return true
+    end
+
+    -- AoE rotation: keep Savage Roar first, then Swipe.
+    if enemies >= 3 and srTime > 1.0 then
         if self:IsUsableSpell(S.SwipeCat) and energy >= (hasOOC and 0 or 45) then
             CastSpellByName(S.SwipeCat, "target")
             DruidDebug("Cat: Swipe (AoE)")
             return true
         end
     end
-    
+
     -- 2-target cleave: keep ST maintenance, then use Swipe as filler.
     if enemies == 2 and cp < 5 and self:IsUsableSpell(S.SwipeCat) and energy >= (hasOOC and 0 or 45) then
-        local srTimeCleave = self:BuffTimeRemaining("player", S.SavageRoar)
         local rakeTimeCleave = self:DebuffTimeRemaining("target", S.Rake)
-        if srTimeCleave > 6 and rakeTimeCleave > 3 then
+        if srTime > 6 and rakeTimeCleave > 1 then
             CastSpellByName(S.SwipeCat, "target")
             DruidDebug("Cat: Swipe (2-target cleave filler)")
             return true
         end
     end
     
-    -- ENHANCED SAVAGE ROAR MANAGEMENT WITH COMPLEXITY AWARENESS
-    local complexity = self:GetRotationComplexity()
-    local srTime = self:BuffTimeRemaining("player", S.SavageRoar)
-    
-    -- Advanced Savage Roar management with optimal combo point usage
-    if complexity == "ADVANCED" or complexity == "MODERATE" then
-        -- Use pandemic-style timing (refresh at 30% duration = ~9s for 30s buff)
-        local shouldRefreshSR = srTime < 9 and cp >= 1 and energy >= 25
-        
-        -- Optimize combo point usage: prefer 5CP for long duration, 1CP only if urgent
-        if shouldRefreshSR then
-            if cp >= 5 then
-                -- 5CP gives maximum duration
-                if self:IsUsableSpell(S.SavageRoar) and self:GetSpellCooldown(S.SavageRoar) == 0
-                   and Throttle("CatSavageRoar", 0.8) then
-                    CastSpellByName(S.SavageRoar)
-                    DruidDebug("Cat: Savage Roar (5CP - optimal duration)")
-                    return true
-                end
-            elseif cp >= 1 and srTime < 3 then
-                -- Emergency refresh with 1CP
-                if self:IsUsableSpell(S.SavageRoar) and self:GetSpellCooldown(S.SavageRoar) == 0
-                   and Throttle("CatSavageRoar", 0.8) then
-                    CastSpellByName(S.SavageRoar)
-                    DruidDebug("Cat: Savage Roar (" .. cp .. "CP - emergency refresh)")
-                    return true
-                end
-            end
-        end
-    else
-        -- Simple Savage Roar management for basic rotations
-        if srTime < 3 and cp >= 1 and energy >= 25 then
-            if self:IsUsableSpell(S.SavageRoar) and self:GetSpellCooldown(S.SavageRoar) == 0
-               and Throttle("CatSavageRoar", 0.8) then
-                CastSpellByName(S.SavageRoar)
-                DruidDebug("Cat: Savage Roar (" .. cp .. "CP) - TOP PRIORITY")
-                return true
-            end
-        end
-    end
-    
-    -- ENHANCED RIP MANAGEMENT WITH PANDEMIC TIMING
+    -- Rip: WotLK has no Pandemic, so do not clip active ticks.
     if cp >= 5 and not isFastDying and targetHP > 25 then
         local ripTime = self:DebuffTimeRemaining("target", S.Rip)
-        local shouldRefreshRip = false
-        
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            -- Pandemic timing: refresh at 30% of 16s base duration = ~5s
-            shouldRefreshRip = ripTime < 5 and energy >= 30
-        else
-            -- Simple timing for basic rotations
-            shouldRefreshRip = ripTime < 4 and energy >= 30
-        end
-        
-        if shouldRefreshRip then
+        local ripCost = hasOOC and 0 or 30
+
+        if ripTime < 0.5 and energy >= ripCost and self:IsUsableSpell(S.Rip) then
             CastSpellByName(S.Rip, "target")
-            DruidDebug("Cat: Rip (5CP - pandemic-aware)")
+            DruidDebug("Cat: Rip (5CP)")
             return true
         end
     end
     
     -- RESEARCH PRIORITY 4: Ferocious Bite (5 CP, when DoTs/SR are maintained)
-    if cp >= 5 and energy >= 35 then
+    if cp >= 5 and energy >= 35 and self:IsUsableSpell(S.FerociousBite) then
         local srTime = self:BuffTimeRemaining("player", S.SavageRoar)
         local ripTime = self:DebuffTimeRemaining("target", S.Rip)
         
@@ -1195,23 +1073,14 @@ function AC:FeralCatDpsRotation()
         end
     end
     
-    -- ENHANCED RAKE MANAGEMENT WITH PANDEMIC TIMING
+    -- Rake: WotLK has no Pandemic, so do not clip active ticks.
     local rakeTime = self:DebuffTimeRemaining("target", S.Rake)
     local rakeCost = hasOOC and 0 or 35
-    local shouldRefreshRake = false
     
     if not isFastDying and energy >= rakeCost then
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            -- Pandemic timing: refresh at 30% of 9s base duration = ~3s
-            shouldRefreshRake = rakeTime < 3
-        else
-            -- Simple timing for basic rotations
-            shouldRefreshRake = rakeTime < 3
-        end
-        
-        if shouldRefreshRake then
+        if rakeTime < 0.5 and self:IsUsableSpell(S.Rake) then
             CastSpellByName(S.Rake, "target")
-            DruidDebug("Cat: Rake (9s DoT - pandemic-aware)")
+            DruidDebug("Cat: Rake")
             return true
         end
     end
@@ -1249,9 +1118,6 @@ function AC:FeralCatDpsRotation()
             return true
         end
     end
-
-    -- Offensive cooldowns (energy management and burst) after urgent maintenance.
-    if self:UseDruidOffensives("Feral", currentForm) then return true end
     
     -- Final 5CP anti-idle fallback: only bite when finishers are healthy.
     if cp == 5 and energy >= 60 and self:IsUsableSpell(S.FerociousBite) then
@@ -1343,6 +1209,16 @@ function AC:FeralBearTankRotation()
     local enemies = self:GetBearThreatEnemyCount()
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     local autoTauntAllowed = self:IsAutoTauntAllowed()
+    local now = GetTime()
+    local inCombat = UnitAffectingCombat("player")
+
+    if inCombat and not self.druidBearWasInCombat then
+        self.druidBearCombatStart = now
+    elseif not inCombat then
+        self.druidBearCombatStart = nil
+    end
+    self.druidBearWasInCombat = inCombat
+    local bearCombatElapsed = self.druidBearCombatStart and (now - self.druidBearCombatStart) or 0
     
     -- Shift to Bear if not already
     local bearForm = self:KnowsSpell(S.DireBearForm) and S.DireBearForm or S.BearForm
@@ -1380,38 +1256,58 @@ function AC:FeralBearTankRotation()
         return true
     end
     
-    -- RESEARCH: Enrage for rage generation (important for bear)
-    if rage < 20 and self:IsUsableSpell(S.Enrage) then
+    -- Enrage is best as opener rage; avoid repeated in-fight armor-penalty usage.
+    if bearCombatElapsed < 3 and rage < 20 and health > 80 and self:IsUsableSpell(S.Enrage)
+       and self:GetSpellCooldown(S.Enrage) == 0 then
         CastSpellByName(S.Enrage)
-        DruidDebug("Bear: Enrage (rage gen)")
+        DruidDebug("Bear: Enrage (opener rage)")
         return true
     end
     
     -- EPIC THREAT: Berserk with trinkets for maximum threat
-    if self:IsUsableSpell(S.Berserk) and Throttle("BerserkBear", 180) then
+    if self:IsUsableSpell(S.Berserk) and self:GetSpellCooldown(S.Berserk) == 0 then
         local targetClass = UnitClassification("target")
         local targetHP = self:GetTargetHealthPercent("target")
         
         -- EPIC CONDITIONS: Use on elite/boss targets or AoE situations
         if targetClass == "elite" or targetClass == "rareelite" or targetClass == "worldboss" or 
            enemies >= 3 or (targetHP > 100000 and IsInGroup()) then
-            CastSpellByName(S.Berserk)
-            DruidDebug("EPIC BERSERK: Maximum threat mode")
-            
-            -- Use trinkets with Berserk for maximum threat
-            if self.UseTrinkets then self:UseTrinkets() end
-            
-            -- Use offensive racials
-            if self:UseRacialsDruid(true, false) then
-                DruidDebug("EPIC BERSERK: Used racial with Berserk")
+            if Throttle("BerserkBear", 180) then
+                CastSpellByName(S.Berserk)
+                DruidDebug("EPIC BERSERK: Maximum threat mode")
+
+                -- Use trinkets with Berserk for maximum threat
+                if self.UseTrinkets then self:UseTrinkets() end
+
+                -- Use offensive racials
+                if self:UseRacialsDruid(true, false) then
+                    DruidDebug("EPIC BERSERK: Used racial with Berserk")
+                end
+
+                return true
             end
-            
-            return true
         end
+    end
+
+    local hasBerserk = self:HasBuff("player", S.Berserk)
+
+    -- During Berserk, Mangle is the highest-value AoE threat button.
+    if hasBerserk and self:IsUsableSpell(S.MangleBear) and self:GetSpellCooldown(S.MangleBear) == 0 and rage >= 15 then
+        CastSpellByName(S.MangleBear, "target")
+        DruidDebug("EPIC BERSERK THREAT: Mangle spam")
+        return true
+    end
+
+    -- Single-target priority starts with Mangle for snap threat.
+    if enemies < 3 and self:IsUsableSpell(S.MangleBear) and self:GetSpellCooldown(S.MangleBear) == 0 and rage >= 20 then
+        CastSpellByName(S.MangleBear, "target")
+        DruidDebug("EPIC THREAT: Mangle (massive threat + bleed debuff)")
+        return true
     end
     
     -- EPIC PRIORITY 1: Faerie Fire (Feral) - single-target snap threat and armor reduction
-    if enemies < 3 and self:DebuffTimeRemaining("target", S.FaerieFireFeral) < 5 and self:IsUsableSpell(S.FaerieFireFeral) then
+    if enemies < 3 and self:DebuffTimeRemaining("target", S.FaerieFireFeral) < 5 and
+       self:IsUsableSpell(S.FaerieFireFeral) and self:GetSpellCooldown(S.FaerieFireFeral) == 0 then
         CastSpellByName(S.FaerieFireFeral, "target")
         DruidDebug("EPIC THREAT: Faerie Fire (snap threat + armor reduction)")
         return true
@@ -1430,27 +1326,25 @@ function AC:FeralBearTankRotation()
     end
     
     -- EPIC PRIORITY 2.5: Growl for single target threat emergency
-    if autoTauntAllowed and enemies == 1 and self:IsUsableSpell(S.Growl) and Throttle("Growl", 8) then
-        if not UnitIsUnit("target", "player") and UnitExists("targettarget") then
+    if autoTauntAllowed and enemies == 1 and self:IsUsableSpell(S.Growl) and self:GetSpellCooldown(S.Growl) == 0 then
+        if UnitExists("targettarget") and not UnitIsUnit("targettarget", "player") and UnitIsFriend("player", "targettarget") then
             if self:GetGroupSize() > 5 and not self:IsRaidTauntSafeVictim("targettarget") then
                 DruidDebug("BLOCKED raid Growl - target is on confirmed tank victim: " .. (UnitName("targettarget") or "Unknown"))
-                return false
-            end
-
-            local targetGUID = UnitGUID("target")
-            local hadThreatBefore = (self.expectedThreatTargets and self.expectedThreatTargets[targetGUID]) or
-                                  (self.lastTauntTarget == targetGUID and (GetTime() - self.lastTauntTime) < 15)
-            local canGrowl = self:GetGroupSize() <= 5 or hadThreatBefore
-            
-            if canGrowl then
-                CastSpellByName(S.Growl, "target")
-                self.lastTauntTime = GetTime()
-                self.lastTauntTarget = UnitGUID("target")
-                DruidDebug(self:GetGroupSize() <= 5 and "EPIC THREAT: Growl (5-man snap threat)" or "EPIC THREAT: Growl (threat recovery)")
-                return true
             else
-                DruidDebug("BLOCKED wasteful Growl - we never had threat on this target")
-                return false
+                local targetGUID = UnitGUID("target")
+                local hadThreatBefore = (self.expectedThreatTargets and self.expectedThreatTargets[targetGUID]) or
+                                      (self.lastTauntTarget == targetGUID and (GetTime() - self.lastTauntTime) < 15)
+                local canGrowl = self:GetGroupSize() <= 5 or hadThreatBefore
+
+                if canGrowl and Throttle("Growl", 8) then
+                    CastSpellByName(S.Growl, "target")
+                    self.lastTauntTime = GetTime()
+                    self.lastTauntTarget = UnitGUID("target")
+                    DruidDebug(self:GetGroupSize() <= 5 and "EPIC THREAT: Growl (5-man snap threat)" or "EPIC THREAT: Growl (threat recovery)")
+                    return true
+                else
+                    DruidDebug("BLOCKED wasteful Growl - we never had threat on this target")
+                end
             end
         end
     end
@@ -1465,50 +1359,20 @@ function AC:FeralBearTankRotation()
     
     -- REMOVED: Tab-target threat management - handled by universal system
     
-    -- EPIC PRIORITY 4: Mangle - massive threat and bleed debuff
-    if self:IsUsableSpell(S.MangleBear) and rage >= 20 then
-        CastSpellByName(S.MangleBear, "target")
-        DruidDebug("EPIC THREAT: Mangle (massive threat + bleed debuff)")
-        return true
-    end
-    
-    -- EPIC PRIORITY 5: Advanced Lacerate stacking with pandemic timing
+    -- EPIC PRIORITY 5: Advanced Lacerate stacking with safe refresh timing
     if self:IsUsableSpell(S.Lacerate) and rage >= 13 then
         local _, lacStacks = self:HasDebuff("target", S.Lacerate)
         local lacTimeRemaining = self:DebuffTimeRemaining("target", S.Lacerate)
         
         -- EPIC LACERATE LOGIC:
         -- 1. Build to 5 stacks for maximum DoT damage
-        -- 2. Maintain with pandemic timing (refresh at 30% duration)
+        -- 2. Refresh before the stack falls off
         -- 3. Each stack increases threat and damage
-        if (lacStacks or 0) < 5 or lacTimeRemaining < 4.5 then -- Pandemic timing
+        if (lacStacks or 0) < 5 or lacTimeRemaining < 4.5 then
             CastSpellByName(S.Lacerate, "target")
             DruidDebug("EPIC LACERATE: Stack " .. ((lacStacks or 0) + 1) .. "/5 (time: "..string.format("%.1f", lacTimeRemaining)..")")
             return true
         end
-    end
-    
-    -- EPIC PRIORITY 6: Strategic Pulverize usage for survivability
-    if self:KnowsSpell(S.Pulverize) and self:IsUsableSpell(S.Pulverize) and rage >= 15 then
-        local _, lacStacks = self:HasDebuff("target", S.Lacerate)
-        local pulverizeTime = self:BuffTimeRemaining("player", S.Pulverize)
-        
-        -- EPIC PULVERIZE LOGIC:
-        -- 1. Use when we have 3+ Lacerate stacks
-        -- 2. Provides 18% damage reduction buff
-        -- 3. Only use if buff is about to expire or we need survivability
-        if (lacStacks or 0) >= 3 and (pulverizeTime < 3 or health < 60) then
-            CastSpellByName(S.Pulverize, "target")
-            DruidDebug("EPIC SURVIVABILITY: Pulverize (18% damage reduction, consumed " .. (lacStacks or 0) .. " stacks)")
-            return true
-        end
-    end
-    
-    -- EPIC PRIORITY 7: Swipe as efficient filler threat
-    if enemies >= 3 and self:IsUsableSpell(S.SwipeBear) and rage >= GetBearSwipeThreshold(level) then
-        CastSpellByName(S.SwipeBear, "target")
-        DruidDebug("EPIC THREAT: Swipe (filler threat)")
-        return true
     end
     
     return false
@@ -1523,13 +1387,11 @@ function AC:RestorationDruidRotation()
     local mana = UnitPower("player", 0)
     local maxMana = UnitPowerMax("player", 0)
     local manaPercent = (maxMana > 0) and (mana/maxMana*100) or 100
-    local health = self:GetPlayerHealthPercent()
-    local inCombat = UnitAffectingCombat("player")
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     
     -- SMART HEALING PRIORITY 1: EMERGENCY TRIAGE OVERRIDE
     -- If anyone is critically injured, emergency triage takes absolute priority
-    if self:EmergencyTriage() then return true end
+    if self:DruidEmergencyTriage() then return true end
     
     -- EPIC PRIORITY 0: Handle dispels first
     if self:HandleDispels() then return true end
@@ -1550,21 +1412,24 @@ function AC:RestorationDruidRotation()
     local emergencyTarget, emergencyHP = self:FindHealingTarget(40, 0.25)
     if emergencyTarget then
         -- EPIC PROTOCOL: Nature's Swiftness + Healing Touch for <25% HP
-        if emergencyHP < 0.25 and self:IsUsableSpell(S.NaturesSwiftness) then
+        if emergencyHP < 0.25 and self:IsUsableSpell(S.NaturesSwiftness)
+           and self:GetSpellCooldown(S.NaturesSwiftness) == 0 then
             CastSpellByName(S.NaturesSwiftness)
             DruidDebug("EPIC EMERGENCY: Nature's Swiftness for " .. (UnitName(emergencyTarget) or emergencyTarget))
             return true
         end
         
         -- Use NS + HT combo immediately
-        if self:HasBuff("player", S.NaturesSwiftness) and self:IsUsableSpell(S.HealingTouch) then
+        if self:HasBuff("player", S.NaturesSwiftness) and self:IsUsableSpell(S.HealingTouch)
+           and not UnitCastingInfo("player") then
             CastSpellByName(S.HealingTouch, emergencyTarget)
             DruidDebug("EPIC EMERGENCY: NS + Healing Touch on " .. (UnitName(emergencyTarget) or emergencyTarget))
             return true
         end
         
         -- EPIC PROTOCOL: Swiftmend for emergency <30% HP
-        if emergencyHP < 0.30 and self:IsUsableSpell(S.Swiftmend) then
+        if emergencyHP < 0.30 and self:IsUsableSpell(S.Swiftmend)
+           and self:GetSpellCooldown(S.Swiftmend) == 0 then
             if self:HasBuff(emergencyTarget, S.Rejuvenation) or self:HasBuff(emergencyTarget, S.Regrowth) then
                 CastSpellByName(S.Swiftmend, emergencyTarget)
                 DruidDebug("EPIC EMERGENCY: Swiftmend on " .. (UnitName(emergencyTarget) or emergencyTarget))
@@ -1574,7 +1439,7 @@ function AC:RestorationDruidRotation()
     end
     
     -- EPIC PRIORITY 2: Mana management with Innervate on others
-    if manaPercent < 30 and self:IsUsableSpell(S.Innervate) then
+    if self:IsUsableSpell(S.Innervate) and self:GetSpellCooldown(S.Innervate) == 0 then
         -- Try to innervate other healers first if they need it more
         local healerNeedingMana = nil
         local groupUnits = {}
@@ -1590,18 +1455,21 @@ function AC:RestorationDruidRotation()
         
         for _, unit in ipairs(groupUnits) do
             if UnitExists(unit) and self:IsHealer(unit) and not UnitIsUnit(unit, "player") then
-                local unitMana = UnitPower(unit, 0) / UnitPowerMax(unit, 0) * 100
-                if unitMana < 20 then
+                local unitMaxMana = UnitPowerMax(unit, 0)
+                local unitMana = unitMaxMana > 0 and (UnitPower(unit, 0) / unitMaxMana * 100) or 100
+                if unitMana < 20 and IsHealingSpellInRange(unit) then
                     healerNeedingMana = unit
                     break
                 end
             end
         end
         
-        local innervateTarget = healerNeedingMana or "player"
-        CastSpellByName(S.Innervate, innervateTarget)
-        DruidDebug("EPIC MANA: Innervate on " .. (UnitName(innervateTarget) or innervateTarget))
-        return true
+        if healerNeedingMana or manaPercent < 30 then
+            local innervateTarget = healerNeedingMana or "player"
+            CastSpellByName(S.Innervate, innervateTarget)
+            DruidDebug("EPIC MANA: Innervate on " .. (UnitName(innervateTarget) or innervateTarget))
+            return true
+        end
     end
     
     -- Mana potion
@@ -1622,10 +1490,10 @@ function AC:RestorationDruidRotation()
     
     -- SMART HEALING PRIORITY 2: INTELLIGENT HEALING ALGORITHM
     -- Use advanced smart healing system for optimal spell selection and overhealing minimization
-    if self:SmartHeal() then return true end
+    if self:DruidSmartHeal() then return true end
     
     -- RESEARCH: Nature's Swiftness emergency healing
-    if self:IsUsableSpell(S.NaturesSwiftness) then
+    if self:IsUsableSpell(S.NaturesSwiftness) and self:GetSpellCooldown(S.NaturesSwiftness) == 0 then
         local emergTarget, emergHP = self:FindHealingTarget(40, 0.30)
         if emergTarget then
             CastSpellByName(S.NaturesSwiftness)
@@ -1674,7 +1542,8 @@ function AC:RestorationDruidRotation()
     end
     
     -- RESEARCH PRIORITY 1: Swiftmend emergency heal (instant)
-    if healTargetHealth < 0.50 and self:IsUsableSpell(S.Swiftmend) then
+    if healTargetHealth < 0.50 and self:IsUsableSpell(S.Swiftmend)
+       and self:GetSpellCooldown(S.Swiftmend) == 0 then
         if self:HasBuff(healTarget, S.Rejuvenation) or self:HasBuff(healTarget, S.Regrowth) then
             CastSpellByName(S.Swiftmend, healTarget)
             DruidDebug("Resto: Swiftmend on " .. UnitName(healTarget))
@@ -1683,7 +1552,7 @@ function AC:RestorationDruidRotation()
     end
     
     -- EPIC PRIORITY 3: Advanced group healing with Wild Growth
-    if self:IsUsableSpell(S.WildGrowth) and healTargetHealth < 0.80 then
+    if self:IsUsableSpell(S.WildGrowth) and self:GetSpellCooldown(S.WildGrowth) == 0 and healTargetHealth < 0.80 then
         -- Enhanced group damage detection
         local groupUnits = {}
         if GetNumRaidMembers() > 0 then
@@ -1700,8 +1569,9 @@ function AC:RestorationDruidRotation()
         local tanksDamaged = 0
         
         for _, unit in ipairs(groupUnits) do
-            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) then
-                local hp = UnitHealth(unit) / UnitHealthMax(unit)
+            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsHealingSpellInRange(unit) then
+                local maxHP = UnitHealthMax(unit)
+                local hp = maxHP > 0 and (UnitHealth(unit) / maxHP) or 1
                 if hp < 0.85 then
                     lowHealthCount = lowHealthCount + 1
                     if self:IsTank(unit) then
@@ -1743,18 +1613,17 @@ function AC:RestorationDruidRotation()
         end
     end
     
-    -- Maintain Lifebloom on all tanks with pandemic timing
+    -- Maintain Lifebloom only when tank damage or Clearcasting justifies the mana.
     for _, tankUnit in ipairs(tankUnits) do
         local _, _, _, lbStacks = self:HasBuff(tankUnit, S.Lifebloom)
         local lbTimeRemaining = self:BuffTimeRemaining(tankUnit, S.Lifebloom)
-        
-        -- EPIC LIFEBLOOM MANAGEMENT:
-        -- 1. Build to 3 stacks
-        -- 2. Maintain with pandemic timing (refresh when <30% duration, ~4.5s)
-        -- 3. Let bloom for mana return if tank is healthy
-        local tankHP = UnitHealth(tankUnit) / UnitHealthMax(tankUnit)
-        
-        if (lbStacks or 0) < 3 or (lbTimeRemaining < 4.5 and tankHP < 0.90) then
+        local maxTankHP = UnitHealthMax(tankUnit)
+        local tankHP = maxTankHP > 0 and (UnitHealth(tankUnit) / maxTankHP) or 1
+        local hasClearcasting = self:HasOmenOfClarity()
+
+        if self:IsUsableSpell(S.Lifebloom) and (hasClearcasting or manaPercent > 35) and
+           (tankHP < 0.75 or hasClearcasting) and
+           ((lbStacks or 0) < 3 or (lbTimeRemaining < 1.0 and tankHP < 0.85)) then
             CastSpellByName(S.Lifebloom, tankUnit)
             DruidDebug("EPIC LIFEBLOOM: " .. (UnitName(tankUnit) or tankUnit) .. " (stack: "..(lbStacks or 0).."/3, time: "..string.format("%.1f", lbTimeRemaining)..")")
             return true
@@ -1765,21 +1634,11 @@ function AC:RestorationDruidRotation()
     if healTargetHealth < 0.95 then
         local rejuvTime = self:BuffTimeRemaining(healTarget, S.Rejuvenation)
         
-        -- EPIC REJUVENATION LOGIC:
-        -- 1. Apply to anyone missing health
-        -- 2. Use pandemic timing (refresh at 30% duration)
-        -- 3. Prioritize tanks and healers
-        local rejuvPriority = 1
-        if self:IsTank(healTarget) then
-            rejuvPriority = 3
-        elseif self:IsHealer(healTarget) then
-            rejuvPriority = 2
-        end
-        
-        -- Apply or refresh based on priority and pandemic timing
-        if rejuvTime < (4.5 * rejuvPriority) then -- Higher priority = longer refresh window
+        local refreshWindow = self:IsTank(healTarget) and 2.0 or 1.0
+
+        if rejuvTime < refreshWindow and self:IsUsableSpell(S.Rejuvenation) then
             CastSpellByName(S.Rejuvenation, healTarget)
-            DruidDebug("EPIC REJUVENATION: " .. (UnitName(healTarget) or healTarget) .. " (priority: " .. rejuvPriority .. ", time: "..string.format("%.1f", rejuvTime)..")")
+            DruidDebug("EPIC REJUVENATION: " .. (UnitName(healTarget) or healTarget) .. " (time: "..string.format("%.1f", rejuvTime)..")")
             return true
         end
     end
@@ -1852,16 +1711,10 @@ function AC:RestorationDruidRotation()
     end
     
     -- EPIC PRIORITY 9: Advanced Tranquility panic protocol
-    if self:IsUsableSpell(S.Tranquility) and Throttle("Tranquility", 480) then
-        local groupUnits = {}
-        if GetNumRaidMembers() > 0 then
-            for i = 1, GetNumRaidMembers() do
-                table.insert(groupUnits, "raid" .. i)
-            end
-        elseif GetNumPartyMembers() > 0 then
-            for i = 1, GetNumPartyMembers() do
-                table.insert(groupUnits, "party" .. i)
-            end
+    if self:IsUsableSpell(S.Tranquility) and self:GetSpellCooldown(S.Tranquility) == 0 then
+        local groupUnits = {"player"}
+        for _, unit in ipairs(BuildDruidGroupUnitList()) do
+            groupUnits[#groupUnits + 1] = unit
         end
         
         local criticalHealthCount = 0
@@ -1869,8 +1722,9 @@ function AC:RestorationDruidRotation()
         local tanksCritical = 0
         
         for _, unit in ipairs(groupUnits) do
-            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) then
-                local hp = UnitHealth(unit) / UnitHealthMax(unit)
+            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and IsHealingSpellInRange(unit) then
+                local maxHP = UnitHealthMax(unit)
+                local hp = maxHP > 0 and (UnitHealth(unit) / maxHP) or 1
                 if hp < 0.30 then
                     criticalHealthCount = criticalHealthCount + 1
                     if self:IsTank(unit) then
@@ -1886,7 +1740,7 @@ function AC:RestorationDruidRotation()
         -- 1. 3+ people critical (<30% HP), OR
         -- 2. 1+ tanks critical, OR
         -- 3. 5+ people low health (<50% HP)
-        if criticalHealthCount >= 3 or tanksCritical >= 1 or lowHealthCount >= 5 then
+        if (criticalHealthCount >= 3 or tanksCritical >= 1 or lowHealthCount >= 5) and Throttle("Tranquility", 5) then
             CastSpellByName(S.Tranquility)
             DruidDebug("EPIC TRANQUILITY: PANIC MODE (Critical: " .. criticalHealthCount .. ", Tanks: " .. tanksCritical .. ", Low: " .. lowHealthCount .. ")")
             return true
@@ -1982,6 +1836,106 @@ function AC:FindHealingTarget(range, threshold)
     end
     
     return nil, 1.0
+end
+
+function AC:DruidEmergencyTriage()
+    if not Throttle("DruidEmergencyTriage", 0.2) then return false end
+
+    local target, hp = self:FindHealingTarget(40, 0.30)
+    if not target then return false end
+
+    if self:HasBuff("player", S.NaturesSwiftness) and self:IsUsableSpell(S.HealingTouch)
+       and not UnitCastingInfo("player") then
+        CastSpellByName(S.HealingTouch, target)
+        DruidDebug("Resto triage: NS + Healing Touch on " .. (UnitName(target) or target))
+        return true
+    end
+
+    if hp < 0.25 and self:IsUsableSpell(S.NaturesSwiftness)
+       and self:GetSpellCooldown(S.NaturesSwiftness) == 0 and self:IsUsableSpell(S.HealingTouch) then
+        CastSpellByName(S.NaturesSwiftness)
+        DruidDebug("Resto triage: Nature's Swiftness")
+        return true
+    end
+
+    if hp < 0.30 and self:IsUsableSpell(S.Swiftmend) and self:GetSpellCooldown(S.Swiftmend) == 0 and
+       (self:HasBuff(target, S.Rejuvenation) or self:HasBuff(target, S.Regrowth)) then
+        CastSpellByName(S.Swiftmend, target)
+        DruidDebug("Resto triage: Swiftmend on " .. (UnitName(target) or target))
+        return true
+    end
+
+    if hp < 0.30 and self:IsUsableSpell(S.Rejuvenation) and self:BuffTimeRemaining(target, S.Rejuvenation) < 1 then
+        CastSpellByName(S.Rejuvenation, target)
+        DruidDebug("Resto triage: Rejuvenation on " .. (UnitName(target) or target))
+        return true
+    end
+
+    if hp < 0.25 and self:IsUsableSpell(S.Regrowth) and not UnitCastingInfo("player") then
+        CastSpellByName(S.Regrowth, target)
+        DruidDebug("Resto triage: Regrowth on " .. (UnitName(target) or target))
+        return true
+    end
+
+    return false
+end
+
+function AC:DruidSmartHeal()
+    if not Throttle("DruidSmartHeal", 0.3) then return false end
+
+    local target, hp = self:FindHealingTarget(40, 0.85)
+    if not target then return false end
+
+    if hp < 0.50 and self:IsUsableSpell(S.Swiftmend) and self:GetSpellCooldown(S.Swiftmend) == 0 and
+       (self:HasBuff(target, S.Rejuvenation) or self:HasBuff(target, S.Regrowth)) then
+        CastSpellByName(S.Swiftmend, target)
+        DruidDebug("Resto smart heal: Swiftmend on " .. (UnitName(target) or target))
+        return true
+    end
+
+    if hp < 0.80 and self:IsUsableSpell(S.WildGrowth) and self:GetSpellCooldown(S.WildGrowth) == 0 then
+        local damaged = 0
+        local tanksDamaged = 0
+        local groupUnits = {"player"}
+        for _, unit in ipairs(BuildDruidGroupUnitList()) do
+            groupUnits[#groupUnits + 1] = unit
+        end
+
+        for _, unit in ipairs(groupUnits) do
+            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) and IsHealingSpellInRange(unit) then
+                local maxHP = UnitHealthMax(unit)
+                local unitHP = maxHP > 0 and (UnitHealth(unit) / maxHP) or 1
+                if unitHP < 0.85 then
+                    damaged = damaged + 1
+                    if self:IsTank(unit) then
+                        tanksDamaged = tanksDamaged + 1
+                    end
+                end
+            end
+        end
+
+        if damaged >= 3 or (damaged >= 2 and tanksDamaged >= 1) then
+            CastSpellByName(S.WildGrowth, target)
+            DruidDebug("Resto smart heal: Wild Growth (" .. damaged .. " damaged)")
+            return true
+        end
+    end
+
+    if hp < 0.75 and self:IsUsableSpell(S.Nourish) and not UnitCastingInfo("player") then
+        local hotCount = 0
+        if self:HasBuff(target, S.Rejuvenation) then hotCount = hotCount + 1 end
+        if self:HasBuff(target, S.Regrowth) then hotCount = hotCount + 1 end
+        if self:HasBuff(target, S.Lifebloom) then hotCount = hotCount + 1 end
+        if self:HasBuff(target, S.WildGrowth) then hotCount = hotCount + 1 end
+
+        if hotCount > 0 then
+            CastSpellByName(S.Nourish, target)
+            DruidDebug("Resto smart heal: Nourish on " .. (UnitName(target) or target))
+            return true
+        end
+    end
+
+    return false
 end
 
 -- Enhanced role detection
@@ -2285,6 +2239,10 @@ function AC:DruidRotation()
         return self:LevelingDruidRotation()
     end
 
+    if level < 20 and not isFeralBuild and (spec == "None" or spec == "Unknown" or not spec) then
+        return self:LevelingDruidRotation()
+    end
+
     if isFeralBuild then
         feralRole = self:DetermineFeralRole()
         if not self:KnowsSpell(S.CatForm) then
@@ -2312,6 +2270,13 @@ function AC:DruidRotation()
         if spec == "Balance" and hasTarget then
             if self:KnowsSpell(S.MoonkinForm) and currentForm ~= AC.DruidForms.MOONKIN then
                 if self:ShiftToForm(S.MoonkinForm) then return true end
+            end
+            if self:DebuffTimeRemaining("target", S.FaerieFireBalance) < 3 and
+               not self:HasDebuff("target", S.FaerieFireFeral) and not self:HasDebuff("target", "Sunder Armor") and
+               self:IsUsableSpell(S.FaerieFireBalance) and self:GetSpellCooldown(S.FaerieFireBalance) == 0 then
+                CastSpellByName(S.FaerieFireBalance, "target")
+                DruidDebug("Balance: Faerie Fire pre-pull")
+                return true
             end
             if self:IsUsableSpell(S.Wrath) and manaPercent > 10 and not UnitCastingInfo("player") then
                 CastSpellByName(S.Wrath, "target")
