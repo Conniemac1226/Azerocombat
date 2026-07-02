@@ -1089,13 +1089,6 @@ function AC:GetTankMovementAbility(unit)
         local isProtection = self.GetPlayerSpec and self:GetPlayerSpec() == "Protection"
         local inCombat = UnitAffectingCombat("player")
 
-        if inCombat and isProtection and self.GetGroupSize and self:GetGroupSize() <= 5 and self.FindWarriorInterveneTarget then
-            local interveneTarget = self:FindWarriorInterveneTarget(unit)
-            if interveneTarget then
-                return "Intervene"
-            end
-        end
-
         if self:KnowsSpell("Charge") and self:IsUsableSpell("Charge") and self:GetSpellCooldown("Charge") == 0 and
            self:IsInSpellRangeSafe("Charge", unit) then
             if not inCombat then
@@ -1595,41 +1588,7 @@ function AC:HandleTauntedLooseMobGapClosing()
             return true
         end
 
-        if movementAbility == "Intervene" and self.FindWarriorInterveneTarget then
-            local interveneTarget = self:FindWarriorInterveneTarget("target")
-            if interveneTarget and UnitExists(interveneTarget) then
-                if self.UseRangedAbilityAndReturn then
-                    moved = self:UseRangedAbilityAndReturn("Intervene", interveneTarget)
-                else
-                    CastSpellByName(movementAbility, interveneTarget)
-                    moved = true
-                end
-            end
-
-            if not moved then
-                if self:KnowsSpell("Charge") and self:IsUsableSpell("Charge") and self:GetSpellCooldown("Charge") == 0 and
-                   self:IsInSpellRangeSafe("Charge", "target") and
-                   self.HasWarbringerTalent and self:HasWarbringerTalent() then
-                    if castMovementAttempt("Charge", "target") then
-                        if self.MarkWarriorChargeCast then
-                            self:MarkWarriorChargeCast()
-                        end
-                        moved = true
-                        self:Debug("Intervene failed; used Charge fallback on taunted ranged mob")
-                    end
-                elseif self:KnowsSpell("Intercept") and self:IsUsableSpell("Intercept") and self:GetSpellCooldown("Intercept") == 0 and
-                       self:IsInSpellRangeSafe("Intercept", "target") and
-                       ((self.HasWarbringerTalent and self:HasWarbringerTalent()) or
-                        (self.GetCurrentStance and self:GetCurrentStance() == 3)) then
-                    if castMovementAttempt("Intercept", "target") then
-                        moved = true
-                        self:Debug("Intervene failed; used Intercept fallback on taunted ranged mob")
-                    end
-                end
-            end
-        else
-            moved = castMovementAttempt(movementAbility, "target")
-        end
+        moved = castMovementAttempt(movementAbility, "target")
 
         if moved then
             tauntedData.needsGapCloser = false
@@ -2152,31 +2111,6 @@ function AC:HandleUniversalLooseMobs()
         return true
     end
 
-    local function tryWarriorInterveneAfterTaunt(looseMob)
-        local _, class = UnitClass("player")
-        if class ~= "WARRIOR" then
-            return false
-        end
-
-        if not looseMob or not looseMob.victimUnit or not UnitExists(looseMob.victimUnit) then
-            return false
-        end
-
-        if self:IsInMeleeRange("target", true) then
-            return false
-        end
-
-        if self.UseRangedAbilityAndReturn and self:UseRangedAbilityAndReturn("Intervene", looseMob.victimUnit) then
-            self:Debug("Warrior Intervene after taunt on " .. (UnitName(looseMob.victimUnit) or looseMob.victimUnit))
-            return true
-        end
-
-        if self.debugMode then
-            self:Debug("Warrior Intervene after taunt unavailable for " .. (UnitName(looseMob.victimUnit) or looseMob.victimUnit))
-        end
-        return false
-    end
-
     local function castSingleTargetTaunt(looseMob)
         if not looseMob or not looseMob.tauntAbility then
             return false
@@ -2202,9 +2136,6 @@ function AC:HandleUniversalLooseMobs()
                         TargetUnit(looseMob.unit)
                         recordTauntedLooseMob("target")
                     end
-                    if tryWarriorInterveneAfterTaunt(looseMob) then
-                        return true
-                    end
                     handlePostTauntTargeting()
                     return true
                 end
@@ -2219,9 +2150,6 @@ function AC:HandleUniversalLooseMobs()
         TargetUnit(looseMob.unit)
         if castTauntAttempt(looseMob.tauntAbility, "target") then
             recordTauntedLooseMob("target")
-            if tryWarriorInterveneAfterTaunt(looseMob) then
-                return true
-            end
             handlePostTauntTargeting()
             return true
         end

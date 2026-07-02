@@ -289,11 +289,6 @@ function AC:GetAvailableRangedAbilities()
         end
     end
     
-    -- Intervene (level 70+, gap closer to allies)
-    if UnitLevel("player") >= 70 and self:IsUsableSpell(S.Intervene) and self:GetSpellCooldown(S.Intervene) == 0 then
-        abilities.intervene = true
-    end
-    
     -- Challenging Shout (level 6+, AoE taunt)
     if UnitLevel("player") >= 6 and self:IsUsableSpell(S.ChallengingShout) and self:GetSpellCooldown(S.ChallengingShout) == 0 then
         abilities.challengingShout = true
@@ -508,33 +503,12 @@ function AC:UseRangedAbilityAndReturn(ability, target)
                 return false
             end
         end
-    elseif ability == "Intervene" and self:IsUsableSpell(S.Intervene) then
-        -- FIXED: Check cooldown
-        if self:GetSpellCooldown(S.Intervene) > 0 then
-            WarriorDebug("Intervene on cooldown, skipping")
-            return false
-        end
-
-        local interveneUnit = self:ResolveWarriorInterveneFriendlyUnit(target)
-        if interveneUnit then
-            if castAttempt(S.Intervene, interveneUnit) then
-                self:MarkWarriorChargeCast()
-                if UnitExists("target") and UnitCanAttack("player", "target") then
-                    if not IsCurrentSpell("Attack") then
-                        StartAttack()
-                    end
-                    self:MarkAsOurTarget(UnitGUID("target"))
-                end
-                WarriorDebug("Used Intervene gap closer via " .. (UnitName(interveneUnit) or "Unknown"))
-                success = true
-            else
-                WarriorDebug("Intervene cast attempt failed on " .. (UnitName(interveneUnit) or interveneUnit))
-                return false
-            end
-        end
+    elseif ability == "Intervene" then
+        WarriorDebug("Intervene disabled, skipping")
+        return false
     end
     
-    -- Intervene movement needs the hostile target preserved so follow-up threat can resume.
+    -- Ranged attacks can return to a better melee target after firing.
     if success and ability ~= "Intervene" and self:IsAutoTargetSwitchAllowed() and not self:IsInMeleeRange(target) then
         local meleeTarget = self:FindMeleeTarget()
         if meleeTarget and not UnitIsUnit(meleeTarget, target) then
@@ -1608,30 +1582,6 @@ function AC:TryProtectionWarbringerCharge(target)
 end
 
 function AC:TryProtectionInterveneGapCloser(target)
-    target = target or "target"
-    if self:GetPlayerSpec() ~= "Protection" then return false end
-    if GetGroupSize() > 5 then return false end
-    if not UnitAffectingCombat("player") then return false end
-    if not UnitExists(target) or not UnitCanAttack("player", target) or UnitIsDeadOrGhost(target) then return false end
-    if self:IsInMeleeRange(target, true) then return false end
-
-    local interveneTarget = self:FindWarriorInterveneTarget(target)
-    if not interveneTarget then
-        if Throttle("ProtInterveneNoTarget", 2.0) then
-            WarriorDebug("Prot: Intervene unavailable - no valid ally path")
-        end
-        return false
-    end
-
-    if self:UseRangedAbilityAndReturn("Intervene", interveneTarget) then
-        WarriorDebug("Prot: Intervene gap closer via " .. (UnitName(interveneTarget) or "Unknown"))
-        return true
-    end
-
-    if Throttle("ProtInterveneFailed", 2.0) then
-        WarriorDebug("Prot: Intervene path found but cast failed on " .. (UnitName(interveneTarget) or interveneTarget))
-    end
-
     return false
 end
 
@@ -2100,13 +2050,15 @@ function AC:ProtectionWarriorRotation()
     end
     
     -- Stance management
-    if level >= 10 and currentStance ~= 2 then
-        if self:ForceDefensiveStance() then return true end 
-    elseif level < 10 and currentStance ~= 1 then
+    local knowsDefensiveStance = self:KnowsSpell(S.DefensiveStance)
+    if level >= 10 and knowsDefensiveStance and currentStance ~= 2 then
+        if self:ForceDefensiveStance() then return true end
+    elseif (level < 10 or not knowsDefensiveStance) and currentStance ~= 1 then
         if self:ForceBattleStance() then return true end
     end
     
-    if (level >= 10 and currentStance ~= 2) or (level < 10 and currentStance ~= 1) then
+    if (level >= 10 and knowsDefensiveStance and currentStance ~= 2) or
+       ((level < 10 or not knowsDefensiveStance) and currentStance ~= 1) then
         WarriorDebug("Prot: Waiting for stance")
         return true
     end
@@ -2138,46 +2090,18 @@ function AC:ProtectionWarriorRotation()
             end
         end
         
-        -- Enhanced interrupt system - prioritize Shield Bash, fallback to Pummel
+        -- Enhanced interrupt system - Protection stays in Defensive Stance for Shield Bash.
         if UnitCastingInfo("target") then
             -- Shield Bash first (Protection preferred, silences for 6 seconds)
             if self:IsUsableSpell(S.ShieldBash) and self:GetSpellCooldown(S.ShieldBash) == 0 then
                 CastSpellByName(S.ShieldBash, "target")
                 WarriorDebug("Prot: Shield Bash interrupt")
                 return true
-            -- Pummel fallback (Berserker Stance, shorter cooldown)
-            elseif self:IsUsableSpell(S.Pummel) and self:GetSpellCooldown(S.Pummel) == 0 then
-                -- Switch to Berserker Stance for Pummel if needed
-                local currentStance = self:GetCurrentStance()
-                if currentStance ~= 3 and self:KnowsSpell(S.BerserkerStance) and self:GetSpellCooldown(S.BerserkerStance) == 0 then
-                    CastSpellByName(S.BerserkerStance)
-                    WarriorDebug("Prot: Switching to Berserker for Pummel")
-                    return true
-                elseif currentStance == 3 then
-                    CastSpellByName(S.Pummel, "target")
-                    WarriorDebug("Prot: Pummel interrupt")
-                    -- Switch back to Defensive Stance after interrupt
-                    if self:KnowsSpell(S.DefensiveStance) and self:GetSpellCooldown(S.DefensiveStance) == 0 then
-                        CastSpellByName(S.DefensiveStance)
-                        WarriorDebug("Prot: Back to Defensive Stance")
-                    end
-                    return true
-                end
             end
         end
         
         -- Victory Rush for free healing
         if self:TryVictoryRush() then return true end
-        
-        -- Shouts
-        local combatShout = self:GetPreferredWarriorShout("Protection")
-        if combatShout and Throttle("ProtCombatShout", 10) then 
-            if self:IsUsableSpell(combatShout) and rage >= 10 then 
-                CastSpellByName(combatShout)
-                WarriorDebug("Prot: " .. combatShout)
-                return true 
-            end
-        end
 
         -- *** HIGH PRIORITY AoE ABILITIES (only if we have melee targets) ***
         -- INTEGRATION: Use enhanced enemy location detection for better AoE decisions
@@ -2333,6 +2257,16 @@ function AC:ProtectionWarriorRotation()
                 return true
             end
         end
+
+        -- Shouts are useful, but should not steal early GCDs from active threat buttons.
+        local combatShout = self:GetPreferredWarriorShout("Protection")
+        if combatShout and Throttle("ProtCombatShout", 10) then
+            if self:IsUsableSpell(combatShout) and rage >= 10 then
+                CastSpellByName(combatShout)
+                WarriorDebug("Prot: " .. combatShout)
+                return true
+            end
+        end
     end
     return false
 end
@@ -2454,13 +2388,6 @@ function AC:ArmsWarriorRotation()
         -- Victory Rush
         if self:TryVictoryRush() then return true end
 
-        local combatShout = self:GetPreferredWarriorShout("Arms")
-        if combatShout and rage >= 10 and Throttle("ArmsCombatShout", 10) and self:IsUsableSpell(combatShout) then
-            CastSpellByName(combatShout)
-            WarriorDebug("Arms: " .. combatShout)
-            return true
-        end
-        
         -- Retaliation/Disarm are utility tools and are intentionally not used in DPS flow.
 
         local targetHP = self:GetTargetHealthPercent("target")
@@ -2515,8 +2442,8 @@ function AC:ArmsWarriorRotation()
             end
         end
         
-        -- PRIORITY 1: Rend enables Taste for Blood. Keep it active before spending procs/cooldowns.
-        if rendRemaining < 2.0 and self:IsUsableSpell(S.Rend) and rage >= 10 and Throttle("ArmsRendRefresh", 1.0) then
+        -- PRIORITY 1: Rend enables Taste for Blood. Refresh very late to avoid wasting proc ticks.
+        if rendRemaining <= 0.3 and self:IsUsableSpell(S.Rend) and rage >= 10 and Throttle("ArmsRendRefresh", 1.0) then
             if self:CastSpell(S.Rend, "target") then
                 WarriorDebug("Arms: Rend applied/refreshed")
                 return true
@@ -2545,6 +2472,15 @@ function AC:ArmsWarriorRotation()
         if overpowerReady and rage >= 5 and self:CastSpell(S.Overpower, "target") then
             WarriorDebug("Arms: Overpower (" .. (hasTaste and "Taste for Blood" or "usable proc") .. ")")
             return true
+        end
+
+        -- Boss utility: maintain armor reduction early when no equivalent debuff is present.
+        if rage >= 15 and not procLock and (not self:KnowsSpell(S.MortalStrike) or msCooldown > 1.0) and rendRemaining > 3 and
+           self:ShouldMaintainArmsSunder("target") and Throttle("ArmsSunderMaintain", 1.2) then
+            if self:CastSpell(S.SunderArmor, "target") then
+                WarriorDebug("Arms: Sunder Armor maintenance")
+                return true
+            end
         end
 
         -- Execute phase: mostly Execute; Overpower already handled above.
@@ -2621,20 +2557,12 @@ function AC:ArmsWarriorRotation()
         end
         
         -- Slam filler only when no core button is about to become available.
-        if self:KnowsSpell(S.Slam) and self:IsUsableSpell(S.Slam) and rage >= 15 and not UnitCastingInfo("player") then
+        if self:KnowsSpell(S.Slam) and self:IsUsableSpell(S.Slam) and rage >= 15 and
+           not self:IsPlayerMoving() and not UnitCastingInfo("player") then
             local opWindowSoon = overpowerReady or (hasTaste and opCooldown < 1.5)
             if (msCooldown > 1.5 or not self:KnowsSpell(S.MortalStrike)) and not opWindowSoon and rendRemaining > 2 then
                 CastSpellByName(S.Slam, "target")
                 WarriorDebug("Arms: Slam filler")
-                return true
-            end
-        end
-
-        -- Low-priority PvE utility: maintain Sunder only when it will not clip core Arms DPS windows.
-        if rage >= 15 and not procLock and msCooldown > 1.5 and rendRemaining > 3 and
-           self:ShouldMaintainArmsSunder("target") and Throttle("ArmsSunderMaintain", 1.2) then
-            if self:CastSpell(S.SunderArmor, "target") then
-                WarriorDebug("Arms: Sunder Armor maintenance")
                 return true
             end
         end
@@ -2646,6 +2574,13 @@ function AC:ArmsWarriorRotation()
             60
         ) and not procLock and not isCleaveContext
         if shouldDumpArms and QueueOnNextSwing(S.HeroicStrike, "Arms: Heroic Strike rage dump") then
+            return true
+        end
+
+        local combatShout = self:GetPreferredWarriorShout("Arms")
+        if combatShout and rage >= 10 and Throttle("ArmsCombatShout", 10) and self:IsUsableSpell(combatShout) then
+            CastSpellByName(combatShout)
+            WarriorDebug("Arms: " .. combatShout)
             return true
         end
     end
