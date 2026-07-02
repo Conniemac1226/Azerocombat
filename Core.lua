@@ -2818,7 +2818,7 @@ function AC:IsTank(unit)
 end
 
 -- IMPROVED: Better enemy count detection for WotLK
-function AC:GetEnemyCount(range)
+function AC:GetEnemyCount(range, silent)
     -- Don't run this function too often
     if not self:Throttle("EnemyCountMain", 0.5) then 
         return self.lastEnemyCount or 1
@@ -2828,7 +2828,7 @@ function AC:GetEnemyCount(range)
     local processedGUIDs = {}
     range = range or 30
     
-    local detailedDebug = self.debugMode and self:Throttle("EnemyCountDebug", 3.0)
+    local detailedDebug = self.debugMode and not silent and self:Throttle("EnemyCountDebug", 3.0)
     if detailedDebug then
         self:Debug("=== ENEMY COUNT START ===")
     end

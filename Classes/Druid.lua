@@ -120,9 +120,9 @@ local function DruidDebug(msg)
     end
 end
 
--- Bear tank needs a stricter pack check than the shared enemy counter.
--- Party/raid target scans are useful for general awareness, but they can
--- inflate Swipe decisions on small pulls when other players are tab-targeting.
+-- Bear Swipe starts with a strict melee/nameplate count, then falls back to the
+-- broader enemy counter only when it clearly sees a larger engaged pack.
+-- This keeps small pulls conservative while fixing missing 3+ dungeon packs.
 function AC:GetBearThreatEnemyCount()
     if not self:Throttle("BearThreatEnemyCountMain", 0.5) then
         return self.lastBearThreatEnemyCount or 1
@@ -176,8 +176,19 @@ function AC:GetBearThreatEnemyCount()
         end
     end
 
+    -- If the strict melee/nameplate count misses a clearly engaged 3+ pack,
+    -- fall back to the broader shared enemy counter so missing nameplates do
+    -- not suppress Swipe in dungeons.
+    if count < 3 and UnitAffectingCombat("player") and self.GetEnemyCount then
+        local broadCount = self:GetEnemyCount(nil, true) or 0
+        if broadCount >= 3 and broadCount > count then
+            count = broadCount
+        end
+    end
+
     -- Combat-log entries do not expose range by GUID, so do not use them for
-    -- Bear Swipe decisions. Nameplates/current units above are range-checked.
+    -- Bear Swipe decisions unless the broader fallback above is already seeing
+    -- a larger engaged pack.
     local combatLogCount = 0
 
     count = math.min(count, 10)
