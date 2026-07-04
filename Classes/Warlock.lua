@@ -1653,8 +1653,9 @@ function AC:GetWarlockSpec()
         return "Destruction"
     end
     
-    -- Default for low levels
-    return "Destruction"
+    -- No reliable spec information yet. Let the rotation use the leveling
+    -- fallback instead of pretending to be a full endgame spec.
+    return "None"
 end
 
 -- ================================================================
@@ -2996,6 +2997,7 @@ function AC:Warlock()
     end
     
     local procs = self:UpdateWarlockProcs()
+    local spec = self:GetWarlockSpec()
 
     -- PRIORITY: Send pet to attack player's target (establish aggro while warlock casts)
     if UnitExists("pet") and not UnitIsDeadOrGhost("pet") then
@@ -3011,7 +3013,6 @@ function AC:Warlock()
     end
     
     -- ENHANCED: Spec-optimized racial abilities
-    local spec = self:GetWarlockSpec()
     local targetHealthPercent = UnitExists("target") and (UnitHealth("target") / UnitHealthMax("target") * 100) or 100
     
     if InCombatLockdown() then
@@ -3035,7 +3036,6 @@ function AC:Warlock()
     end
     
     -- Main rotation based on specialization
-    local spec = self:GetWarlockSpec()
     WarlockDebug("Active spec: " .. spec)
     
     local spellToCast = nil
@@ -3044,7 +3044,8 @@ function AC:Warlock()
         spellToCast = self:AfflictionRotation(procs)
     elseif spec == "Demonology" then  
         spellToCast = self:DemonologyRotation(procs)
-    elseif spec == "Destruction" then
+    elseif spec == "Destruction" or spec == "None" then
+        -- Unspecced leveling characters use the safest direct-damage fallback.
         spellToCast = self:DestructionRotation(procs)
     end
     
@@ -3101,6 +3102,8 @@ function AC:InitWarlockRotations()
     self.rotations.WARLOCK["Affliction"] = function() return self:Warlock() end
     self.rotations.WARLOCK["Demonology"] = function() return self:Warlock() end
     self.rotations.WARLOCK["Destruction"] = function() return self:Warlock() end
+    -- Allow level 1-10 / no-talents characters to enter the warlock rotation.
+    self.rotations.WARLOCK["None"] = function() return self:Warlock() end
     
     -- Debug confirmation
     if self.debugMode then
@@ -3108,6 +3111,7 @@ function AC:InitWarlockRotations()
         self:Debug("  - Affliction: " .. tostring(self.rotations.WARLOCK["Affliction"] ~= nil))
         self:Debug("  - Demonology: " .. tostring(self.rotations.WARLOCK["Demonology"] ~= nil))
         self:Debug("  - Destruction: " .. tostring(self.rotations.WARLOCK["Destruction"] ~= nil))
+        self:Debug("  - None: " .. tostring(self.rotations.WARLOCK["None"] ~= nil))
     end
 end
 
