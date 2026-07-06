@@ -391,7 +391,10 @@ function AC:RememberWarlockTargetCast(spellName, unit)
     end
 
     unit = unit or "target"
-    if not UnitExists(unit) or not UnitCanAttack("player", unit) then
+    if not UnitExists(unit) then
+        return
+    end
+    if unit ~= "player" and not UnitCanAttack("player", unit) then
         return
     end
 
@@ -1070,8 +1073,39 @@ end
 -- ENHANCED RESOURCE MANAGEMENT (Life Tap Optimization)
 -- ================================================================
 
+local LIFE_TAP_GLYPH_BUFF_NAMES = {
+    "Improved Life Tap",
+    "Glyph of Life Tap",
+}
+local LIFE_TAP_GLYPH_REFRESH_WINDOW = 8.0
+local LIFE_TAP_GLYPH_HEALTH_THRESHOLD = 70
+
+function AC:IsLevelingWarlock()
+    return UnitLevel("player") <= 10
+end
+
+function AC:GetLifeTapGlyphState()
+    if self:IsLevelingWarlock() then
+        return false, 0, nil
+    end
+
+    for _, buffName in ipairs(LIFE_TAP_GLYPH_BUFF_NAMES) do
+        local hasBuff, _, _, expires = WarlockHasBuff("player", buffName)
+        if hasBuff then
+            local remaining = expires and (expires - GetTime()) or 0
+            return true, remaining, buffName
+        end
+    end
+
+    return false, 0, nil
+end
+
 -- Smart Life Tap usage based on combat phase and procs
 function AC:GetOptimalLifeTapTiming(spec, inCombat, procs, demoProcs)
+    if self:IsLevelingWarlock() then
+        return false
+    end
+
     local manaPercent = (UnitPower("player", 0) / UnitPowerMax("player", 0)) * 100
     local healthPercent = (UnitHealth("player") / UnitHealthMax("player")) * 100
     
@@ -1107,6 +1141,27 @@ function AC:GetOptimalLifeTapTiming(spec, inCombat, procs, demoProcs)
     else
         healthThreshold = healthThreshold - 10 -- More aggressive out of combat
     end
+
+    local glyphActive, glyphRemaining, glyphName = self:GetLifeTapGlyphState()
+    local glyphHealthThreshold = math.max(healthThreshold, LIFE_TAP_GLYPH_HEALTH_THRESHOLD)
+    local recentLifeTap = self:WasRecentlyCastOnTarget(S.LifeTap, "player", 2.5)
+
+    -- Keep the Glyph of Life Tap buff rolling if it is missing or about to expire.
+    if recentLifeTap and not glyphActive then
+        WarlockDebug("LIFE TAP GLYPH: Waiting for aura sync after recent Life Tap")
+        return false
+    end
+
+    if glyphActive then
+        if glyphRemaining <= LIFE_TAP_GLYPH_REFRESH_WINDOW and healthPercent > glyphHealthThreshold then
+            WarlockDebug("LIFE TAP GLYPH: Refreshing " .. tostring(glyphName) ..
+                " (" .. string.format("%.1f", glyphRemaining) .. "s remaining)")
+            return true
+        end
+    elseif healthPercent > glyphHealthThreshold then
+        WarlockDebug("LIFE TAP GLYPH: Missing buff - refreshing")
+        return true
+    end
     
     -- Check if we should Life Tap
     local shouldLifeTap = manaPercent < manaThreshold and healthPercent > healthThreshold
@@ -1121,6 +1176,10 @@ end
 
 -- Enhanced Life Tap integration with Demonology rotation
 function AC:ManageWarlockLifeTap()
+    if self:IsLevelingWarlock() then
+        return nil
+    end
+
     local spec = self:GetWarlockSpec()
     local inCombat = UnitAffectingCombat("player")
     local procs = self.WarlockProcs
@@ -2887,7 +2946,7 @@ function AC:DemonologyFallbackRotation(playerLevel)
     end
 
     -- If mana is too low for fillers, tap before trying low-value upkeep spells.
-    if self:CanCast(S.LifeTap) then
+    if not self:IsLevelingWarlock() and self:CanCast(S.LifeTap) then
         local manaPct = (UnitPower("player", 0) / math.max(UnitPowerMax("player", 0), 1)) * 100
         local hpPct = (UnitHealth("player") / math.max(UnitHealthMax("player"), 1)) * 100
         if manaPct < 45 and hpPct > 60 then
@@ -3204,7 +3263,16 @@ function AC:CheckWarlockBuffs(spec)
             end
         end
         
-        -- Priority 2: Advanced pet management
+        -- Priority 2: Life Tap / glyph maintenance
+        local lifeTap = self:ManageWarlockLifeTap()
+        if lifeTap then
+            if self:CastWarlockSpell(lifeTap, "player") then
+                WarlockDebug("Life Tap maintenance: " .. lifeTap)
+                return true
+            end
+        end
+        
+        -- Priority 3: Advanced pet management
         local pet = self:ManageWarlockPetAdvanced()
         if pet then 
             if self:CastWarlockSpell(pet, "player") then
@@ -3213,7 +3281,7 @@ function AC:CheckWarlockBuffs(spec)
             end
         end
         
-        -- Priority 3: Item creation
+        -- Priority 4: Item creation
         local itemsCreated = self:ManageWarlockItemCreation()
         if itemsCreated then 
             if self:CastWarlockSpell(itemsCreated, "player") then
@@ -3222,7 +3290,7 @@ function AC:CheckWarlockBuffs(spec)
             end
         end
         
-        -- Priority 4: Weapon enchant management
+        -- Priority 5: Weapon enchant management
         local weaponEnchant = self:ManageWarlockWeaponEnchants()
         if weaponEnchant then 
             if self:CastWarlockSpell(weaponEnchant, "player") then
@@ -3446,7 +3514,7 @@ function AC:CastWarlockSpell(spellName, unit)
         self.WarlockCastFailures = self.WarlockCastFailures or {}
         self.WarlockCastFailures[spellName] = nil
         self:TrackWarlockSpellCast(spellName) -- Track successful cast
-        self:RememberWarlockTargetCast(spellName, unit)
+        self:RememberWarlockTargetCast(spellName, spellName == S.LifeTap and "player" or unit)
         return true
     end
 
@@ -3465,7 +3533,7 @@ function AC:CastWarlockSpell(spellName, unit)
         self.WarlockCastFailures = self.WarlockCastFailures or {}
         self.WarlockCastFailures[spellName] = nil
         self:TrackWarlockSpellCast(spellName)
-        self:RememberWarlockTargetCast(spellName, unit)
+        self:RememberWarlockTargetCast(spellName, spellName == S.LifeTap and "player" or unit)
         return true
     end
 
