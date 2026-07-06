@@ -347,11 +347,11 @@ local function WarlockHasDebuff(unit, spellName)
     
     -- Method 2: Try scanning all debuff slots (fallback)
     for i = 1, 40 do
-        local debuffName = UnitDebuff(unit, i)
+        local debuffName, _, _, count, _, duration, expires = UnitDebuff(unit, i)
         if not debuffName then break end
         if debuffName == spellName then
             WarlockDebug("HasDebuff (Scan method): Found " .. spellName .. " on " .. unit .. " at slot " .. i)
-            return true
+            return true, count, duration, expires
         end
     end
     
@@ -383,6 +383,70 @@ local function WarlockHasBuff(unit, spellName)
     
     WarlockDebug("HasBuff: " .. spellName .. " NOT found on " .. unit)
     return false
+end
+
+function AC:RememberWarlockTargetCast(spellName, unit)
+    if type(spellName) ~= "string" or spellName == "" then
+        return
+    end
+
+    unit = unit or "target"
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) then
+        return
+    end
+
+    local guid = UnitGUID(unit)
+    if not guid then
+        return
+    end
+
+    self.WarlockRecentTargetCasts = self.WarlockRecentTargetCasts or {}
+    self.WarlockRecentTargetCasts[spellName] = {
+        guid = guid,
+        time = GetTime()
+    }
+end
+
+function AC:WasRecentlyCastOnTarget(spellName, unit, window)
+    local recent = self.WarlockRecentTargetCasts
+    if type(recent) ~= "table" then
+        return false
+    end
+
+    local entry = recent[spellName]
+    if not entry then
+        return false
+    end
+
+    unit = unit or "target"
+    local guid = UnitGUID(unit)
+    if not guid or entry.guid ~= guid then
+        return false
+    end
+
+    return (GetTime() - (entry.time or 0)) < (window or 2.0)
+end
+
+local previousHandleClassCombatLog = AC.HandleClassCombatLog
+
+function AC:HandleClassCombatLog(...)
+    if previousHandleClassCombatLog then
+        previousHandleClassCombatLog(self, ...)
+    end
+
+    local _, subevent, sourceGUID, _, _, destGUID, destName, _, _, spellName = ...
+
+    if sourceGUID ~= UnitGUID("player") then
+        return
+    end
+
+    if subevent == "SPELL_MISSED" and spellName == S.Immolate then
+        local recent = self.WarlockRecentTargetCasts
+        if type(recent) == "table" and recent[spellName] and recent[spellName].guid == destGUID then
+            recent[spellName] = nil
+            WarlockDebug("IMMOLATE missed on " .. tostring(destName) .. " - clearing retry hold")
+        end
+    end
 end
 
 -- Debug function to show all debuffs on target
@@ -2878,8 +2942,10 @@ end
 -- ================================================================
 function AC:DestructionRotation(procs)
     procs = procs or self:UpdateWarlockProcs()
+    local playerLevel = UnitLevel("player")
     local targetHealthPercent = (UnitHealth("target") / UnitHealthMax("target")) * 100
     local shouldAOE = self:ShouldUseAOEWarlock()
+    local isLevelingWarlock = playerLevel <= 10
     
     WarlockDebug("Destruction rotation - Health: " .. string.format("%.1f", targetHealthPercent) .. "%, Backdraft: " .. tostring(procs.backdraftStacks))
     
@@ -2908,9 +2974,17 @@ function AC:DestructionRotation(procs)
     -- Single Target Priority
     
     -- 1. Immolate - must be maintained for Conflagrate and Incinerate bonus.
-    local immolateRemain = self:DebuffTimeRemaining("target", S.Immolate) or 0
-    if (not self:HasDebuff("target", S.Immolate) or immolateRemain <= 2) and self:CanCast(S.Immolate) then
-        WarlockDebug("Applying/Refreshing Immolate")
+    local hasImmolate, _, _, immolateExpires = WarlockHasDebuff("target", S.Immolate)
+    local immolateRemain = immolateExpires and (immolateExpires - GetTime()) or 0
+    if hasImmolate then
+        if immolateRemain <= 2 and self:CanCast(S.Immolate) then
+            WarlockDebug("Refreshing Immolate")
+            return S.Immolate
+        end
+    elseif isLevelingWarlock and self:WasRecentlyCastOnTarget(S.Immolate, "target", 2.5) then
+        WarlockDebug("Skipping Immolate re-cast - waiting for aura sync")
+    elseif self:CanCast(S.Immolate) then
+        WarlockDebug("Applying Immolate")
         return S.Immolate
     end
     
@@ -3372,6 +3446,7 @@ function AC:CastWarlockSpell(spellName, unit)
         self.WarlockCastFailures = self.WarlockCastFailures or {}
         self.WarlockCastFailures[spellName] = nil
         self:TrackWarlockSpellCast(spellName) -- Track successful cast
+        self:RememberWarlockTargetCast(spellName, unit)
         return true
     end
 
@@ -3390,6 +3465,7 @@ function AC:CastWarlockSpell(spellName, unit)
         self.WarlockCastFailures = self.WarlockCastFailures or {}
         self.WarlockCastFailures[spellName] = nil
         self:TrackWarlockSpellCast(spellName)
+        self:RememberWarlockTargetCast(spellName, unit)
         return true
     end
 
