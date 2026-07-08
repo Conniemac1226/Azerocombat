@@ -245,16 +245,15 @@ function AC:IsInInterveneRange(unit)
     return result == 1
 end
 
-function AC:IsInInterceptRange(unit)
-    if not UnitExists(unit) then return false end
-    
-    -- FIXED: Add error handling
-    local success, result = pcall(IsSpellInRange, S.Intercept, unit)
-    if not success then return false end
-    
-    -- Intercept has 8-25 yard range in WotLK (Berserker Stance only)
-    return result == 1
-end
+-- Intercept disabled. Keep this helper commented for easy re-enable if needed.
+-- function AC:IsInInterceptRange(unit)
+--     if not UnitExists(unit) then return false end
+--
+--     local success, result = pcall(IsSpellInRange, S.Intercept, unit)
+--     if not success then return false end
+--
+--     return result == 1
+-- end
 
 -- ENHANCED: Check available ranged abilities for Protection warriors with cooldown validation
 function AC:GetAvailableRangedAbilities()
@@ -281,13 +280,14 @@ function AC:GetAvailableRangedAbilities()
         abilities.charge = true
     end
     
-    -- Intercept (level 30+, gap closer - Berserker Stance OR Warbringer talent) 
-    if UnitLevel("player") >= 30 and self:IsUsableSpell(S.Intercept) and self:GetSpellCooldown(S.Intercept) == 0 then
-        local hasWarbringer = self:HasWarbringerTalent()
-        if hasWarbringer or self:GetCurrentStance() == 3 then
-            abilities.intercept = true
-        end
-    end
+    -- Intercept disabled as a gap closer. Re-enable this block only if
+    -- Intercept targeting is explicitly wanted again.
+    -- if UnitLevel("player") >= 30 and self:IsUsableSpell(S.Intercept) and self:GetSpellCooldown(S.Intercept) == 0 then
+    --     local hasWarbringer = self:HasWarbringerTalent()
+    --     if hasWarbringer or self:GetCurrentStance() == 3 then
+    --         abilities.intercept = true
+    --     end
+    -- end
     
     -- Challenging Shout (level 6+, AoE taunt)
     if UnitLevel("player") >= 6 and self:IsUsableSpell(S.ChallengingShout) and self:GetSpellCooldown(S.ChallengingShout) == 0 then
@@ -462,30 +462,30 @@ function AC:UseRangedAbilityAndReturn(ability, target)
                 return false
             end
         end
-    elseif ability == "Intercept" and self:IsUsableSpell(S.Intercept) then
-        -- FIXED: Check cooldown and stance requirements
-        if self:GetSpellCooldown(S.Intercept) > 0 then
-            WarriorDebug("Intercept on cooldown, skipping")
-            return false
-        end
-        
-        -- Must be in Berserker Stance for Intercept (unless Warbringer talent)
-        local hasWarbringer = self:HasWarbringerTalent()
-        if not hasWarbringer and self:GetCurrentStance() ~= 3 then
-            WarriorDebug("Not in Berserker Stance for Intercept (no Warbringer)")
-            return false
-        end
-        
-        if self:IsInInterceptRange(target) then
-            if castAttempt(S.Intercept, target) then
-                self:MarkAsOurTarget(UnitGUID(target))
-                WarriorDebug("Used Intercept on distant target")
-                success = true
-            else
-                WarriorDebug("Intercept cast attempt failed")
-                return false
-            end
-        end
+    -- Intercept disabled as a ranged/gap-close action. Re-enable this branch only
+    -- if Intercept should be considered by rotations again.
+    -- elseif ability == "Intercept" and self:IsUsableSpell(S.Intercept) then
+    --     if self:GetSpellCooldown(S.Intercept) > 0 then
+    --         WarriorDebug("Intercept on cooldown, skipping")
+    --         return false
+    --     end
+    --
+    --     local hasWarbringer = self:HasWarbringerTalent()
+    --     if not hasWarbringer and self:GetCurrentStance() ~= 3 then
+    --         WarriorDebug("Not in Berserker Stance for Intercept (no Warbringer)")
+    --         return false
+    --     end
+    --
+    --     if self:IsInInterceptRange(target) then
+    --         if castAttempt(S.Intercept, target) then
+    --             self:MarkAsOurTarget(UnitGUID(target))
+    --             WarriorDebug("Used Intercept on distant target")
+    --             success = true
+    --         else
+    --             WarriorDebug("Intercept cast attempt failed")
+    --             return false
+    --         end
+    --     end
     elseif ability == "Mocking Blow" and self:IsUsableSpell(S.MockingBlow) then
         -- FIXED: Check cooldown
         if self:GetSpellCooldown(S.MockingBlow) > 0 then
@@ -2330,16 +2330,17 @@ function AC:ArmsWarriorRotation()
             if level >= 50 and self:TryArmsCombatCharge("target") then
                 return true
             end
-            if level >= 30 then
-                local hasWarbringer = self:HasWarbringerTalent()
-                if hasWarbringer or currentStance == 3 then
-                    local availableRanged = self:GetAvailableRangedAbilities()
-                    if availableRanged.intercept and self:UseRangedAbilityAndReturn("Intercept", "target") then
-                        WarriorDebug("Arms: Intercept gap closer" .. (hasWarbringer and " (Warbringer)" or ""))
-                        return true
-                    end
-                end
-            end
+            -- Intercept disabled as a gap closer.
+            -- if level >= 30 then
+            --     local hasWarbringer = self:HasWarbringerTalent()
+            --     if hasWarbringer or currentStance == 3 then
+            --         local availableRanged = self:GetAvailableRangedAbilities()
+            --         if availableRanged.intercept and self:UseRangedAbilityAndReturn("Intercept", "target") then
+            --             WarriorDebug("Arms: Intercept gap closer" .. (hasWarbringer and " (Warbringer)" or ""))
+            --             return true
+            --         end
+            --     end
+            -- end
             local availableRanged = self:GetAvailableRangedAbilities()
             if availableRanged.heroicThrow and self:UseRangedAbilityAndReturn("Heroic Throw", "target") then
                 WarriorDebug("Arms: Heroic Throw while out of melee")
@@ -2689,17 +2690,17 @@ function AC:FuryWarriorRotation()
             if touchContact then
                 WarriorDebug("Fury: Melee contact fallback confirmed")
             else
-            -- Try Intercept if available (Berserker Stance or Warbringer talent)
-            if level >= 30 then
-                local hasWarbringer = self:HasWarbringerTalent()
-                if (hasWarbringer or currentStance == 3) then
-                    local availableRanged = self:GetAvailableRangedAbilities()
-                    if availableRanged.intercept and self:UseRangedAbilityAndReturn("Intercept", "target") then
-                        WarriorDebug("Fury: Intercept gap closer" .. (hasWarbringer and " (Warbringer)" or ""))
-                        return true
-                    end
-                end
-            end
+            -- Intercept disabled as a gap closer.
+            -- if level >= 30 then
+            --     local hasWarbringer = self:HasWarbringerTalent()
+            --     if (hasWarbringer or currentStance == 3) then
+            --         local availableRanged = self:GetAvailableRangedAbilities()
+            --         if availableRanged.intercept and self:UseRangedAbilityAndReturn("Intercept", "target") then
+            --             WarriorDebug("Fury: Intercept gap closer" .. (hasWarbringer and " (Warbringer)" or ""))
+            --             return true
+            --         end
+            --     end
+            -- end
             local availableRanged = self:GetAvailableRangedAbilities()
             if availableRanged.heroicThrow and self:UseRangedAbilityAndReturn("Heroic Throw", "target") then
                 WarriorDebug("Fury: Heroic Throw while out of melee")

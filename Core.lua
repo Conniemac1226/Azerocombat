@@ -801,7 +801,9 @@ AC.TankAbilities = {
         taunt = "Taunt",
         aoe_taunt = "Challenging Shout", 
         threat_abilities = {"Shield Slam", "Revenge", "Devastate", "Sunder Armor", "Thunder Clap"},
-        gap_closers = {"Charge", "Intercept"},
+        -- Intercept disabled; keep Charge as the only warrior tank gap closer.
+        -- gap_closers = {"Charge", "Intercept"},
+        gap_closers = {"Charge"},
         tank_stance = function() 
             -- Defensive Stance = form 2 in WotLK
             return GetShapeshiftForm() == 2 
@@ -1100,11 +1102,13 @@ function AC:GetTankMovementAbility(unit)
             end
         end
 
-        if self:KnowsSpell("Intercept") and self:IsUsableSpell("Intercept") and self:GetSpellCooldown("Intercept") == 0 and
-           ((self.HasWarbringerTalent and self:HasWarbringerTalent()) or (self.GetCurrentStance and self:GetCurrentStance() == 3)) and
-           self:IsInSpellRangeSafe("Intercept", unit) then
-            return "Intercept"
-        end
+        -- Intercept disabled as a tank movement response. Re-enable only if
+        -- target-sticky behavior is fixed and it is intentionally desired.
+        -- if self:KnowsSpell("Intercept") and self:IsUsableSpell("Intercept") and self:GetSpellCooldown("Intercept") == 0 and
+        --    ((self.HasWarbringerTalent and self:HasWarbringerTalent()) or (self.GetCurrentStance and self:GetCurrentStance() == 3)) and
+        --    self:IsInSpellRangeSafe("Intercept", unit) then
+        --     return "Intercept"
+        -- end
     elseif class == "DEATHKNIGHT" then
         if self:KnowsSpell("Death Grip") and self:IsUsableSpell("Death Grip") and self:GetSpellCooldown("Death Grip") == 0 and
            self:IsInSpellRangeSafe("Death Grip", unit) then
@@ -1354,6 +1358,38 @@ function AC:ShouldSwitchTankTarget()
     local groupSize = self:GetGroupSize()
     local currentThreatState = groupSize <= 5 and self:GetTankThreatState(currentTarget) or nil
 
+    local function isHighValueThreatTarget(unit)
+        local targetUnit = unit and (unit .. "target") or nil
+        if not targetUnit or not UnitExists(targetUnit) or not UnitIsFriend("player", targetUnit) or UnitIsUnit(targetUnit, "player") then
+            return false
+        end
+
+        local health = self:GetTargetHealthPercent(targetUnit)
+        if health > 0 and health <= 35 then
+            return true
+        end
+
+        local _, targetClass = UnitClass(targetUnit)
+        return targetClass == "PRIEST" or targetClass == "PALADIN" or
+               targetClass == "SHAMAN" or targetClass == "DRUID"
+    end
+
+    if self.activeProactiveThreatSwitch and self.activeProactiveThreatSwitch.guid == currentGUID then
+        local age = GetTime() - (self.activeProactiveThreatSwitch.time or 0)
+        if age >= 1.8 and not isHighValueThreatTarget(currentTarget) then
+            local meleeTarget = self:FindBestTankTarget(true, true, currentGUID)
+            if meleeTarget and not UnitIsUnit(meleeTarget, currentTarget) then
+                self.proactiveThreatSwitchCooldowns = self.proactiveThreatSwitchCooldowns or {}
+                self.proactiveThreatSwitchCooldowns[currentGUID] = GetTime()
+                self.activeProactiveThreatSwitch = nil
+                if self.debugMode then
+                    self:Debug("Proactive threat touch complete; returning to melee target " .. (UnitName(meleeTarget) or "Unknown"))
+                end
+                return true
+            end
+        end
+    end
+
     if currentGUID and self.lastTauntTarget == currentGUID then
         local tauntAge = GetTime() - (self.lastTauntTime or 0)
         local recentTaunt = tauntAge < 6
@@ -1390,13 +1426,28 @@ function AC:ShouldSwitchTankTarget()
             local bestThreatRisk = groupSize <= 5 and self:GetTankThreatRiskScore(bestTarget, bestThreatState) or 0
 
             if currentInMelee then
-                if bestInMelee and groupSize <= 5 and bestThreatRisk >= currentThreatRisk + 35 and bestPriority > currentPriority + 20 then
+                local urgentThreat = isHighValueThreatTarget(bestTarget)
+                local recentProactiveSwitch = false
+                local bestGUID = UnitGUID(bestTarget)
+                if bestGUID and self.proactiveThreatSwitchCooldowns and self.proactiveThreatSwitchCooldowns[bestGUID] then
+                    recentProactiveSwitch = GetTime() - self.proactiveThreatSwitchCooldowns[bestGUID] < 5
+                end
+
+                local proactiveThreatWarning = bestThreatRisk >= currentThreatRisk + 75 and bestThreatRisk >= 130
+                local overwhelmingThreat = bestThreatRisk >= currentThreatRisk + 150 and bestThreatRisk >= 200
+                if bestInMelee and groupSize <= 5 and bestPriority > currentPriority + 20 and
+                   (urgentThreat or overwhelmingThreat or (proactiveThreatWarning and not recentProactiveSwitch)) then
+                    self.pendingTankSwitchReason = "proactive_threat"
                     if self.debugMode then
                         self:Debug("Proactive threat switch: " .. (UnitName(bestTarget) or "Unknown") ..
                                    " risk " .. tostring(bestThreatRisk) .. " over " ..
                                    (UnitName(currentTarget) or "Unknown") .. " risk " .. tostring(currentThreatRisk))
                     end
                     return true
+                end
+
+                if bestInMelee and groupSize <= 5 and bestThreatRisk >= currentThreatRisk + 35 and bestPriority > currentPriority + 20 and self.debugMode then
+                    self:Debug("Proactive threat switch blocked: existing melee target has enough priority")
                 end
 
                 if not bestInMelee and bestPriority >= 200 then
@@ -1439,6 +1490,8 @@ function AC:UpdateTankTargeting()
 
     if self:ShouldSwitchTankTarget() then
         local currentGUID = UnitGUID("target")
+        local switchReason = self.pendingTankSwitchReason
+        self.pendingTankSwitchReason = nil
         local bestTarget, priority
 
         if UnitExists("target") and UnitCanAttack("player", "target") and not self:IsInMeleeRange("target", true) then
@@ -1460,6 +1513,14 @@ function AC:UpdateTankTargeting()
             end
             self:Debug("Tank target switch: " .. oldTarget .. " -> " .. (UnitName("target") or "Unknown") .. " (Priority: " .. priority .. ")")
             self:MarkAsOurTarget(UnitGUID("target"))
+            if switchReason == "proactive_threat" then
+                self.activeProactiveThreatSwitch = {
+                    guid = UnitGUID("target"),
+                    time = GetTime()
+                }
+            else
+                self.activeProactiveThreatSwitch = nil
+            end
             return true
         end
     end
@@ -1853,6 +1914,9 @@ function AC:GetUniversalLooseMobs()
     local looseMobs = {}
     local _, class = UnitClass("player")
     local abilities = self.TankAbilities[class]
+    local aoeTauntReady = abilities and abilities.aoe_taunt and
+                          self:IsUsableSpell(abilities.aoe_taunt) and
+                          self:GetSpellCooldown(abilities.aoe_taunt) == 0
     
     -- Method 1: Group member threat scan (WotLK 3.3.5a compatible)
     local numMembers = GetNumPartyMembers() + GetNumRaidMembers()
@@ -1872,7 +1936,7 @@ function AC:GetUniversalLooseMobs()
                             local priority = self:CalculateUniversalLooseMobPriority(attacker, unit)
                             if priority > 100 then -- Lowered threshold for better loose mob detection
                                 local tauntAbility = self:CanTauntTarget(attacker, abilities)
-                                if tauntAbility then
+                                if tauntAbility or aoeTauntReady then
                                     table.insert(looseMobs, {
                                         unit = attacker,
                                         priority = priority,
@@ -1903,7 +1967,7 @@ function AC:GetUniversalLooseMobs()
                     local priority = self:CalculateUniversalLooseMobPriority(unit, target)
                     if priority > 75 then
                         local tauntAbility = self:CanTauntTarget(unit, abilities)
-                        if tauntAbility then
+                        if tauntAbility or aoeTauntReady then
                             -- Check if not already in list
                             local exists = false
                             for _, existing in ipairs(looseMobs) do
@@ -2171,13 +2235,23 @@ function AC:HandleUniversalLooseMobs()
             if abilities.aoe_taunt_range and abilities.aoe_taunt_range <= 10 then
                 -- Close range AoE (Challenging Shout, Challenging Roar)
                 local nearbyEnemies = 0
+                local looseMobsInRange = 0
                 local criticalSituation = false
+
+                local function isInCloseAoETauntRange(unit)
+                    if not unit or not UnitExists(unit) then
+                        return false
+                    end
+
+                    local ok, result = pcall(CheckInteractDistance, unit, 3)
+                    return ok and result == true
+                end
                 
                 -- Check for enemies within AoE range using nameplate scan
                 for i = 1, 40 do
                     local unitID = "nameplate" .. i
                     if UnitExists(unitID) and UnitCanAttack("player", unitID) and not UnitIsDead(unitID) then
-                        if CheckInteractDistance(unitID, 3) then -- Within ~10 yards
+                        if isInCloseAoETauntRange(unitID) then -- Within ~10 yards
                             nearbyEnemies = nearbyEnemies + 1
                         end
                     end
@@ -2185,13 +2259,18 @@ function AC:HandleUniversalLooseMobs()
                 
                 -- Check for critical situations requiring immediate AoE taunt
                 for _, looseMob in ipairs(looseMobs) do
+                    local looseMobInRange = isInCloseAoETauntRange(looseMob.unit)
+                    if looseMobInRange then
+                        looseMobsInRange = looseMobsInRange + 1
+                    end
+
                     -- Critical: Healer being attacked
-                    if looseMob.priority >= 400 then -- Healer (base 100 + 300 = 400)
+                    if looseMobInRange and looseMob.priority >= 400 then -- Healer (base 100 + 300 = 400)
                         criticalSituation = true
                         reason = "healer under attack"
                         break
                     -- Critical: Anyone at very low health (<30%) being attacked
-                    elseif looseMob.priority >= 300 and looseMob.victimUnit and UnitExists(looseMob.victimUnit) then
+                    elseif looseMobInRange and looseMob.priority >= 300 and looseMob.victimUnit and UnitExists(looseMob.victimUnit) then
                         local targetHP = UnitHealth(looseMob.victimUnit) / UnitHealthMax(looseMob.victimUnit) * 100
                         if targetHP < 30 then
                             criticalSituation = true
@@ -2203,17 +2282,20 @@ function AC:HandleUniversalLooseMobs()
                 
                 -- Use AoE taunt if:
                 -- 1. Critical situation (protect healer/low health ally)
-                -- 2. 3+ loose mobs and 2+ enemies in range
-                -- 3. 4+ loose mobs (overwhelming threat)
+                -- 2. 2+ loose mobs in shout range
+                -- 3. 4+ loose mobs with at least 2 in range (overwhelming threat)
                 if criticalSituation then
                     canUseAoE = true
                     reason = "CRITICAL - " .. reason
-                elseif #looseMobs >= 4 then
+                elseif #looseMobs >= 4 and looseMobsInRange >= 2 then
                     canUseAoE = true
-                    reason = "overwhelming threat (" .. #looseMobs .. " loose mobs)"
-                elseif #looseMobs >= 3 and nearbyEnemies >= 2 then
+                    reason = "overwhelming threat (" .. #looseMobs .. " loose, " .. looseMobsInRange .. " in range)"
+                elseif looseMobsInRange >= 2 then
                     canUseAoE = true
-                    reason = "tactical AoE (" .. #looseMobs .. " loose, " .. nearbyEnemies .. " in range)"
+                    reason = "tactical AoE (" .. looseMobsInRange .. " loose mobs in range)"
+                elseif self.debugMode then
+                    self:Debug("AoE taunt blocked: " .. tostring(looseMobsInRange) ..
+                               " loose mobs in range, " .. tostring(nearbyEnemies) .. " enemies nearby")
                 end
                 
             elseif abilities.aoe_taunt_range and abilities.aoe_taunt_range > 10 then
