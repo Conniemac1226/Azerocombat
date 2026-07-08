@@ -4,7 +4,7 @@ local AddonName, AC = ...
 -- Spell Database - Must be defined before any functions that use it
 local S = { -- Spells
     -- Core Abilities
-    SteadyShot = "Steady Shot", AimedShot = "Aimed Shot", ArcaneShot = "Arcane Shot",
+    AutoShot = "Auto Shot", SteadyShot = "Steady Shot", AimedShot = "Aimed Shot", ArcaneShot = "Arcane Shot",
     MultiShot = "Multi-Shot", KillShot = "Kill Shot", SerpentSting = "Serpent Sting",
     ScorpidSting = "Scorpid Sting", ViperSting = "Viper Sting", RaptorStrike = "Raptor Strike",
     MongooseBite = "Mongoose Bite", WingClip = "Wing Clip", Disengage = "Disengage",
@@ -442,6 +442,11 @@ function AC:UseRacials(offensive, emergency)
     
     -- Offensive racials - use on cooldown (simplified)
     if offensive and targetExists then
+        if self:HasBuff("player", S.AspectViper) or (not self:HasBuff("player", S.AspectHawk) and not self:HasBuff("player", S.AspectDragonhawk)) then
+            HunterDebugThrottled("OffensiveRacialAspectBlocked", 5.0, "Skipping offensive racial - not in Hawk/Dragonhawk")
+            return false
+        end
+
         HunterDebug("Checking offensive racials for " .. race)
         
         -- Blood Fury (Orc) - increases attack power
@@ -492,9 +497,97 @@ function AC:UseRacials(offensive, emergency)
     return false
 end
 
-function AC:IsInMeleeRange(unit)
+function AC:HunterSpellRangeResult(spellName, unit)
+    if not spellName or not unit or not UnitExists(unit) then return nil end
+    local ok, result = pcall(IsSpellInRange, spellName, unit)
+    if ok and result ~= nil then
+        return result
+    end
+    return nil
+end
+
+function AC:HunterIsMeleeSpell(spellName)
+    return spellName == S.RaptorStrike or spellName == S.WingClip or spellName == S.MongooseBite
+end
+
+function AC:HunterIsInMeleeRange(unit)
     unit = unit or "target"
-    return CheckInteractDistance(unit, 3) 
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+        return false
+    end
+
+    local sawRangeResult = false
+    local meleeSpells = { S.RaptorStrike, S.WingClip, S.MongooseBite }
+    for _, spellName in ipairs(meleeSpells) do
+        if self:KnowsSpell(spellName) or self:IsUsableSpell(spellName) then
+            local result = self:HunterSpellRangeResult(spellName, unit)
+            if result ~= nil then
+                sawRangeResult = true
+                if result == 1 then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+function AC:HunterIsInRangedRange(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+        return false
+    end
+
+    local rangedSpells = {
+        S.AutoShot,
+        S.ArcaneShot,
+        S.SerpentSting,
+        S.MultiShot,
+        S.SteadyShot,
+        S.AimedShot,
+        S.KillShot,
+    }
+
+    local sawRangeResult = false
+    for _, spellName in ipairs(rangedSpells) do
+        if spellName and (spellName == "Auto Shot" or self:KnowsSpell(spellName) or self:IsUsableSpell(spellName)) then
+            local result = self:HunterSpellRangeResult(spellName, unit)
+            if result ~= nil then
+                sawRangeResult = true
+                if result == 1 then
+                    return true
+                end
+            end
+        end
+    end
+
+    if not self:HunterIsInMeleeRange(unit) then
+        local ok, result = pcall(CheckInteractDistance, unit, 1)
+        if ok and result then
+            return true
+        end
+    end
+
+    return false
+end
+
+function AC:GetHunterRangeState(unit)
+    unit = unit or "target"
+    if self:HunterIsInRangedRange(unit) then
+        return "ranged"
+    end
+
+    if self:HunterIsInMeleeRange(unit) then
+        return "melee"
+    end
+
+    local closeOk, closeResult = pcall(CheckInteractDistance, unit, 3)
+    if closeOk and closeResult then
+        return "deadzone"
+    end
+
+    return "outofrange"
 end
 
 -- =============================================
@@ -635,6 +728,12 @@ function AC:SendPetToAttack(targetUnit)
     if not UnitExists("pet") or not UnitExists(targetUnit) then
         return false
     end
+    if UnitIsDeadOrGhost("pet") or UnitIsDeadOrGhost(targetUnit) or not UnitCanAttack("player", targetUnit) then
+        return false
+    end
+    if UnitExists("pettarget") and UnitIsUnit("pettarget", targetUnit) then
+        return false
+    end
     
     -- Use PetAttack() API to send pet to target
     PetAttack(targetUnit)
@@ -642,9 +741,28 @@ function AC:SendPetToAttack(targetUnit)
     return true
 end
 
+function AC:EnsurePetAttackingCurrentTarget()
+    if not UnitExists("pet") or UnitIsDeadOrGhost("pet") then return false end
+    if not UnitExists("target") or UnitIsDeadOrGhost("target") or not UnitCanAttack("player", "target") then return false end
+    if UnitExists("pettarget") and UnitIsUnit("pettarget", "target") then return false end
+    if not Throttle("HunterPetAttackCurrentTarget", 0.2) then return false end
+
+    PetAttack("target")
+    HunterDebug("Pet attack issued on current target: " .. (UnitName("target") or "Unknown"))
+    return true
+end
+
 -- Smart pet targeting management
 function AC:ManageSmartPetTargeting()
     if not Throttle("SmartPetTargeting", 1) then return false end -- Faster for threat response
+
+    if self:EnsurePetAttackingCurrentTarget() then
+        return true
+    end
+
+    if UnitExists("target") and UnitCanAttack("player", "target") and UnitExists("pettarget") and UnitIsUnit("pettarget", "target") then
+        return false
+    end
     
     local targets = self:GetNearbyHostileTargets()
     if #targets == 0 then return false end
@@ -819,8 +937,6 @@ function AC:GetBestSoloTarget()
     return bestTarget, highestPriority
 end
 
--- REPLACE the PetNeedsMending function in Hunter.lua with this corrected version:
-
 function AC:PetNeedsMending()
     if UnitExists("pet") and not UnitIsDeadOrGhost("pet") then
         -- Check if pet already has Mend Pet HoT
@@ -832,8 +948,6 @@ function AC:PetNeedsMending()
     end
     return false
 end
-
--- And update ManagePet to remove the unnecessary channeling check:
 
 function AC:ManagePet(inCombat)
     -- Reduced throttle for critical pet management
@@ -926,28 +1040,30 @@ function AC:ManagePet(inCombat)
     return false
 end
 
--- CORRECTED FUNCTION for WotLK 3.3.5a API
 function AC:TogglePetSpell(spellName, enable)
     if not spellName then 
         return false 
     end
 
     for i = 1, 12 do
-        local name, _, _, _, _, currentIsAutocast = GetPetActionInfo(i)
+        local name, _, _, _, _, autoCastAllowed, autoCastEnabled = GetPetActionInfo(i)
 
         if name and name == spellName then
-            if enable and not currentIsAutocast then
+            if not autoCastAllowed then
+                return false
+            end
+
+            if enable and not autoCastEnabled then
                 HunterDebug("Enabling autocast for " .. spellName)
                 TogglePetAutocast(i)
                 return true
-            elseif not enable and currentIsAutocast then
+            elseif not enable and autoCastEnabled then
                 HunterDebug("Disabling autocast for " .. spellName)
                 TogglePetAutocast(i)
                 return true
-            elseif (enable and currentIsAutocast) or (not enable and not currentIsAutocast) then
-                return true
             end
-            return true
+
+            return false
         end
     end
     return false
@@ -955,7 +1071,7 @@ end
 
 function AC:UpdatePetGrowl()
     if self:GetPetStatus() ~= "alive" then return false end
-    if not Throttle("PetGrowlToggle", 1) then return false end -- Faster response for threat management
+    if not Throttle("PetGrowlToggle", 3) then return false end
     
     local growlKnown = false
     local cowerKnown = false
@@ -979,20 +1095,21 @@ function AC:UpdatePetGrowl()
     
     local inGroup = IsInGroup()
     local inRaid = GetNumRaidMembers() > 0
-    local hasTank = self:IsInGroupWithTank()
-    local targetElite = UnitClassification("target") == "elite" or UnitClassification("target") == "rareelite" or UnitClassification("target") == "worldboss"
-    
     -- Solo play: ALWAYS use Growl for maximum threat
     if not inGroup and not inRaid then
-        self:TogglePetSpell(S.PetGrowl, true)
-        HunterDebug("Solo mode: Growl ON for maximum threat")
-        return true
+        if self:TogglePetSpell(S.PetGrowl, true) then
+            HunterDebug("Solo mode: Growl ON for maximum threat")
+            return true
+        end
+        return false
     end
     
     -- Group/Raid: Disable Growl, use Cower if needed
     if inGroup or inRaid then
-        self:TogglePetSpell(S.PetGrowl, false)
-        HunterDebugThrottled("GrowlGroupOff", 5.0, "Group mode: Growl OFF")
+        local changed = self:TogglePetSpell(S.PetGrowl, false)
+        if changed then
+            HunterDebugThrottled("GrowlGroupOff", 5.0, "Group mode: Growl OFF")
+        end
         
         -- Use Cower if pet has too much threat in groups
         if cowerKnown and self:PetHasHighThreat() then
@@ -1002,10 +1119,10 @@ function AC:UpdatePetGrowl()
             end
         end
         
-        return true
+        return changed
     end
     
-    return true 
+    return false
 end
 
 -- =============================================
@@ -1116,7 +1233,7 @@ function AC:GetOptimalPetStance()
         return "Passive"
     end
     
-    if not inCombat and isInGroup and hasLivingGroupMembers then
+    if not inCombat and isInGroup and hasLivingGroupMembers and not hasHostileTarget then
         HunterDebug("Pet stance logic: Passive (out of combat in group)")
         return "Passive" 
     end
@@ -1187,113 +1304,6 @@ function AC:EmergencyPetPassive()
     return false
 end
 
-function AC:ManageAspects(spec, inCombat, manaPercent)
-    if not Throttle("AspectCheck", 3) then return false end 
-    if IsMounted() then return false end
-    
-    local dpsAspects = self:GetKnownAspects() 
-    local bestDpsAspect = dpsAspects[1] 
-
-    if not inCombat then
-        if self:HasBuff("player", S.AspectCheetah) or self:HasBuff("player", S.AspectPack) then
-            if self:IsPlayerMoving() then return false end 
-        end
-        if bestDpsAspect and not self:HasBuff("player", bestDpsAspect) then
-            if self:IsUsableSpell(bestDpsAspect) then self:CastSpell(bestDpsAspect); HunterDebug("Aspect: " .. bestDpsAspect .. " (OOC)"); return true end
-        end
-    else 
-        if self:HasBuff("player", S.AspectCheetah) or self:HasBuff("player", S.AspectPack) then
-            if bestDpsAspect and self:IsUsableSpell(bestDpsAspect) then self:CastSpell(bestDpsAspect); HunterDebug("Aspect: Cancelling speed for " .. bestDpsAspect); return true end
-        end
-
-        -- VERIFIED: Aspect dancing thresholds from theorycrafting
-        local viperThreshold = 25  -- Switch to Viper at 25% mana
-        local hawkThreshold = 80   -- Return to Hawk/Dragonhawk at 80% mana
-        
-        if manaPercent < viperThreshold and self:KnowsSpell(S.AspectViper) and not self:HasBuff("player", S.AspectViper) then
-            if self:IsUsableSpell(S.AspectViper) then self:CastSpell(S.AspectViper); HunterDebug("Aspect: Viper (Mana < " .. viperThreshold .. "%)"); return true end
-        elseif manaPercent > hawkThreshold and self:HasBuff("player", S.AspectViper) then
-            if bestDpsAspect and self:IsUsableSpell(bestDpsAspect) then self:CastSpell(bestDpsAspect); HunterDebug("Aspect: " .. bestDpsAspect .. " (Mana > " .. hawkThreshold .. "%)"); return true end
-        elseif not self:HasBuff("player", S.AspectViper) and bestDpsAspect and not self:HasBuff("player", bestDpsAspect) then
-            if self:IsUsableSpell(bestDpsAspect) then self:CastSpell(bestDpsAspect); HunterDebug("Aspect: " .. bestDpsAspect .. " (Ensuring DPS Aspect)"); return true end
-        end
-    end
-    return false
-end
-
--- Duplicate ManagePet function removed
-
-function AC:UseDefensiveCooldowns(healthPercent)
-    if healthPercent < 25 and self:IsUsableSpell(S.FeignDeath) then self:CastSpell(S.FeignDeath); HunterDebug("Feign Death"); return true end
-    if healthPercent < 35 and self:IsUsableSpell(S.Deterrence) then self:CastSpell(S.Deterrence); HunterDebug("Deterrence"); return true end
-    if healthPercent < 50 and self:KnowsSpell(S.MasterCall) and self:IsUsableSpell(S.MasterCall) and self:GetPetStatus() == "alive" then self:CastSpell(S.MasterCall); HunterDebug("Master's Call"); return true end
-    
-    if self:UseRacials(false, true) then return true end
-    return false
-end
-
-function AC:UseOffensiveCooldowns(spec, inCombat, targetIsTough, targetHP)
-    if not inCombat or not UnitExists("target") or UnitIsDeadOrGhost("target") then return false end
-    if not Throttle("OffensiveCDsHunter", 0.5) then return false end -- Faster checks
-
-    -- RAPID FIRE: 40% attack speed - Smart usage (NOT during Hero/BL per EJ)
-    if self:IsUsableSpell(S.RapidFire) then
-        -- Skip during Bloodlust/Heroism (haste cap at 1.5s GCD)
-        if self:HasBuff("player", "Heroism") or self:HasBuff("player", "Bloodlust") then
-            HunterDebug("Skipping RF - Hero/BL active")
-            return false
-        end
-        
-        local shouldUseRF = false
-        
-        -- Smart RF decisions
-        if targetIsTough then
-            shouldUseRF = true -- Bosses/elites
-        elseif targetHP > 70 and not self:IsFastDyingMob("target") then
-            shouldUseRF = true -- Long fights
-        elseif targetHP < 20 and self:KnowsSpell(S.KillShot) then
-            shouldUseRF = true -- Execute phase for more Kill Shots
-        elseif self:GetEnemyCount() >= 3 then
-            shouldUseRF = true -- AoE situations
-        elseif spec == "Beast Mastery" and self:HasBuff("player", S.BestialWrath) then
-            shouldUseRF = true -- Stack with BW for BM
-        end
-        
-        if shouldUseRF and self:ActionThrottle("RapidFireUsage", 300) then -- 5 min CD
-            self:CastSpell(S.RapidFire); HunterDebug("Rapid Fire (+40% speed)"); return true
-        end
-    end
-    
-    if spec == "Marksmanship" and self:KnowsSpell(S.ReadinessSpell) and self:IsUsableSpell(S.ReadinessSpell) then
-        if self:GetSpellCooldown(S.RapidFire) > 60 and (self:GetSpellCooldown(S.ChimeraShot) > 5 or self:GetSpellCooldown(S.AimedShot) > 5) then 
-            if self:ActionThrottle("ReadinessUsage", 180) then 
-                 self:CastSpell(S.ReadinessSpell); HunterDebug("Readiness"); return true
-            end
-        end
-    end
-    
-    if spec == "Beast Mastery" and self:KnowsSpell(S.BestialWrath) and self:IsUsableSpell(S.BestialWrath) then
-        if self:GetPetStatus() == "alive" then
-            if self:ActionThrottle("BestialWrathUsage", 60) then 
-                 self:CastSpell(S.BestialWrath); HunterDebug("Bestial Wrath"); return true 
-            end
-        end
-    end
-    
-    -- Use trinkets on cooldown (simplified)
-    if self:UseTrinkets() then 
-        HunterDebug("Used Trinkets"); 
-        return true 
-    end
-    
-    -- Use racials on cooldown (simplified) 
-    if self:UseRacials(true, false) then 
-        HunterDebug("Used Racial"); 
-        return true 
-    end 
-    return false
-end
-
 function AC:ShouldUseHuntersMark(unit)
     unit = unit or "target"
     if not UnitExists(unit) then return false end
@@ -1327,570 +1337,16 @@ function AC:ShouldUseHuntersMark(unit)
     return true
 end
 
--- FIXED: Direct cast for Volley - external module handles placement
--- No special targeting logic needed
-
 function AC:IsTargetFleeing(unit)
     unit = unit or "target"
     if not UnitExists(unit) then return false end
     return GetUnitSpeed(unit) > 1 and self:GetTargetHealthPercent(unit) < 20 
 end
 
-function AC:HandleAutoAttack() 
-    if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then return false end
-    local inMelee = self:IsInMeleeRange()
-    local autoShotActive = false
-    if IsAutoRepeatSpell then
-        autoShotActive = IsAutoRepeatSpell(S.AutoShot or "Auto Shot") and true or false
-    end
-
-    if not inMelee then 
-        if not autoShotActive and self:GetSpellCooldown("Auto Shot") == 0 then
-             CastSpellByName("Auto Shot")
-             StartAttack()
-             return true
-        end
-    elseif autoShotActive then
-        CastSpellByName("Auto Shot")
-    end
-    return false
-end
-
 function AC:IsInHunterDeadzone(unit)
     unit = unit or "target"
     if not UnitExists(unit) or UnitIsDeadOrGhost(unit) then return false end
-    if self:IsInMeleeRange(unit) then return false end
-
-    -- Approximate the WotLK deadzone: close enough to interact, but not in melee.
-    return CheckInteractDistance(unit, 2) or CheckInteractDistance(unit, 3)
-end
-
--- MAIN HUNTER ROTATION
-function AC:HunterRotation()
-    local spec = self:GetPlayerSpec()
-    local level = UnitLevel("player")
-    local mana = UnitPower("player", 0)
-    local maxMana = UnitPowerMax("player", 0)
-    local manaPercent = (maxMana > 0) and (mana / maxMana * 100) or 100
-    local healthPercent = self:GetPlayerHealthPercent()
-    local inCombat = UnitAffectingCombat("player")
-    local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
-    local petStatus = self:GetPetStatus()
-
-    if Throttle("HunterDebugTick", 1.0) then
-        local petStance = petStatus == "alive" and self:GetPetStance() or "N/A"
-        HunterDebug(string.format("%s L%d | HP:%.0f%% MP:%.0f%% | Target:%s Pet:%s(%s) Combat:%s Aspect:%s",
-            spec, level, healthPercent, manaPercent, hasTarget and UnitName("target") or "N", petStatus, petStance, inCombat and "Y" or "N", 
-            self:HasBuff("player", S.AspectDragonhawk) and "Dragonhawk" or (self:HasBuff("player", S.AspectHawk) and "Hawk" or (self:HasBuff("player", S.AspectViper) and "Viper" or "None/Other"))))
-    end
-    
-    -- Emergency Lifeblood (Herbalism profession ability) at 50% health
-    if inCombat and self:UseLifeblood() then return true end
-    
-    -- Pet management is critical - check more frequently and with higher priority
-    if not IsMounted() then
-        local petStatus = self:GetPetStatus()
-        -- Always prioritize getting a pet if we don't have one
-        if petStatus ~= "alive" and petStatus ~= "calling" then
-            if self:ManagePet(inCombat) then return true end
-        elseif petStatus == "alive" then
-            -- Only manage living pet if not in immediate danger
-            if healthPercent > 25 or not inCombat then
-                if self:ManagePet(inCombat) then return true end
-            end
-        end
-    end
-    if self:ManageAspects(spec, inCombat, manaPercent) then return true end
-
-    if inCombat and healthPercent < 45 then 
-        if self:UseDefensiveCooldowns(healthPercent) then return true end
-        if healthPercent < 30 and self.UseHealthPotion and self:UseHealthPotion(30) then return true end
-    end
-    
-    if inCombat and not hasTarget then
-        if self:FindAndSetTarget() then hasTarget = true else return true end 
-    end
-    if not hasTarget then return false end 
-
-    self:HandleAutoAttack()
-    
-    local targetHP = self:GetTargetHealthPercent("target")
-    local targetIsTough = UnitClassification("target") == "elite" or UnitClassification("target") == "rareelite" or UnitClassification("target") == "worldboss" or UnitLevel("target") == -1
-    local isFastDying = self:IsFastDyingMob("target")
-    local inDeadzone = self:IsInHunterDeadzone("target")
-
-    if self:UseOffensiveCooldowns(spec, inCombat, targetIsTough, targetHP) then return true end
-
-    if self:ShouldUseHuntersMark("target") and self:IsUsableSpell(S.HuntersMark) then
-        self:CastSpell(S.HuntersMark, "target"); HunterDebug("Hunter's Mark"); return true
-    end
-
-    if self:KnowsSpell(S.Misdirection) and IsInGroup() and self:IsUsableSpell(S.Misdirection) and self:ActionThrottle("MisdirectionCD", 28) then
-        local misdirTarget = petStatus == "alive" and "pet" or nil
-        if not misdirTarget or self:IsInGroupWithTank() then
-            for i = 1, (GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()) do
-                local unit = GetNumRaidMembers() > 0 and "raid"..i or "party"..i
-                if self:IsTank(unit) and UnitExists(unit) and not UnitIsDeadOrGhost(unit) then misdirTarget = unit; break; end
-            end
-        end
-        if misdirTarget then self:CastSpell(S.Misdirection, misdirTarget); HunterDebug("Misdirection on " .. misdirTarget); return true end
-    end
-    
-    if UnitCastingInfo("target") then
-        if spec == "Marksmanship" and self:KnowsSpell(S.SilencingShot) and self:IsUsableSpell(S.SilencingShot) then
-            self:CastSpell(S.SilencingShot, "target"); HunterDebug("Silencing Shot"); return true
-        elseif self:KnowsSpell(S.ScatterShot) and self:IsUsableSpell(S.ScatterShot) and self:IsInMeleeRange("target") then
-            self:CastSpell(S.ScatterShot, "target"); HunterDebug("Scatter Shot"); return true
-        elseif self:KnowsSpell(S.Intimidation) and petStatus == "alive" and self:IsUsableSpell(S.Intimidation) then 
-            if self:ActionThrottle("IntimidationUsage", 65) then  -- 60s CD + buffer
-                self:CastSpell(S.Intimidation, "target"); HunterDebug("Intimidation"); return true
-            end
-        end
-    end
-
-    if inDeadzone then
-        HunterDebug("Target in hunter deadzone")
-        if self:IsTargetFleeing("target") and self:IsUsableSpell(S.WingClip) and not self:HasDebuff("target", S.WingClip) then
-            self:CastSpell(S.WingClip, "target"); HunterDebug("Wing Clip (deadzone)"); return true
-        end
-        if self:KnowsSpell(S.MongooseBite) and self:IsUsableSpell(S.MongooseBite) then
-            self:CastSpell(S.MongooseBite, "target"); HunterDebug("Mongoose Bite (deadzone)"); return true
-        end
-        if self:IsUsableSpell(S.RaptorStrike) then
-            self:CastSpell(S.RaptorStrike, "target"); HunterDebug("Raptor Strike (deadzone)"); return true
-        end
-        if self:KnowsSpell(S.Disengage) and self:IsUsableSpell(S.Disengage) and not isFastDying then
-            self:CastSpell(S.Disengage); HunterDebug("Disengage (deadzone)"); return true
-        end
-    end
-
-    if self:IsInMeleeRange("target") then
-        HunterDebug("In Melee Range")
-        if self:IsTargetFleeing("target") and self:IsUsableSpell(S.WingClip) and not self:HasDebuff("target", S.WingClip) then self:CastSpell(S.WingClip, "target"); HunterDebug("Wing Clip (fleeing)"); return true end
-        if self:KnowsSpell(S.ExplosiveTrap) and self:IsUsableSpell(S.ExplosiveTrap) and self:GetSpellCooldown(S.ExplosiveTrap) == 0 then 
-            self:CastSpell(S.ExplosiveTrap)
-            HunterDebug("Explosive Trap (melee)"); return true 
-        end 
-        if self:KnowsSpell(S.MongooseBite) and self:IsUsableSpell(S.MongooseBite) then self:CastSpell(S.MongooseBite, "target"); HunterDebug("Mongoose Bite"); return true end
-        if self:IsUsableSpell(S.RaptorStrike) then self:CastSpell(S.RaptorStrike, "target"); HunterDebug("Raptor Strike") end 
-        --if self:KnowsSpell(S.Disengage) and self:IsUsableSpell(S.Disengage) and not isFastDying then self:CastSpell(S.Disengage); HunterDebug("Disengage"); return true end
-    end
-
-    if targetHP < 20 and self:KnowsSpell(S.KillShot) and self:IsUsableSpell(S.KillShot) then
-        self:CastSpell(S.KillShot, "target"); HunterDebug("Kill Shot"); return true
-    end
-
-    local enemies = self:GetEnemyCount()
-    
-    -- Volley: Use on 3+ enemies when stationary (PRIORITY)
-    if enemies >= 3 and self:KnowsSpell(S.Volley) and self:IsUsableSpell(S.Volley) and manaPercent > 30 then
-        if not self:IsChanneling() and not self:IsPlayerMoving() then
-            -- Use the standardized ground targeting system
-            if self.SafeCastGroundAOE then
-                if self:SafeCastGroundAOE(S.Volley) then
-                    HunterDebug("Volley cast using SafeCastGroundAOE")
-                    return true
-                end
-            else
-                HunterDebug("SafeCastGroundAOE not available - using fallback")
-                CastSpellByName(S.Volley)
-                CameraOrSelectOrMoveStart()
-                CameraOrSelectOrMoveStop()
-                HunterDebug("Volley cast with fallback method")
-                return true
-            end
-        else
-            HunterDebug("Volley skipped - channeling:" .. tostring(self:IsChanneling()) .. ", moving:" .. tostring(self:IsPlayerMoving()))
-        end
-    end
-    
-    -- Multi-Shot: Use on 2+ enemies (fallback or when Volley unavailable)
-    if enemies >= 2 and self:KnowsSpell(S.MultiShot) and manaPercent > 15 then
-        if self:CastSpell(S.MultiShot, "target") then
-            HunterDebug("Multi-Shot (2+ enemies)")
-            return true
-        elseif Throttle("HunterMultiShotUnavailable", 2.0) then
-            HunterDebug("Multi-Shot blocked - usable:" .. tostring(self:IsUsableSpell(S.MultiShot)) .. ", cd:" .. string.format("%.1f", self:GetSpellCooldown(S.MultiShot)))
-        end
-    end
-    
-    -- Continue channeling Volley if already channeling
-    if self:IsChanneling() then
-        local channelingSpell = UnitChannelInfo("player")
-        if channelingSpell == S.Volley then
-            HunterDebug("Continuing Volley channel")
-            return true
-        end
-    end
-
-    -- Spec Rotations (Single Target Focus if not AoE)
-    if spec == "Beast Mastery" then
-        -- BM SMART PRIORITY (Research-based with intelligent decision making)
-        
-        -- 1. Kill Shot (execute phase absolute priority per EJ)
-        if targetHP < 20 and self:KnowsSpell(S.KillShot) and self:IsUsableSpell(S.KillShot) then
-            self:CastSpell(S.KillShot, "target"); HunterDebug("BM: Kill Shot Execute"); return true
-        end
-        
-        -- 2. Kill Command (60s CD base, critical for BM DPS)
-        if self:KnowsSpell(S.KillCommand) and self:IsUsableSpell(S.KillCommand) and petStatus == "alive" and self:ActionThrottle("BM_KillCommand", 5.0) then
-            -- Kill Command increases pet crit by 20% through Focused Fire
-            if self:CastSpell(S.KillCommand, "target") then
-                HunterDebug("BM: Kill Command (+20% pet crit)"); 
-                -- Immediately maximize pet burst after KC
-                if UnitExists("pettarget") then
-                    self:ManagePetDPS()
-                end
-                return true
-            end
-        end
-        
-        -- 3. Bestial Wrath (intelligent usage for burst windows)
-        if self:KnowsSpell(S.BestialWrath) and self:IsUsableSpell(S.BestialWrath) and petStatus == "alive" then
-            local shouldBurst = false
-            
-            -- Smart burst decision making
-            if targetIsTough then
-                shouldBurst = true -- Always burst elites/bosses
-            elseif targetHP > 60 then
-                shouldBurst = true -- Long fights benefit from early burst
-            elseif self:GetEnemyCount() >= 3 then
-                shouldBurst = true -- AoE situations
-            elseif self:HasBuff("player", "Rapid Fire") then
-                shouldBurst = true -- Stack with other CDs
-            end
-            
-            if shouldBurst and self:ActionThrottle("BM_BW_CD", 70) then -- 1min 10sec with talents
-                self:CastSpell(S.BestialWrath); 
-                HunterDebug("BM: Bestial Wrath (+50% pet, +20% hunter damage)"); 
-                -- Force aggressive pet focus dump during BW
-                for i = 1, 2 do
-                    if UnitExists("pettarget") then
-                        self:ManagePetDPS()
-                    end
-                end
-                return true 
-            end 
-        end
-        
-        -- 4. Serpent Sting (maintain if worth it)
-        if self:KnowsSpell(S.SerpentSting) and not self:HasDebuff("target", S.SerpentSting) and not isFastDying then
-            -- Smart sting application
-            if targetHP > 30 or targetIsTough then
-                if self:IsUsableSpell(S.SerpentSting) then
-                    self:CastSpell(S.SerpentSting, "target"); HunterDebug("BM: Serpent Sting"); return true
-                end
-            end
-        end
-        
-        -- 5. Steady Shot (main filler per EJ)
-        if self:KnowsSpell(S.SteadyShot) and self:GetSpellCooldown(S.SteadyShot) == 0 and not UnitCastingInfo("player") then
-            if self:CastSpell(S.SteadyShot, "target") then HunterDebug("BM: Steady Shot"); return true end
-        end
-        
-        -- 6. Arcane Shot (mana permitting)
-        if self:KnowsSpell(S.ArcaneShot) and self:GetSpellCooldown(S.ArcaneShot) == 0 and manaPercent > 20 then 
-            -- Smart usage - skip if mana tight and long fight ahead
-            if manaPercent > 40 or targetHP < 30 or targetIsTough then
-                if self:CastSpell(S.ArcaneShot, "target") then HunterDebug("BM: Arcane Shot"); return true end
-            end
-        end
-
-    elseif spec == "Marksmanship" then
-        local hasImprovedSteadyShot = self:HasBuff("player", S.ImprovedSteadyShot)
-        local serpentStingUp = self:HasDebuff("target", S.SerpentSting)
-        local complexity = self:GetRotationComplexity()
-        HunterDebug("MM: ISS proc: " .. tostring(hasImprovedSteadyShot) .. ", SS up: " .. tostring(serpentStingUp))
-        
-        -- Off-GCD Priority: Silencing Shot (use on every spell cast)
-        if self:KnowsSpell(S.SilencingShot) and self:IsUsableSpell(S.SilencingShot) then
-            self:CastSpell(S.SilencingShot, "target"); HunterDebug("MM: Silencing Shot (Off-GCD)"); 
-            -- Don't return, continue with rotation
-        end
-        
-        -- Priority 1: Chimera Shot (ALWAYS highest priority)
-        if self:KnowsSpell(S.ChimeraShot) and self:IsUsableSpell(S.ChimeraShot) then
-            self:CastSpell(S.ChimeraShot, "target"); HunterDebug("MM: Chimera Shot (TOP PRIORITY)"); return true
-        end
-        
-        -- Priority 2: Kill Shot (highest priority execute)
-        if targetHP < 20 and self:KnowsSpell(S.KillShot) and self:IsUsableSpell(S.KillShot) then
-            self:CastSpell(S.KillShot, "target"); HunterDebug("MM: Kill Shot"); return true
-        end
-        
-        -- Priority 3: ISS proc management (per EJ - consume with Chimera when possible)
-        if hasImprovedSteadyShot then
-            -- Check if Chimera is coming up soon
-            local chimeraCD = self:KnowsSpell(S.ChimeraShot) and self:GetSpellCooldown(S.ChimeraShot) or 999
-            
-            if chimeraCD < 1.5 then
-                -- Hold proc for Chimera (optimal)
-                HunterDebug("MM: Holding ISS for Chimera (" .. string.format("%.1f", chimeraCD) .. "s)")
-            else
-                -- Use with Aimed Shot or Arcane Shot
-                if self:KnowsSpell(S.AimedShot) and self:IsUsableSpell(S.AimedShot) and not self:IsPlayerMoving() then
-                    self:CastSpell(S.AimedShot, "target"); HunterDebug("MM: Aimed Shot (ISS proc)"); return true
-                elseif self:KnowsSpell(S.ArcaneShot) and self:GetSpellCooldown(S.ArcaneShot) == 0 then
-                    if self:CastSpell(S.ArcaneShot, "target") then HunterDebug("MM: Arcane Shot (ISS proc)"); return true end
-                end
-            end
-        end
-        
-        -- Priority 4: Serpent Sting (maintain for Chimera refresh)
-        if not serpentStingUp and self:KnowsSpell(S.SerpentSting) and not isFastDying and self:IsUsableSpell(S.SerpentSting) then
-            self:CastSpell(S.SerpentSting, "target"); HunterDebug("MM: Serpent Sting"); return true
-        end
-        
-        -- Priority 5: Aimed Shot (highest damage per cast time)
-        if self:KnowsSpell(S.AimedShot) and self:IsUsableSpell(S.AimedShot) and not self:IsPlayerMoving() and manaPercent > 15 then 
-            -- Cast if we have time before Chimera
-            if self:GetSpellCooldown(S.ChimeraShot) > 3.0 then
-                self:CastSpell(S.AimedShot, "target"); HunterDebug("MM: Aimed Shot"); return true
-            end
-        end
-        
-        -- Priority 5: Arcane Shot (drop at high ArP per EJ)
-        local armorPen = GetCombatRating(25) or 0  -- 25 = Armor Penetration rating
-        
-        -- Smart Arcane Shot usage based on ArP breakpoints
-        local shouldUseArcane = true
-        if armorPen >= 430 then
-            -- Only use while moving at high ArP
-            shouldUseArcane = self:IsPlayerMoving()
-            if not shouldUseArcane then
-                HunterDebug("MM: Skipping Arcane (ArP: " .. armorPen .. ")")
-            end
-        end
-        
-        if shouldUseArcane and self:KnowsSpell(S.ArcaneShot) and self:GetSpellCooldown(S.ArcaneShot) == 0 and manaPercent > 15 then
-            if self:CastSpell(S.ArcaneShot, "target") then HunterDebug("MM: Arcane Shot"); return true end
-        end
-        
-        -- Priority 6: Steady Shot (filler)
-        if self:KnowsSpell(S.SteadyShot) and self:GetSpellCooldown(S.SteadyShot) == 0 and not UnitCastingInfo("player") then
-            if self:CastSpell(S.SteadyShot, "target") then HunterDebug("MM: Steady Shot"); return true end
-        end
-
-    elseif spec == "Survival" then
-        local hasLockAndLoad = self:HasBuff("player", S.LockAndLoad)
-        local hasExposeWeakness = self:HasBuff("player", S.ExposeWeakness)
-        local explosiveShotUp = self:HasDebuff("target", S.ExplosiveShot)
-        local blackArrowUp = self:HasDebuff("target", S.BlackArrow)
-        local serpentStingUp = self:HasDebuff("target", S.SerpentSting)
-        
-        HunterDebug("SV: LnL: " .. tostring(hasLockAndLoad) .. ", ES up: " .. tostring(explosiveShotUp) .. ", BA: " .. tostring(blackArrowUp))
-        
-        -- Priority 1: Kill Shot (highest priority)
-        if targetHP < 20 and self:KnowsSpell(S.KillShot) and self:IsUsableSpell(S.KillShot) then
-            self:CastSpell(S.KillShot, "target"); HunterDebug("SV: Kill Shot"); return true
-        end
-        
-        -- Priority 2: Lock and Load proc management
-        if hasLockAndLoad and self:KnowsSpell(S.ExplosiveShot) and self:IsUsableSpell(S.ExplosiveShot) then
-            -- Avoid clipping DoT
-            if not explosiveShotUp then
-                self:CastSpell(S.ExplosiveShot, "target"); 
-                HunterDebug("SV: Explosive Shot (LnL)"); 
-                return true
-            end
-        end
-        
-        -- Priority 3: Explosive Shot (highest priority, ~50% of damage)
-        if self:KnowsSpell(S.ExplosiveShot) and self:IsUsableSpell(S.ExplosiveShot) then
-            -- Smart usage - avoid clipping DoT
-            if not hasLockAndLoad or not explosiveShotUp then
-                self:CastSpell(S.ExplosiveShot, "target"); HunterDebug("SV: Explosive Shot"); return true
-            end
-        end
-        
-        -- Priority 4: Trap weaving for LnL procs (22s ICD)
-        if not hasLockAndLoad and self:ActionThrottle("LnLTrapCheck", 22) then
-            -- Smart trap usage for guaranteed LnL proc
-            if self:KnowsSpell(S.ExplosiveTrap) and self:IsUsableSpell(S.ExplosiveTrap) then
-                if self:IsInMeleeRange("target") or (targetIsTough and not self:IsPlayerMoving()) then
-                    self:CastSpell(S.ExplosiveTrap)
-                    HunterDebug("SV: Trap for LnL proc"); 
-                    return true
-                end
-            end
-        end
-        
-        -- Priority 5: Black Arrow (6% damage + LnL procs)
-        if self:KnowsSpell(S.BlackArrow) and not blackArrowUp and not isFastDying and self:IsUsableSpell(S.BlackArrow) then
-            self:CastSpell(S.BlackArrow, "target"); HunterDebug("SV: Black Arrow"); return true
-        end
-        
-        -- Priority 5: Serpent Sting maintenance
-        if not serpentStingUp and self:KnowsSpell(S.SerpentSting) and not isFastDying and self:IsUsableSpell(S.SerpentSting) then
-            self:CastSpell(S.SerpentSting, "target"); HunterDebug("SV: Serpent Sting"); return true
-        end
-        
-        -- Priority 6: Aimed Shot
-        if self:KnowsSpell(S.AimedShot) and self:IsUsableSpell(S.AimedShot) and not self:IsPlayerMoving() and manaPercent > 20 then 
-            self:CastSpell(S.AimedShot, "target"); HunterDebug("SV: Aimed Shot"); return true
-        end
-        
-        -- Priority 7: Steady Shot (filler)
-        if self:KnowsSpell(S.SteadyShot) and self:GetSpellCooldown(S.SteadyShot) == 0 and not UnitCastingInfo("player") then
-            if self:CastSpell(S.SteadyShot, "target") then HunterDebug("SV: Steady Shot"); return true end
-        end
-
-    else -- Leveling (Research-Based Optimized Rotations)
-        local playerLevel = UnitLevel("player")
-        local targetHealthPercent = (UnitHealth("target") or 1) / (UnitHealthMax("target") or 1) * 100
-        local enemyCount = self:GetEnemyCount()
-        
-        -- EXECUTE PHASE: Kill Shot (Level 71+, <20% target health) - HIGHEST PRIORITY
-        if playerLevel >= 71 and targetHealthPercent < 20 and self:KnowsSpell(S.KillShot) and self:IsUsableSpell(S.KillShot) then
-            self:CastSpell(S.KillShot, "target"); HunterDebug("Lvl: Kill Shot (Execute)"); return true
-        end
-        
-        -- LEVEL 1-10: Pre-Pet Phase (Survival Focus)
-        if playerLevel <= 10 then
-            -- Hunter's Mark (Level 6+)
-            if playerLevel >= 6 and self:ShouldUseHuntersMark("target") and self:IsUsableSpell(S.HuntersMark) then
-                self:CastSpell(S.HuntersMark, "target"); HunterDebug("Lvl 1-10: Hunter's Mark"); return true
-            end
-            -- Arcane Shot (Level 6+, mana permitting)
-            if playerLevel >= 6 and manaPercent > 40 and self:KnowsSpell(S.ArcaneShot) and self:GetSpellCooldown(S.ArcaneShot) == 0 then
-                if self:CastSpell(S.ArcaneShot, "target") then HunterDebug("Lvl 1-10: Arcane Shot"); return true end
-            end
-            -- Concussive Shot for kiting (Level 8+)
-            if playerLevel >= 8 and not self:HasDebuff("target", S.ConcussiveShot) and self:IsUsableSpell(S.ConcussiveShot) then
-                self:CastSpell(S.ConcussiveShot, "target"); HunterDebug("Lvl 1-10: Concussive Shot"); return true
-            end
-        
-        -- LEVEL 11-30: Early Pet Phase
-        elseif playerLevel <= 30 then
-            -- Hunter's Mark priority
-            if self:ShouldUseHuntersMark("target") and self:IsUsableSpell(S.HuntersMark) then
-                self:CastSpell(S.HuntersMark, "target"); HunterDebug("Lvl 11-30: Hunter's Mark"); return true
-            end
-            -- Serpent Sting (15-second DoT - only if target will live >15 seconds)
-            if not self:HasDebuff("target", S.SerpentSting) and not isFastDying and self:IsUsableSpell(S.SerpentSting) and targetHealthPercent > 30 then
-                self:CastSpell(S.SerpentSting, "target"); HunterDebug("Lvl 11-30: Serpent Sting"); return true
-            end
-            -- Multi-Shot for multiple enemies (Level 18+, hits up to 3 targets)
-            if playerLevel >= 18 and enemyCount >= 2 and self:KnowsSpell(S.MultiShot) and manaPercent > 35 then
-                if self:CastSpell(S.MultiShot, "target") then HunterDebug("Lvl 11-30: Multi-Shot"); return true end
-            end
-            -- Aimed Shot when available (Level 20+)
-            if playerLevel >= 20 and self:KnowsSpell(S.AimedShot) and self:GetSpellCooldown(S.AimedShot) == 0 and not UnitCastingInfo("player") then
-                if self:CastSpell(S.AimedShot, "target") then HunterDebug("Lvl 11-30: Aimed Shot"); return true end
-            end
-            -- Arcane Shot filler (mana efficient)
-            if manaPercent > 30 and self:KnowsSpell(S.ArcaneShot) and self:GetSpellCooldown(S.ArcaneShot) == 0 then
-                if self:CastSpell(S.ArcaneShot, "target") then HunterDebug("Lvl 11-30: Arcane Shot"); return true end
-            end
-        
-        -- LEVEL 31-50: Mid-Level Optimization
-        elseif playerLevel <= 50 then
-            -- Hunter's Mark maintenance
-            if self:ShouldUseHuntersMark("target") and self:IsUsableSpell(S.HuntersMark) then
-                self:CastSpell(S.HuntersMark, "target"); HunterDebug("Lvl 31-50: Hunter's Mark"); return true
-            end
-            -- Serpent Sting maintenance
-            if not self:HasDebuff("target", S.SerpentSting) and not isFastDying and self:IsUsableSpell(S.SerpentSting) then
-                self:CastSpell(S.SerpentSting, "target"); HunterDebug("Lvl 31-50: Serpent Sting"); return true
-            end
-            -- Aimed Shot priority
-            if self:KnowsSpell(S.AimedShot) and self:GetSpellCooldown(S.AimedShot) == 0 and not UnitCastingInfo("player") then
-                if self:CastSpell(S.AimedShot, "target") then HunterDebug("Lvl 31-50: Aimed Shot"); return true end
-            end
-            -- Volley for large packs (Level 40+, use on 3+ enemies)
-            if playerLevel >= 40 and enemyCount >= 3 and self:IsUsableSpell(S.Volley) and manaPercent > 30 then
-                if not self:IsChanneling() and not self:IsPlayerMoving() then
-                    -- Use the standardized ground targeting system
-                    if self.SafeCastGroundAOE and self:SafeCastGroundAOE(S.Volley) then
-                        HunterDebug("Lvl 31-50: Volley"); return true
-                    end
-                end
-            end
-            -- Multi-Shot for cleave (2-3 enemies)
-            if enemyCount >= 2 and enemyCount <= 3 and self:KnowsSpell(S.MultiShot) and manaPercent > 25 then
-                if self:CastSpell(S.MultiShot, "target") then HunterDebug("Lvl 31-50: Multi-Shot"); return true end
-            end
-            -- Arcane Shot filler
-            if manaPercent > 25 and self:KnowsSpell(S.ArcaneShot) and self:GetSpellCooldown(S.ArcaneShot) == 0 then
-                if self:CastSpell(S.ArcaneShot, "target") then HunterDebug("Lvl 31-50: Arcane Shot"); return true end
-            end
-        
-        -- LEVEL 51-70: Steady Shot Optimization Phase
-        elseif playerLevel <= 70 then
-            -- Hunter's Mark maintenance
-            if self:ShouldUseHuntersMark("target") and self:IsUsableSpell(S.HuntersMark) then
-                self:CastSpell(S.HuntersMark, "target"); HunterDebug("Lvl 51-70: Hunter's Mark"); return true
-            end
-            -- Serpent Sting maintenance
-            if not self:HasDebuff("target", S.SerpentSting) and not isFastDying and self:IsUsableSpell(S.SerpentSting) then
-                self:CastSpell(S.SerpentSting, "target"); HunterDebug("Lvl 51-70: Serpent Sting"); return true
-            end
-            -- Aimed Shot priority
-            if self:KnowsSpell(S.AimedShot) and self:GetSpellCooldown(S.AimedShot) == 0 and not UnitCastingInfo("player") then
-                if self:CastSpell(S.AimedShot, "target") then HunterDebug("Lvl 51-70: Aimed Shot"); return true end
-            end
-            -- Volley for large AoE (3+ enemies optimal)
-            if enemyCount >= 3 and self:IsUsableSpell(S.Volley) and manaPercent > 25 then
-                if not self:IsChanneling() and not self:IsPlayerMoving() then
-                    -- Use the standardized ground targeting system
-                    if self.SafeCastGroundAOE and self:SafeCastGroundAOE(S.Volley) then
-                        HunterDebug("Lvl 51-70: Volley"); return true
-                    end
-                end
-            end
-            -- Multi-Shot for cleave
-            if enemyCount >= 2 and enemyCount <= 3 and self:KnowsSpell(S.MultiShot) and manaPercent > 20 then
-                if self:CastSpell(S.MultiShot, "target") then HunterDebug("Lvl 51-70: Multi-Shot"); return true end
-            end
-            -- Steady Shot as primary filler (Level 50+)
-            if self:KnowsSpell(S.SteadyShot) and self:GetSpellCooldown(S.SteadyShot) == 0 and not UnitCastingInfo("player") then
-                if self:CastSpell(S.SteadyShot, "target") then HunterDebug("Lvl 51-70: Steady Shot"); return true end
-            end
-            -- Arcane Shot fallback (if Steady Shot not available)
-            if not self:KnowsSpell(S.SteadyShot) and self:KnowsSpell(S.ArcaneShot) and self:GetSpellCooldown(S.ArcaneShot) == 0 then
-                if self:CastSpell(S.ArcaneShot, "target") then HunterDebug("Lvl 51-70: Arcane Shot"); return true end
-            end
-        
-        -- LEVEL 71-80: Northrend Endgame Rotation
-        else
-            -- Hunter's Mark maintenance
-            if self:ShouldUseHuntersMark("target") and self:IsUsableSpell(S.HuntersMark) then
-                self:CastSpell(S.HuntersMark, "target"); HunterDebug("Lvl 71-80: Hunter's Mark"); return true
-            end
-            -- Serpent Sting maintenance
-            if not self:HasDebuff("target", S.SerpentSting) and not isFastDying and self:IsUsableSpell(S.SerpentSting) then
-                self:CastSpell(S.SerpentSting, "target"); HunterDebug("Lvl 71-80: Serpent Sting"); return true
-            end
-            -- Aimed Shot priority
-            if self:KnowsSpell(S.AimedShot) and self:GetSpellCooldown(S.AimedShot) == 0 and not UnitCastingInfo("player") then
-                if self:CastSpell(S.AimedShot, "target") then HunterDebug("Lvl 71-80: Aimed Shot"); return true end
-            end
-            -- Volley for large AoE (3+ enemies optimal)
-            if enemyCount >= 3 and self:IsUsableSpell(S.Volley) and manaPercent > 25 then
-                if not self:IsChanneling() and not self:IsPlayerMoving() then
-                    -- Use the standardized ground targeting system
-                    if self.SafeCastGroundAOE and self:SafeCastGroundAOE(S.Volley) then
-                        HunterDebug("Lvl 71-80: Volley"); return true
-                    end
-                end
-            end
-            -- Multi-Shot for cleave
-            if enemyCount >= 2 and enemyCount <= 3 and self:KnowsSpell(S.MultiShot) and manaPercent > 15 then
-                if self:CastSpell(S.MultiShot, "target") then HunterDebug("Lvl 71-80: Multi-Shot"); return true end
-            end
-            -- Steady Shot primary filler
-            if self:KnowsSpell(S.SteadyShot) and self:GetSpellCooldown(S.SteadyShot) == 0 and not UnitCastingInfo("player") then
-                if self:CastSpell(S.SteadyShot, "target") then HunterDebug("Lvl 71-80: Steady Shot"); return true end
-            end
-        end
-    end
-    
-    -- Fallback to auto-attack if nothing else
-    self:HandleAutoAttack()
-    StartAttack()
-    HunterDebug("Auto-attack fallback")
-    
-    return false
+    return self:GetHunterRangeState(unit) == "deadzone"
 end
 
 -- =============================================
@@ -1934,6 +1390,38 @@ function AC:HunterKnowsSpell(spellName)
     return self:GetHunterSpellIndex(spellName) ~= nil
 end
 
+function AC:HunterSpellAvailable(spellName)
+    if not spellName then return false end
+    local level = UnitLevel("player") or 1
+    local learnedByLevel = {
+        [S.AutoShot] = 1,
+        [S.RaptorStrike] = 1,
+        [S.AspectMonkey] = 4,
+        [S.SerpentSting] = 4,
+        [S.ArcaneShot] = 6,
+        [S.HuntersMark] = 6,
+        [S.ConcussiveShot] = 8,
+        [S.WingClip] = 12,
+        [S.MendPet] = 12,
+        [S.MultiShot] = 18,
+        [S.Disengage] = 20,
+        [S.FeignDeath] = 30,
+        [S.Volley] = 40,
+        [S.SteadyShot] = 50,
+        [S.KillCommand] = 66,
+        [S.KillShot] = 71,
+        [S.ExplosiveShot] = 60,
+        [S.BlackArrow] = 60,
+    }
+
+    local learnedAt = learnedByLevel[spellName]
+    if learnedAt then
+        return level >= learnedAt
+    end
+
+    return self:HunterKnowsSpell(spellName) or GetSpellInfo(spellName) and true or false
+end
+
 function AC:HunterSpellInRange(spellName, unit, opts)
     opts = opts or {}
     if not spellName or not unit or unit == "player" then return true end
@@ -1941,16 +1429,27 @@ function AC:HunterSpellInRange(spellName, unit, opts)
 
     local ok, result = pcall(IsSpellInRange, spellName, unit)
     if ok and result ~= nil then
-        return result == 1
+        if result == 1 then
+            return true
+        end
+
+        if self:HunterIsMeleeSpell(spellName) then
+            return false
+        end
+
+        return self:HunterIsInRangedRange(unit)
     end
 
     if opts.allowNilRange then
         return true
     end
 
-    -- Defensive fallback for 3.3.5 nil range responses: reject obvious deadzone cases.
     if UnitCanAttack("player", unit) then
-        return not self:IsInHunterDeadzone(unit)
+        local rangeState = self:GetHunterRangeState(unit)
+        if self:HunterIsMeleeSpell(spellName) then
+            return rangeState == "melee"
+        end
+        return rangeState == "ranged"
     end
 
     return true
@@ -1959,83 +1458,83 @@ end
 function AC:HunterCanCast(spellName, unit, opts)
     opts = opts or {}
 
-    if not spellName or not self:HunterKnowsSpell(spellName) then
-        return false
+    if not spellName or not self:HunterSpellAvailable(spellName) then
+        return false, "unknown"
     end
 
     if unit and unit ~= "player" and not UnitExists(unit) then
-        return false
+        return false, "no unit"
     end
 
     if opts.requirePet and self:GetPetStatus() ~= "alive" then
-        return false
+        return false, "no pet"
     end
 
     if opts.stationary and (self:IsPlayerMoving() or self:IsChanneling()) then
-        return false
+        return false, "moving/channeling"
     end
 
-    if opts.noMelee and self:IsInMeleeRange(unit or "target") then
-        return false
+    local rangeState = nil
+    if unit and unit ~= "player" and UnitCanAttack("player", unit) then
+        rangeState = self:GetHunterRangeState(unit)
+    elseif UnitExists("target") and UnitCanAttack("player", "target") then
+        rangeState = self:GetHunterRangeState("target")
     end
 
-    if opts.noDeadzone and self:IsInHunterDeadzone(unit or "target") then
-        return false
+    if opts.noMelee and rangeState == "melee" then
+        return false, "melee"
+    end
+
+    if opts.noDeadzone and rangeState == "deadzone" then
+        return false, "deadzone"
     end
 
     if opts.noPlayerCast and UnitCastingInfo("player") then
-        return false
+        return false, "already casting"
     end
 
     if self:GetSpellCooldown(spellName) > 0 then
-        return false
+        return false, "cooldown"
     end
 
-    local usable, noMana = IsUsableSpell(spellName)
-    if not usable or noMana then
-        return false
+    local _, noMana = IsUsableSpell(spellName)
+    if noMana then
+        return false, "no mana"
     end
 
     if not self:HunterSpellInRange(spellName, unit or "target", opts) then
-        return false
+        return false, "range"
     end
 
     return true
 end
 
 function AC:HunterTryCast(spellName, unit, opts)
-    if not self:HunterCanCast(spellName, unit, opts) then
+    local canCast, reason = self:HunterCanCast(spellName, unit, opts)
+    if not canCast then
+        if spellName == S.ArcaneShot then
+            HunterDebugThrottled("ArcaneReject", 1.0, "Arcane Shot blocked: " .. tostring(reason))
+        end
         return false
     end
 
     unit = unit or "target"
-    local beforeCooldown = self:GetSpellCooldown(spellName)
     CastSpellByName(spellName, unit)
-
-    local castName = UnitCastingInfo("player")
-    local channelName = UnitChannelInfo("player")
-    if castName == spellName or channelName == spellName then
-        return true
-    end
 
     if SpellIsTargeting and SpellIsTargeting() then
         SpellStopTargeting()
         return false
     end
 
-    local afterCooldown = self:GetSpellCooldown(spellName)
-    if afterCooldown > beforeCooldown then
-        local state = self:InitializeHunterState()
-        if spellName == S.ExplosiveShot then
-            state.lastExplosiveShotCast = GetTime()
-        elseif spellName == S.KillCommand then
-            state.lastKillCommandCast = GetTime()
-            state.killCommandUntil = 0
-        end
-        return true
+    local state = self:InitializeHunterState()
+    if spellName == S.ExplosiveShot then
+        state.lastExplosiveShotCast = GetTime()
+    elseif spellName == S.KillCommand then
+        state.lastKillCommandCast = GetTime()
+        state.killCommandUntil = 0
     end
 
-    return false
+    return true
 end
 
 function AC:InitializeHunterState()
@@ -2043,6 +1542,7 @@ function AC:InitializeHunterState()
         killCommandUntil = 0,
         lastKillCommandCast = 0,
         lastExplosiveShotCast = 0,
+        lockAndLoadActive = false,
         petDeadPending = false,
     }
     return self.hunterState
@@ -2125,13 +1625,12 @@ function AC:HunterCanFireExplosiveShot()
     local now = GetTime()
     local sinceLastES = now - (state.lastExplosiveShotCast or 0)
     local hasLockAndLoad = self:HasBuff("player", S.LockAndLoad)
+    local esRemaining = self:DebuffTimeRemaining("target", S.ExplosiveShot)
 
-    -- During LnL we still need spacing to avoid clipping the previous ES dot ticks.
     if hasLockAndLoad then
-        return sinceLastES >= 1.0
+        return sinceLastES >= 1.0 and (not esRemaining or esRemaining <= 0.25)
     end
 
-    local esRemaining = self:DebuffTimeRemaining("target", S.ExplosiveShot)
     if esRemaining and esRemaining > 0.35 then
         return false
     end
@@ -2139,18 +1638,33 @@ function AC:HunterCanFireExplosiveShot()
     return true
 end
 
+function AC:UpdateSurvivalProcState()
+    local state = self:InitializeHunterState()
+    local hasLockAndLoad = self:HasBuff("player", S.LockAndLoad)
+
+    if hasLockAndLoad and not state.lockAndLoadActive then
+        state.lockAndLoadActive = true
+        HunterDebug("SV: Lock and Load active")
+    elseif not hasLockAndLoad and state.lockAndLoadActive then
+        state.lockAndLoadActive = false
+        HunterDebug("SV: Lock and Load faded")
+    end
+
+    return hasLockAndLoad
+end
+
 function AC:HandleAutoAttack()
     if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then
         return false
     end
 
-    local inMelee = self:IsInMeleeRange("target")
+    local rangeState = self:GetHunterRangeState("target")
     local autoShotActive = false
     if IsAutoRepeatSpell then
         autoShotActive = IsAutoRepeatSpell("Auto Shot") and true or false
     end
 
-    if not inMelee then
+    if rangeState == "ranged" then
         if not autoShotActive and self:HunterKnowsSpell("Auto Shot") then
             CastSpellByName("Auto Shot")
             StartAttack()
@@ -2296,13 +1810,23 @@ function AC:HunterHandleUtility(spec, petStatus)
     return false
 end
 
-function AC:HunterHandleCloseRange(targetHP, isFastDying)
+function AC:HunterHandleCloseRange(targetHP, isFastDying, rangeState)
+    rangeState = rangeState or self:GetHunterRangeState("target")
+
+    if rangeState == "deadzone" then
+        if not isFastDying and self:HunterTryCast(S.Disengage, "player") then
+            HunterDebug("Disengage")
+            return true
+        end
+        return false
+    end
+
     if self:IsTargetFleeing("target") and self:HunterTryCast(S.WingClip, "target") then
         HunterDebug("Wing Clip")
         return true
     end
 
-    if self:IsInMeleeRange("target") and self:HunterTryCast(S.ExplosiveTrap, "player") then
+    if self:HunterIsInMeleeRange("target") and self:HunterTryCast(S.ExplosiveTrap, "player") then
         HunterDebug("Explosive Trap")
         return true
     end
@@ -2412,13 +1936,32 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
+    local hasImprovedSteady = self:HasBuff("player", S.ImprovedSteadyShot)
+    local chimeraCD = self:HunterSpellAvailable(S.ChimeraShot) and self:GetSpellCooldown(S.ChimeraShot) or 999
+    local aimedCD = self:HunterSpellAvailable(S.AimedShot) and self:GetSpellCooldown(S.AimedShot) or 999
+    local armorPen = GetCombatRating(25) or 0
+    local shouldUseArcane = armorPen < 430 or self:IsPlayerMoving()
+
     if self:HunterTryCast(S.ChimeraShot, "target", { noMelee = true, noDeadzone = true }) then
-        HunterDebug("MM: Chimera Shot")
+        HunterDebug(hasImprovedSteady and "MM: Chimera Shot (ISS)" or "MM: Chimera Shot")
         return true
     end
 
+    if hasImprovedSteady and chimeraCD <= 1.0 and not self:IsPlayerMoving() then
+        HunterDebugThrottled("MMHoldISSChimera", 1.0, "MM: Holding ISS for Chimera")
+    end
+
     if self:HunterTryCast(S.AimedShot, "target", { stationary = true, noMelee = true, noDeadzone = true, noPlayerCast = true }) then
-        HunterDebug("MM: Aimed Shot")
+        HunterDebug(hasImprovedSteady and "MM: Aimed Shot (ISS)" or "MM: Aimed Shot")
+        return true
+    end
+
+    if hasImprovedSteady and aimedCD <= 1.0 and not self:IsPlayerMoving() then
+        HunterDebugThrottled("MMHoldISSAimed", 1.0, "MM: Holding ISS for Aimed")
+    end
+
+    if hasImprovedSteady and shouldUseArcane and manaPercent > 25 and chimeraCD > 1.0 and aimedCD > 1.0 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
+        HunterDebug("MM: Arcane Shot (ISS)")
         return true
     end
 
@@ -2428,8 +1971,6 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    local armorPen = GetCombatRating(25) or 0
-    local shouldUseArcane = armorPen < 430 or self:IsPlayerMoving()
     if shouldUseArcane and manaPercent > 25 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Arcane Shot")
         return true
@@ -2457,27 +1998,17 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
 
     local serpentUp = self:HasDebuff("target", S.SerpentSting)
     local serpentRemaining = self:DebuffTimeRemaining("target", S.SerpentSting)
-    local hasLockAndLoad = self:HasBuff("player", S.LockAndLoad)
+    local hasLockAndLoad = self:UpdateSurvivalProcState()
 
     if self:HunterCanFireExplosiveShot() then
-        if hasLockAndLoad and Throttle("SVLnLDebug", 1.0) then
-            HunterDebug("SV: Explosive Shot (LnL)")
-        end
         if self:HunterTryCast(S.ExplosiveShot, "target", { noMelee = true, noDeadzone = true }) then
-            if not hasLockAndLoad then
-                HunterDebug("SV: Explosive Shot")
-            end
+            HunterDebug(hasLockAndLoad and "SV: Explosive Shot (LnL)" or "SV: Explosive Shot")
             return true
         end
     end
 
-    if not isFastDying and (not serpentUp or serpentRemaining < 1.0) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
-        HunterDebug("SV: Serpent Sting")
-        return true
-    end
-
-    -- Prefer Black Arrow at range, but if we're in melee the trap is usually stronger and can proc LnL.
-    if not isFastDying and self:IsInMeleeRange("target") and self:HunterTryCast(S.ExplosiveTrap, "player") then
+    -- Prefer trap when already in melee; otherwise Black Arrow is the ranged LnL enabler.
+    if not isFastDying and self:HunterIsInMeleeRange("target") and self:HunterTryCast(S.ExplosiveTrap, "player") then
         HunterDebug("SV: Explosive Trap (melee weave)")
         return true
     end
@@ -2487,13 +2018,18 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
         return true
     end
 
-    if self:ShouldUseMultiTarget(2, self:GetEffectiveEnemyCount(self:GetEnemyCount())) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
-        HunterDebug("SV: Multi-Shot")
+    if not isFastDying and (not serpentUp or serpentRemaining < 1.0) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
+        HunterDebug("SV: Serpent Sting")
         return true
     end
 
     if self:HunterTryCast(S.AimedShot, "target", { stationary = true, noMelee = true, noDeadzone = true, noPlayerCast = true }) then
         HunterDebug("SV: Aimed Shot")
+        return true
+    end
+
+    if self:ShouldUseMultiTarget(2, self:GetEffectiveEnemyCount(self:GetEnemyCount())) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+        HunterDebug("SV: Multi-Shot")
         return true
     end
 
@@ -2556,11 +2092,17 @@ function AC:HunterRotation()
         end
     end
 
+    if hasTarget and petStatus == "alive" then
+        self:EnsurePetAttackingCurrentTarget()
+    end
+
     if Throttle("HunterRewriteDebugTick", 1.0) then
         local petStance = petStatus == "alive" and self:GetPetStance() or "N/A"
+        local rangeState = hasTarget and self:GetHunterRangeState("target") or "none"
         HunterDebug(string.format("%s L%d | HP:%.0f%% MP:%.0f%% | Target:%s Pet:%s(%s) Combat:%s Aspect:%s",
             spec, level, healthPercent, manaPercent, hasTarget and UnitName("target") or "N", petStatus, petStance, inCombat and "Y" or "N",
             self:HasBuff("player", S.AspectDragonhawk) and "Dragonhawk" or (self:HasBuff("player", S.AspectHawk) and "Hawk" or (self:HasBuff("player", S.AspectViper) and "Viper" or "None/Other"))))
+        HunterDebug("Range state: " .. rangeState)
     end
 
     if inCombat and self:UseLifeblood() then
@@ -2602,8 +2144,9 @@ function AC:HunterRotation()
     local targetIsTough = UnitClassification("target") == "elite" or UnitClassification("target") == "rareelite" or UnitClassification("target") == "worldboss" or UnitLevel("target") == -1
     local isFastDying = self:IsFastDyingMob("target")
     local enemies = self:GetEffectiveEnemyCount(self:GetEnemyCount())
-    local inMelee = self:IsInMeleeRange("target")
-    local inDeadzone = self:IsInHunterDeadzone("target")
+    local rangeState = self:GetHunterRangeState("target")
+    local inMelee = rangeState == "melee"
+    local inDeadzone = rangeState == "deadzone"
 
     if self:IsChanneling() then
         local channelSpell = UnitChannelInfo("player")
@@ -2627,7 +2170,8 @@ function AC:HunterRotation()
     end
 
     if inMelee or inDeadzone then
-        if self:HunterHandleCloseRange(targetHP, isFastDying) then
+        HunterDebugThrottled("HunterCloseRangeState", 2.0, "Range state: " .. rangeState)
+        if self:HunterHandleCloseRange(targetHP, isFastDying, rangeState) then
             return true
         end
         return false
