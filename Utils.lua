@@ -351,6 +351,42 @@ local function IsGlobalCooldownActive()
     return false
 end
 
+local potionCooldownUntil = 0
+local potionCombatLocked = false
+local POTION_COOLDOWN_FALLBACK = 61
+
+local function UsesCombatPotionLockout(itemName)
+    return itemName and string.find(string.lower(itemName), "potion", 1, true) ~= nil
+end
+
+local function GetPotionLockoutRemaining()
+    local now = GetTime()
+
+    if potionCombatLocked and not UnitAffectingCombat("player") then
+        potionCombatLocked = false
+    end
+
+    if potionCombatLocked and UnitAffectingCombat("player") then
+        return 999
+    end
+
+    if potionCooldownUntil > now then
+        return potionCooldownUntil - now
+    end
+
+    return 0
+end
+
+local function StartPotionLockout(itemName)
+    potionCooldownUntil = math.max(potionCooldownUntil or 0, GetTime() + POTION_COOLDOWN_FALLBACK)
+
+    -- WotLK allows one potion while in combat. Some 3.3.5 servers do not expose
+    -- that lockout through bag cooldown APIs, so track it locally to prevent spam.
+    if UsesCombatPotionLockout(itemName) and UnitAffectingCombat("player") then
+        potionCombatLocked = true
+    end
+end
+
 local function UsePotionFromBag(itemName, bag, slot)
     if not bag or not slot then
         return false, "missing_slot"
@@ -373,13 +409,19 @@ local function UsePotionFromBag(itemName, bag, slot)
         return false, "gcd"
     end
 
+    if GetPotionLockoutRemaining() > 0 then
+        return false, "cooldown"
+    end
+
     local bagStart, bagDuration = GetContainerItemCooldown and select(1, GetContainerItemCooldown(bag, slot))
     if isOnCooldown(bagStart, bagDuration) then
+        potionCooldownUntil = math.max(potionCooldownUntil or 0, bagStart + bagDuration)
         return false, "cooldown"
     end
 
     local itemStart, itemDuration = GetItemCooldown and select(1, GetItemCooldown(itemName))
     if isOnCooldown(itemStart, itemDuration) then
+        potionCooldownUntil = math.max(potionCooldownUntil or 0, itemStart + itemDuration)
         return false, "cooldown"
     end
 
@@ -395,6 +437,8 @@ local function UsePotionFromBag(itemName, bag, slot)
     if not ok then
         return false, "blocked"
     end
+
+    StartPotionLockout(itemName)
 
     local function didUseStartCooldownOrConsume()
         local postLink = GetContainerItemLink(bag, slot)
@@ -420,18 +464,10 @@ local function UsePotionFromBag(itemName, bag, slot)
         return true, "used"
     end
 
-    if UseItemByName then
-        ok = pcall(UseItemByName, itemName)
-        if not ok then
-            return false, "blocked"
-        end
-
-        if didUseStartCooldownOrConsume() then
-            return true, "used"
-        end
-    end
-
-    return false, "attempted"
+    -- Bag/item cooldown updates can lag or be absent on WotLK private servers.
+    -- The protected call succeeded, so assume the client accepted the potion
+    -- attempt and rely on the local lockout rather than retrying every tick.
+    return true, "used_assumed"
 end
 
 -- All offensive potions (damage/stats boosting) (verified 3.3.5)
