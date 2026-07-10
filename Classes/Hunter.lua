@@ -834,6 +834,23 @@ function AC:IsFastDyingMob(unit)
     return false
 end
 
+function AC:HunterShouldUseSerpentSting(unit, targetHP, targetIsTough, isFastDying)
+    unit = unit or "target"
+    if not UnitExists(unit) then return false end
+
+    if not isFastDying then
+        return true
+    end
+
+    -- Some WotLK private servers expose dungeon bosses as normal units. If the
+    -- target has boss-like health, Serpent Sting is still worth applying.
+    if targetIsTough or UnitHealthMax(unit) >= (UnitHealthMax("player") * 3) then
+        return targetHP > 10
+    end
+
+    return false
+end
+
 function AC:GetPetStatus()
     -- Check if pet is being called first (channeling Call Pet)
     local channeling = UnitChannelInfo("player")
@@ -1677,6 +1694,14 @@ function AC:HandleAutoAttack()
     return false
 end
 
+function AC:HunterManaGate(manaPercent, threshold)
+    if self:HunterKnowsSpell(S.AspectViper) then
+        return true
+    end
+
+    return manaPercent > threshold
+end
+
 function AC:ManageAspects(spec, inCombat, manaPercent)
     if not Throttle("HunterAspectRewrite", 2.0) then return false end
     if IsMounted() then return false end
@@ -1703,7 +1728,7 @@ function AC:ManageAspects(spec, inCombat, manaPercent)
     end
 
     if bestDpsAspect then
-        if self:HasBuff("player", S.AspectViper) and manaPercent > 55 then
+        if self:HasBuff("player", S.AspectViper) and manaPercent > 70 then
             if self:HunterTryCast(bestDpsAspect, "player") then
                 HunterDebug("Aspect: " .. bestDpsAspect .. " (leave viper)")
                 return true
@@ -1850,14 +1875,14 @@ function AC:HunterHandleCloseRange(targetHP, isFastDying, rangeState)
 end
 
 function AC:HunterHandleAOE(enemies, manaPercent)
-    if self:ShouldUseMultiTarget(3, enemies) and manaPercent > 30 and self:HunterKnowsSpell(S.Volley) and not self:IsPlayerMoving() and not self:IsChanneling() then
+    if self:ShouldUseMultiTarget(3, enemies) and self:HunterManaGate(manaPercent, 30) and self:HunterKnowsSpell(S.Volley) and not self:IsPlayerMoving() and not self:IsChanneling() then
         if self.SafeCastGroundAOE and self:SafeCastGroundAOE(S.Volley) then
             HunterDebug("Volley")
             return true
         end
     end
 
-    if self:ShouldUseMultiTarget(2, enemies) and manaPercent > 20 and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+    if self:ShouldUseMultiTarget(2, enemies) and self:HunterManaGate(manaPercent, 20) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("Multi-Shot")
         return true
     end
@@ -1877,14 +1902,14 @@ function AC:HunterBeastMasteryRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    if manaPercent > 28 and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("BM: Multi-Shot")
         return true
     end
 
     local serpentUp = self:HasDebuff("target", S.SerpentSting)
     local serpentRemaining = self:DebuffTimeRemaining("target", S.SerpentSting)
-    if not isFastDying and (targetIsTough or targetHP > 35) and (not serpentUp or serpentRemaining < 1.5) then
+    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and (not serpentUp or serpentRemaining < 1.5) then
         if self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
             HunterDebug("BM: Serpent Sting")
             return true
@@ -1901,7 +1926,7 @@ function AC:HunterBeastMasteryRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    if manaPercent > 24 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterManaGate(manaPercent, 24) and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("BM: Arcane Shot")
         return true
     end
@@ -1931,7 +1956,7 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
     end
 
     local serpentUp = self:HasDebuff("target", S.SerpentSting)
-    if not isFastDying and not serpentUp and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not serpentUp and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Serpent Sting")
         return true
     end
@@ -1960,18 +1985,18 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         HunterDebugThrottled("MMHoldISSAimed", 1.0, "MM: Holding ISS for Aimed")
     end
 
-    if hasImprovedSteady and shouldUseArcane and manaPercent > 25 and chimeraCD > 1.0 and aimedCD > 1.0 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
+    if hasImprovedSteady and shouldUseArcane and self:HunterManaGate(manaPercent, 25) and chimeraCD > 1.0 and aimedCD > 1.0 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Arcane Shot (ISS)")
         return true
     end
 
     -- Multi-Shot is high value in WotLK MM even on single target when mana allows.
-    if manaPercent > 28 and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Multi-Shot")
         return true
     end
 
-    if shouldUseArcane and manaPercent > 25 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
+    if shouldUseArcane and self:HunterManaGate(manaPercent, 25) and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Arcane Shot")
         return true
     end
@@ -2018,7 +2043,7 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
         return true
     end
 
-    if not isFastDying and (not serpentUp or serpentRemaining < 1.0) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and (not serpentUp or serpentRemaining < 1.0) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("SV: Serpent Sting")
         return true
     end
@@ -2052,12 +2077,12 @@ function AC:HunterLevelingRotation(level, targetHP, targetIsTough, isFastDying, 
         return true
     end
 
-    if not isFastDying and not self:HasDebuff("target", S.SerpentSting) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not self:HasDebuff("target", S.SerpentSting) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("Lvl: Serpent Sting")
         return true
     end
 
-    if manaPercent > 30 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterManaGate(manaPercent, 30) and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("Lvl: Arcane Shot")
         return true
     end
