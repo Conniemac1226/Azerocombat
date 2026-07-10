@@ -56,6 +56,7 @@ local S = { -- Spells
     
     -- Cooldowns
     RapidFire = "Rapid Fire", Volley = "Volley",
+    LaunchExplosiveTrap = "Launch Explosive Trap", LaunchImmolationTrap = "Launch Immolation Trap",
     
     -- Critical Proc Buffs for WotLK Hunter Optimization
     LockAndLoad = "Lock and Load",
@@ -1874,10 +1875,39 @@ function AC:HunterHandleCloseRange(targetHP, isFastDying, rangeState)
     return false
 end
 
+function AC:HunterTryLaunchTrap(spellName, debugLabel)
+    if not spellName or not self.SafeCastGroundAOE then
+        return false
+    end
+
+    if not self:HunterSpellAvailable(spellName) or self:IsPlayerMoving() or self:IsChanneling() then
+        return false
+    end
+
+    if self:SafeCastGroundAOE(spellName) then
+        HunterDebug(debugLabel or spellName)
+        return true
+    end
+
+    return false
+end
+
 function AC:HunterHandleAOE(enemies, manaPercent)
+    if self:ShouldUseMultiTarget(2, enemies) and self:HunterManaGate(manaPercent, 30) then
+        if self:HunterTryLaunchTrap(S.LaunchExplosiveTrap, "Launch Explosive Trap") then
+            return true
+        end
+    end
+
     if self:ShouldUseMultiTarget(3, enemies) and self:HunterManaGate(manaPercent, 30) and self:HunterKnowsSpell(S.Volley) and not self:IsPlayerMoving() and not self:IsChanneling() then
         if self.SafeCastGroundAOE and self:SafeCastGroundAOE(S.Volley) then
             HunterDebug("Volley")
+            return true
+        end
+    end
+
+    if self:ShouldUseMultiTarget(3, enemies) and self:HunterManaGate(manaPercent, 30) and not self:HunterKnowsSpell(S.Volley) and self:HunterSpellAvailable(S.LaunchImmolationTrap) and not self:IsPlayerMoving() and not self:IsChanneling() then
+        if self:HunterTryLaunchTrap(S.LaunchImmolationTrap, "Launch Immolation Trap") then
             return true
         end
     end
@@ -2028,6 +2058,12 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
     if self:HunterCanFireExplosiveShot() then
         if self:HunterTryCast(S.ExplosiveShot, "target", { noMelee = true, noDeadzone = true }) then
             HunterDebug(hasLockAndLoad and "SV: Explosive Shot (LnL)" or "SV: Explosive Shot")
+            return true
+        end
+    end
+
+    if not isFastDying and (targetIsTough or targetHP > 40) then
+        if self:HunterTryLaunchTrap(S.LaunchExplosiveTrap, "SV: Launch Explosive Trap") then
             return true
         end
     end

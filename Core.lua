@@ -273,6 +273,8 @@ AC.groundAOESpellDurations = {
     ["Blizzard"] = 8,         -- 8 second channel
     ["Hurricane"] = 10,       -- 10 second channel
     ["Volley"] = 6,           -- 6 second channel
+    ["Launch Explosive Trap"] = 20, -- Server-side launched trap effect
+    ["Launch Immolation Trap"] = 15, -- Server-side launched trap effect
     ["Flamestrike"] = 8,      -- Not channeled but has 8s effect
     ["Consecration"] = 8,     -- Not channeled but has 8s effect
     ["Death and Decay"] = 10  -- Not channeled but has 10s effect
@@ -297,6 +299,14 @@ end
 function AC:SafeCastGroundAOE(spellName)
     -- First check if the spell is usable
     if not self:IsUsableSpell(spellName) then
+        return false
+    end
+
+    if self:GetSpellCooldown(spellName) > 0 then
+        return false
+    end
+
+    if not self:ActionThrottle("GroundAOE_" .. spellName, 0.75) then
         return false
     end
     
