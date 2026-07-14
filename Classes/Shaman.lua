@@ -27,9 +27,10 @@ local S = {
     HealingWave = "Healing Wave", 
     LesserHealingWave = "Lesser Healing Wave", 
     ChainHeal = "Chain Heal",
-    Riptide = "Riptide", 
-    EarthShield = "Earth Shield", 
+    Riptide = "Riptide",
+    EarthShield = "Earth Shield",
     CleanseSpirit = "Cleanse Spirit",
+    CureToxins = "Cure Toxins",
     
     -- Weapon Imbues (Enhanced System)
     WindfuryWeapon = "Windfury Weapon", 
@@ -64,7 +65,7 @@ local S = {
     HealingStreamTotem = "Healing Stream Totem", ManaSpringTotem = "Mana Spring Totem",
     DiseaseCleansingTotem = "Disease Cleansing Totem", 
     PoisonCleansingTotem = "Poison Cleansing Totem",
-    ManaTideTotem = "Mana Tide Totem", FireNovaTotem = "Fire Nova Totem",
+    ManaTideTotem = "Mana Tide Totem",
     -- Totem Calls
     CallOfTheElements = "Call of the Elements", 
     CallOfTheAncestors = "Call of the Ancestors", 
@@ -73,9 +74,10 @@ local S = {
     -- Cooldowns & Buffs (Enhanced Management)
     Bloodlust = "Bloodlust", 
     Heroism = "Heroism", 
-    ElementalMastery = "Elemental Mastery", 
-    NaturesSwiftness = "Nature's Swiftness", 
+    ElementalMastery = "Elemental Mastery",
+    NaturesSwiftness = "Nature's Swiftness",
     TidalForce = "Tidal Force",
+    TidalWaves = "Tidal Waves",
     
     -- Utility & Travel
     Reincarnation = "Reincarnation", 
@@ -103,17 +105,24 @@ local S = {
     EveryManForHimself = "Every Man for Himself", -- Human
 }
 
--- Spell Level Requirements
-local SpellLevels = {
-    [S.EarthShock] = 4, [S.FlameShock] = 10, [S.FrostShock] = 20, [S.LightningBolt] = 1, [S.ChainLightning] = 32, [S.LavaBurst] = 75, [S.Thunderstorm] = 60, [S.FireNova] = 12, [S.Stormstrike] = 40, [S.LavaLash] = 60, [S.FeralSpirit] = 60, [S.ShamanisticRage] = 60, [S.HealingWave] = 1, [S.LesserHealingWave] = 20, [S.ChainHeal] = 40, [S.Riptide] = 60, [S.EarthShield] = 50, [S.CleanseSpirit] = 42, [S.RockbiterWeapon] = 1, [S.FlametongueWeapon] = 10, [S.FrostbrandWeapon] = 20, [S.WindfuryWeapon] = 30, [S.EarthlivingWeapon] = 30, [S.LightningShield] = 8, [S.WaterShield] = 20, [S.StrengthOfEarthTotem] = 10, [S.StoneskinTotem] = 4, [S.EarthbindTotem] = 6, [S.StoneclawTotem] = 8, [S.TremorTotem] = 18, [S.EarthElementalTotem] = 66, [S.GraceOfAirTotem] = 42, [S.SentryTotem] = 26, [S.WindwallTotem] = 36, [S.GroundingTotem] = 30, [S.NatureResistanceTotem] = 28, [S.WrathOfAirTotem] = 64, [S.WindfuryTotem] = 32, [S.SearingTotem] = 10, [S.FlametongueTotem] = 28, [S.MagmaTotem] = 26, [S.FrostResistanceTotem] = 24, [S.FireResistanceTotem] = 28, [S.TotemOfWrath] = 70, [S.FireElementalTotem] = 68, [S.HealingStreamTotem] = 20, [S.ManaSpringTotem] = 26, [S.DiseaseCleansingTotem] = 38, [S.PoisonCleansingTotem] = 22, [S.ManaTideTotem] = 60, [S.FireNovaTotem] = 30, [S.CallOfTheElements] = 30, [S.CallOfTheAncestors] = 40, [S.CallOfTheSpirits] = 60, [S.TotemicRecall] = 30, [S.Purge] = 12, [S.WindShear] = 16, [S.GhostWolf] = 20, [S.Reincarnation] = 30, [S.Bloodlust] = 70, [S.Heroism] = 70, [S.AstralRecall] = 30, [S.WaterWalking] = 28, [S.WaterBreathing] = 22, [S.AncestralSpirit] = 12, [S.Hex] = 80, [S.ElementalMastery] = 40, [S.NaturesSwiftness] = 40, [S.TidalForce] = 60
+-- GetTotemInfo uses Fire=1, Earth=2, Water=3, Air=4 in the 3.3.5 client.
+-- Keep the symbolic constants here so every set and status check uses the API order.
+local TotemTypes = {
+    FIRE = FIRE_TOTEM_SLOT or 1,
+    EARTH = EARTH_TOTEM_SLOT or 2,
+    WATER = WATER_TOTEM_SLOT or 3,
+    AIR = AIR_TOTEM_SLOT or 4
 }
-
--- Totem slot types
-local TotemTypes = { EARTH = 1, AIR = 2, FIRE = 3, WATER = 4 }
+local TotemSlotNames = {
+    [TotemTypes.FIRE] = "Fire",
+    [TotemTypes.EARTH] = "Earth",
+    [TotemTypes.WATER] = "Water",
+    [TotemTypes.AIR] = "Air"
+}
 
 -- Totem definitions and sets
 AC.TotemDefinitions = {
-    [S.StrengthOfEarthTotem] = TotemTypes.EARTH, [S.StoneskinTotem] = TotemTypes.EARTH, [S.EarthbindTotem] = TotemTypes.EARTH, [S.TremorTotem] = TotemTypes.EARTH, [S.StoneclawTotem] = TotemTypes.EARTH, [S.EarthElementalTotem] = TotemTypes.EARTH, [S.GraceOfAirTotem] = TotemTypes.AIR, [S.WrathOfAirTotem] = TotemTypes.AIR, [S.WindfuryTotem] = TotemTypes.AIR, [S.NatureResistanceTotem] = TotemTypes.AIR, [S.GroundingTotem] = TotemTypes.AIR, [S.SentryTotem] = TotemTypes.AIR, [S.WindwallTotem] = TotemTypes.AIR, [S.SearingTotem] = TotemTypes.FIRE, [S.MagmaTotem] = TotemTypes.FIRE, [S.FlametongueTotem] = TotemTypes.FIRE, [S.FrostResistanceTotem] = TotemTypes.FIRE, [S.TotemOfWrath] = TotemTypes.FIRE, [S.FireResistanceTotem] = TotemTypes.FIRE, [S.FireElementalTotem] = TotemTypes.FIRE, [S.HealingStreamTotem] = TotemTypes.WATER, [S.ManaSpringTotem] = TotemTypes.WATER, [S.DiseaseCleansingTotem] = TotemTypes.WATER, [S.PoisonCleansingTotem] = TotemTypes.WATER, [S.ManaTideTotem] = TotemTypes.WATER, [S.FireNovaTotem] = TotemTypes.WATER
+    [S.StrengthOfEarthTotem] = TotemTypes.EARTH, [S.StoneskinTotem] = TotemTypes.EARTH, [S.EarthbindTotem] = TotemTypes.EARTH, [S.TremorTotem] = TotemTypes.EARTH, [S.StoneclawTotem] = TotemTypes.EARTH, [S.EarthElementalTotem] = TotemTypes.EARTH, [S.GraceOfAirTotem] = TotemTypes.AIR, [S.WrathOfAirTotem] = TotemTypes.AIR, [S.WindfuryTotem] = TotemTypes.AIR, [S.NatureResistanceTotem] = TotemTypes.AIR, [S.GroundingTotem] = TotemTypes.AIR, [S.SentryTotem] = TotemTypes.AIR, [S.WindwallTotem] = TotemTypes.AIR, [S.SearingTotem] = TotemTypes.FIRE, [S.MagmaTotem] = TotemTypes.FIRE, [S.FlametongueTotem] = TotemTypes.FIRE, [S.FrostResistanceTotem] = TotemTypes.FIRE, [S.TotemOfWrath] = TotemTypes.FIRE, [S.FireResistanceTotem] = TotemTypes.FIRE, [S.FireElementalTotem] = TotemTypes.FIRE, [S.HealingStreamTotem] = TotemTypes.WATER, [S.ManaSpringTotem] = TotemTypes.WATER, [S.DiseaseCleansingTotem] = TotemTypes.WATER, [S.PoisonCleansingTotem] = TotemTypes.WATER, [S.ManaTideTotem] = TotemTypes.WATER
 }
 -- ENHANCED: Ultimate totem sets with dynamic situational awareness
 AC.ShamanTotemSets = {
@@ -125,14 +134,14 @@ AC.ShamanTotemSets = {
     
     -- ENHANCEMENT: Melee Beast Sets
     ENHANCEMENT_SOLO = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WindfuryTotem, [TotemTypes.FIRE] = S.MagmaTotem, [TotemTypes.WATER] = S.HealingStreamTotem },
-    ENHANCEMENT_GROUP = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WindfuryTotem, [TotemTypes.FIRE] = S.SearingTotem, [TotemTypes.WATER] = S.ManaSpringTotem },
+    ENHANCEMENT_GROUP = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WindfuryTotem, [TotemTypes.FIRE] = S.MagmaTotem, [TotemTypes.WATER] = S.ManaSpringTotem },
     ENHANCEMENT_AOE = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WindfuryTotem, [TotemTypes.FIRE] = S.MagmaTotem, [TotemTypes.WATER] = S.ManaSpringTotem },
-    ENHANCEMENT_BOSS = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WindfuryTotem, [TotemTypes.FIRE] = S.SearingTotem, [TotemTypes.WATER] = S.ManaSpringTotem },
+    ENHANCEMENT_BOSS = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WindfuryTotem, [TotemTypes.FIRE] = S.MagmaTotem, [TotemTypes.WATER] = S.ManaSpringTotem },
     
     -- RESTORATION: Ultimate Healer Sets
     RESTORATION_SOLO = { [TotemTypes.EARTH] = S.StoneskinTotem, [TotemTypes.AIR] = S.WrathOfAirTotem, [TotemTypes.FIRE] = S.FlametongueTotem, [TotemTypes.WATER] = S.ManaSpringTotem }, 
     RESTORATION_GROUP = { [TotemTypes.EARTH] = S.StoneskinTotem, [TotemTypes.AIR] = S.WrathOfAirTotem, [TotemTypes.FIRE] = S.FlametongueTotem, [TotemTypes.WATER] = S.HealingStreamTotem },
-    RESTORATION_RAID = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WrathOfAirTotem, [TotemTypes.FIRE] = S.TotemOfWrath, [TotemTypes.WATER] = S.ManaSpringTotem },
+    RESTORATION_RAID = { [TotemTypes.EARTH] = S.StrengthOfEarthTotem, [TotemTypes.AIR] = S.WrathOfAirTotem, [TotemTypes.FIRE] = S.FlametongueTotem, [TotemTypes.WATER] = S.ManaSpringTotem },
     RESTORATION_EMERGENCY = { [TotemTypes.EARTH] = S.TremorTotem, [TotemTypes.AIR] = S.GroundingTotem, [TotemTypes.FIRE] = S.FlametongueTotem, [TotemTypes.WATER] = S.HealingStreamTotem },
     
     -- LEVELING: Progressive Enhancement
@@ -163,20 +172,37 @@ local function Throttle(key, interval)
 end
 
 -- ENHANCED: Shaman-specific spell casting with better error handling
+local ShamanSelfOnlySpells
 function AC:CastShamanSpell(spellName, unit)
     unit = unit or "target"
     if not spellName then return false end
 
-    local selfOnlySpells = { 
+    ShamanSelfOnlySpells = ShamanSelfOnlySpells or {
         [S.LightningShield] = true, [S.WaterShield] = true, 
         [S.WindfuryWeapon] = true, [S.FlametongueWeapon] = true, 
         [S.FrostbrandWeapon] = true, [S.RockbiterWeapon] = true, 
         [S.EarthlivingWeapon] = true, [S.GhostWolf] = true, 
-        [S.ElementalMastery] = true, [S.NaturesSwiftness] = true, 
+        [S.ElementalMastery] = true, [S.NaturesSwiftness] = true,
         [S.ShamanisticRage] = true, [S.TidalForce] = true,
-        [S.FeralSpirit] = true, [S.Bloodlust] = true, [S.Heroism] = true
+        [S.FeralSpirit] = true, [S.Bloodlust] = true, [S.Heroism] = true,
+        [S.Thunderstorm] = true, [S.FireNova] = true,
+        [S.StrengthOfEarthTotem] = true, [S.StoneskinTotem] = true,
+        [S.EarthbindTotem] = true, [S.TremorTotem] = true,
+        [S.StoneclawTotem] = true, [S.EarthElementalTotem] = true,
+        [S.GraceOfAirTotem] = true, [S.WrathOfAirTotem] = true,
+        [S.WindfuryTotem] = true, [S.GroundingTotem] = true,
+        [S.NatureResistanceTotem] = true, [S.SentryTotem] = true,
+        [S.WindwallTotem] = true, [S.SearingTotem] = true,
+        [S.MagmaTotem] = true, [S.FlametongueTotem] = true,
+        [S.FrostResistanceTotem] = true, [S.TotemOfWrath] = true,
+        [S.FireResistanceTotem] = true, [S.FireElementalTotem] = true,
+        [S.HealingStreamTotem] = true, [S.ManaSpringTotem] = true,
+        [S.DiseaseCleansingTotem] = true, [S.PoisonCleansingTotem] = true,
+        [S.ManaTideTotem] = true, [S.CallOfTheElements] = true,
+        [S.CallOfTheAncestors] = true, [S.CallOfTheSpirits] = true,
+        [S.TotemicRecall] = true
     }
-    if selfOnlySpells[spellName] then unit = "player" end
+    if ShamanSelfOnlySpells[spellName] then unit = "player" end
 
     if self:IsUsableSpell(spellName) and (unit == "player" or UnitExists(unit)) then
         if IsCurrentSpell(spellName) or UnitCastingInfo("player") then return false end
@@ -192,10 +218,16 @@ function AC:CastShamanSpell(spellName, unit)
 end
 
 -- ENHANCED: Spell availability checking
-function AC:CanUseShamanSpell(spellName) 
+function AC:CanUseShamanSpell(spellName)
     if not spellName then return false end
-    local requiredLevel = SpellLevels[spellName] or 1
-    return UnitLevel("player") >= requiredLevel and self:KnowsSpell(spellName) and self:IsUsableSpell(spellName)
+    -- The spellbook is the source of truth. Talent spells can be learned at
+    -- different levels depending on the player's build, so a static level gate
+    -- must never suppress an ability the character actually knows.
+    return self:KnowsSpell(spellName) and self:IsUsableSpell(spellName)
+end
+
+function AC:IsShamanSpellReady(spellName)
+    return self:CanUseShamanSpell(spellName) and self:GetSpellCooldown(spellName) <= 0.1
 end
 
 -- ENHANCED: Check for Maelstrom Weapon stacks
@@ -204,93 +236,110 @@ function AC:GetMaelstromStacks()
     return stacks or 0
 end
 
--- ENHANCED: Advanced healing target prioritization
+function AC:GetShamanGroupUnits()
+    local units = {}
+    local raidCount = GetNumRaidMembers()
+    if raidCount > 0 then
+        for i = 1, raidCount do table.insert(units, "raid" .. i) end
+    else
+        table.insert(units, "player")
+        for i = 1, GetNumPartyMembers() do table.insert(units, "party" .. i) end
+    end
+    return units
+end
+
+function AC:IsShamanFriendlyUnitReachable(unit)
+    if not UnitExists(unit) or UnitIsDeadOrGhost(unit) or not UnitIsConnected(unit) or
+       not UnitIsFriend("player", unit) then
+        return false
+    end
+    if UnitIsVisible and not UnitIsVisible(unit) then return false end
+
+    local rangeSpell = self:KnowsSpell(S.HealingWave) and S.HealingWave or
+                       (self:KnowsSpell(S.LesserHealingWave) and S.LesserHealingWave)
+    if rangeSpell and IsSpellInRange then
+        local ok, inRange = pcall(IsSpellInRange, rangeSpell, unit)
+        if ok and inRange == 0 then return false end
+    end
+    return true
+end
+
+function AC:IsShamanTankCandidate(unit)
+    if not self:IsShamanFriendlyUnitReachable(unit) then return false end
+    local tankAuras = {"Defensive Stance", "Righteous Fury", "Bear Form", "Dire Bear Form", "Frost Presence"}
+    for _, aura in ipairs(tankAuras) do
+        if self:HasBuff(unit, aura) then return true end
+    end
+
+    local enemy = unit .. "target"
+    if UnitExists(enemy) and UnitCanAttack("player", enemy) then
+        local enemyTarget = enemy .. "target"
+        if UnitExists(enemyTarget) and UnitIsUnit(enemyTarget, unit) then return true end
+        if UnitDetailedThreatSituation then
+            local ok, status = pcall(UnitDetailedThreatSituation, unit, enemy)
+            if ok and status and status >= 2 then return true end
+        end
+    end
+    return false
+end
+
+function AC:FindShamanTankUnit()
+    if self:IsShamanFriendlyUnitReachable("focus") then
+        -- A friendly focus is an explicit player choice and is therefore a
+        -- better Earth Shield anchor than any class-based guess.
+        return "focus"
+    end
+    for _, unit in ipairs(self:GetShamanGroupUnits()) do
+        if self:IsShamanTankCandidate(unit) then
+            return unit
+        end
+    end
+    return nil
+end
+
+-- Health deficit is the primary healing rule. Tank status only breaks close
+-- ties; being a warrior, paladin, or death knight is not proof of tanking.
 function AC:FindShamanHealingTarget(urgencyLevel)
-    urgencyLevel = urgencyLevel or "normal" -- "emergency", "urgent", "normal"
-    
+    urgencyLevel = urgencyLevel or "normal"
     local targets = {}
-    local emergencyTargets = {}
-    
-    -- Check self first
-    local selfHealth = self:GetPlayerHealthPercent() / 100
-    local selfTarget = {
-        unit = "player",
-        health = selfHealth,
-        name = UnitName("player"),
-        role = "self",
-        priority = selfHealth < 0.3 and 100 or (selfHealth < 0.6 and 80 or 50)
-    }
-    table.insert(targets, selfTarget)
-    if selfHealth < 0.25 then table.insert(emergencyTargets, selfTarget) end
-    
-    -- Check group members
-    if IsInGroup() then
-        local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
-        local max = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
-        
-        for i = 1, max do
-            local unit = prefix .. i
-            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
-                local hp = UnitHealth(unit) / UnitHealthMax(unit)
-                local _, class = UnitClass(unit)
-                local isTank = (self.IsTank and self:IsTank(unit)) or 
-                              (class == "WARRIOR" or class == "PALADIN" or class == "DEATHKNIGHT")
-                local isHealer = class == "PRIEST" or class == "PALADIN" or class == "SHAMAN" or class == "DRUID"
-                
-                local target = {
+
+    for _, unit in ipairs(self:GetShamanGroupUnits()) do
+        if self:IsShamanFriendlyUnitReachable(unit) then
+            local maxHealth = UnitHealthMax(unit)
+            if maxHealth and maxHealth > 0 then
+                local hp = UnitHealth(unit) / maxHealth
+                local isTank = self:IsShamanTankCandidate(unit)
+                local deficit = 1 - hp
+                local priority = deficit * 1000 + (isTank and 35 or 0)
+                if hp < 0.30 then priority = priority + 250 end
+                table.insert(targets, {
                     unit = unit,
                     health = hp,
-                    name = UnitName(unit),
-                    class = class,
+                    name = UnitName(unit) or unit,
                     isTank = isTank,
-                    isHealer = isHealer,
-                    role = isTank and "tank" or (isHealer and "healer" or "dps"),
-                    priority = 0
-                }
-                
-                -- Calculate priority
-                if hp < 0.25 then
-                    target.priority = 95 + (isTank and 5 or 0) + (isHealer and 3 or 0)
-                    table.insert(emergencyTargets, target)
-                elseif hp < 0.5 then
-                    target.priority = 70 + (isTank and 20 or 0) + (isHealer and 10 or 0)
-                elseif hp < 0.75 then
-                    target.priority = 40 + (isTank and 15 or 0) + (isHealer and 8 or 0)
-                else
-                    target.priority = 20 + (isTank and 10 or 0) + (isHealer and 5 or 0)
-                end
-                
-                table.insert(targets, target)
+                    role = isTank and "tank" or (UnitIsUnit(unit, "player") and "self" or "ally"),
+                    priority = priority
+                })
             end
         end
     end
-    
-    -- Sort by priority
+
     table.sort(targets, function(a, b) return a.priority > b.priority end)
-    
-    -- Return based on urgency
-    if urgencyLevel == "emergency" and #emergencyTargets > 0 then
-        table.sort(emergencyTargets, function(a, b) return a.priority > b.priority end)
-        local target = emergencyTargets[1]
-        ShamanDebug("EMERGENCY TARGET: " .. target.name .. " (" .. target.role .. ") - " .. math.floor(target.health * 100) .. "% HP")
-        return target.unit, target.health, target
-    end
-    
-    -- Normal priority target
-    if #targets > 0 and targets[1].health < 0.95 then
-        local target = targets[1]
-        ShamanDebug("HEAL TARGET: " .. target.name .. " (" .. target.role .. ") - " .. math.floor(target.health * 100) .. "% HP")
-        return target.unit, target.health, target
-    end
-    
-    return nil, 1.0, nil
+    local target = targets[1]
+    if not target then return nil, 1.0, nil end
+    if urgencyLevel == "emergency" and target.health >= 0.35 then return nil, 1.0, nil end
+
+    local healThreshold = target.isTank and 0.93 or 0.90
+    if target.health >= healThreshold then return nil, target.health, target end
+    return target.unit, target.health, target
 end
 
 -- ENHANCED: Totem status with better tracking
-function AC:GetActiveShamanTotem(totemSlot) 
-    local success, name, startTime, duration = pcall(GetTotemInfo, totemSlot)
-    if not success or not name or name == "" then return nil, 0 end
-    if not duration or duration == 0 then return name, 999 end
+function AC:GetActiveShamanTotem(totemSlot)
+    local success, _, name, startTime, duration = pcall(GetTotemInfo, totemSlot)
+    if not success or type(name) ~= "string" or name == "" then return nil, 0 end
+    if type(duration) ~= "number" or duration <= 0 then return nil, 0 end
+    if type(startTime) ~= "number" then return name, 999 end
     local timeLeft = (startTime + duration) - GetTime()
     return name, math.max(0, timeLeft)
 end
@@ -298,43 +347,36 @@ end
 -- ENHANCED: Group damage assessment for Chain Heal optimization
 function AC:AnalyzeGroupDamage()
     local analysis = {
-        totalMembers = 1,
+        totalMembers = 0,
         damagedMembers = 0,
         avgHealth = 0,
         needsChainHeal = false,
         chainHealTargets = {}
     }
-    
-    local totalHealth = self:GetPlayerHealthPercent()
-    local playerHP = totalHealth / 100
-    
-    if playerHP < 0.85 then analysis.damagedMembers = 1 end
-    
-    if IsInGroup() then
-        local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
-        local max = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
-        
-        for i = 1, max do
-            local unit = prefix .. i
-            if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
+
+    local totalHealth = 0
+    for _, unit in ipairs(self:GetShamanGroupUnits()) do
+        if self:IsShamanFriendlyUnitReachable(unit) then
+            local maxHealth = UnitHealthMax(unit)
+            if maxHealth and maxHealth > 0 then
+                local hp = UnitHealth(unit) / maxHealth
                 analysis.totalMembers = analysis.totalMembers + 1
-                local hp = UnitHealth(unit) / UnitHealthMax(unit)
-                totalHealth = totalHealth + (hp * 100)
-                
+                totalHealth = totalHealth + hp
                 if hp < 0.85 then
                     analysis.damagedMembers = analysis.damagedMembers + 1
                     table.insert(analysis.chainHealTargets, {
                         unit = unit,
                         health = hp,
-                        name = UnitName(unit)
+                        name = UnitName(unit) or unit
                     })
                 end
             end
         end
     end
-    
-    analysis.avgHealth = totalHealth / analysis.totalMembers / 100
-    analysis.needsChainHeal = analysis.damagedMembers >= 3 or 
+
+    table.sort(analysis.chainHealTargets, function(a, b) return a.health < b.health end)
+    analysis.avgHealth = analysis.totalMembers > 0 and totalHealth / analysis.totalMembers or 1
+    analysis.needsChainHeal = analysis.damagedMembers >= 3 or
                              (analysis.damagedMembers >= 2 and analysis.avgHealth < 0.7)
     
     return analysis
@@ -342,23 +384,21 @@ end
 
 function AC:HandleShamanCleansing()
     local _, playerClass = UnitClass("player")
-    if playerClass ~= "SHAMAN" or not IsInGroup() then return false end
+    if playerClass ~= "SHAMAN" then return false end
 
-    local units = {"player"}
-    local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
-    local count = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
-    for i = 1, count do
-        table.insert(units, prefix .. i)
-    end
+    local cleanseSpell = self:KnowsSpell(S.CleanseSpirit) and S.CleanseSpirit or
+                         (self:KnowsSpell(S.CureToxins) and S.CureToxins)
+    if not cleanseSpell or not self:IsShamanSpellReady(cleanseSpell) then return false end
 
-    for _, unit in ipairs(units) do
-        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) then
+    for _, unit in ipairs(self:GetShamanGroupUnits()) do
+        if self:IsShamanFriendlyUnitReachable(unit) then
             for index = 1, 40 do
                 local name, _, _, debuffType = UnitDebuff(unit, index)
                 if not name then break end
-                if debuffType == "Poison" or debuffType == "Disease" or debuffType == "Curse" then
-                    if self:CanUseShamanSpell(S.CleanseSpirit) and
-                       self:CastShamanSpell(S.CleanseSpirit, unit) then
+                local canRemove = debuffType == "Poison" or debuffType == "Disease" or
+                                  (cleanseSpell == S.CleanseSpirit and debuffType == "Curse")
+                if canRemove then
+                    if self:CastShamanSpell(cleanseSpell, unit) then
                         ShamanDebug("Cleansed " .. (UnitName(unit) or unit) .. ": " .. name)
                         return true
                     end
@@ -387,6 +427,27 @@ function AC:HandleShamanPurge()
         end
     end
     return false
+end
+
+function AC:IsShamanBossTarget(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) then return false end
+    local classification = UnitClassification(unit)
+    local level = UnitLevel(unit)
+    return classification == "worldboss" or level == -1
+end
+
+function AC:GetShamanGroupManaPressure()
+    local lowManaUsers, manaUsers = 0, 0
+    for _, unit in ipairs(self:GetShamanGroupUnits()) do
+        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitPowerMax(unit, 0) > 0 then
+            manaUsers = manaUsers + 1
+            if UnitPower(unit, 0) / UnitPowerMax(unit, 0) < 0.45 then
+                lowManaUsers = lowManaUsers + 1
+            end
+        end
+    end
+    return lowManaUsers, manaUsers
 end
 
 -- ENHANCED: Racial abilities usage
@@ -428,221 +489,193 @@ function AC:UseShamanRacials(offensive, defensive)
     return false
 end
 
--- ENHANCED: Ultimate totem deployment with dynamic situation awareness
-function AC:DeployShamanTotems(spec, level, situation)    
-    if not Throttle("TotemDeploy", 3.0) then return false end 
-    
-    -- Enhanced situation detection
-    local targetClassification = UnitExists("target") and UnitClassification("target")
-    local isBoss = targetClassification == "worldboss" or targetClassification == "elite" or targetClassification == "rareelite"
-    local health = self:GetPlayerHealthPercent()
-    
-    -- Dynamic situation override
-    if health < 40 then
-        situation = "DEFENSIVE" -- Switch to defensive totems when low health
-    elseif isBoss and situation ~= "AOE" then
-        situation = "BOSS" -- Boss-specific totems
+local function ShamanTotemNameMatches(activeName, spellName)
+    return activeName and spellName and
+           (activeName == spellName or string.find(activeName, spellName, 1, true) == 1)
+end
+
+function AC:DeployShamanTotems(spec, level, situation)
+    if not Throttle("TotemDeploy", 1.0) then return false end
+
+    if self:IsShamanBossTarget("target") and situation ~= "AOE" then situation = "BOSS" end
+    local setKey = spec:upper() .. "_" .. situation:upper()
+    local totemSet = AC.ShamanTotemSets[setKey] or AC.ShamanTotemSets[spec:upper() .. "_SOLO"]
+    if not totemSet then
+        local bracket = level < 20 and "LOW" or (level < 40 and "MID" or "HIGH")
+        totemSet = AC.ShamanTotemSets["LEVELING_" .. bracket]
     end
-    
-    -- Enhanced Call spells for combat efficiency (prioritized for Enhancement)
-    if level >= 30 then
-        local emptySlots, expiringSlots = 0, 0
-        local activeSlots = 0
-        for slot = 1, 4 do
-            local totem, timeLeft = self:GetActiveShamanTotem(slot)
-            if not totem then 
-                emptySlots = emptySlots + 1
-            elseif timeLeft < 15 and timeLeft ~= 999 then 
-                expiringSlots = expiringSlots + 1 
-                activeSlots = activeSlots + 1
-            else
-                activeSlots = activeSlots + 1
-            end
+
+    local targetClose = UnitExists("target") and CheckInteractDistance("target", 2)
+    if spec == "Elemental" and situation == "AOE" and not targetClose then
+        totemSet = {
+            [TotemTypes.EARTH] = totemSet[TotemTypes.EARTH],
+            [TotemTypes.AIR] = totemSet[TotemTypes.AIR],
+            [TotemTypes.FIRE] = S.TotemOfWrath,
+            [TotemTypes.WATER] = totemSet[TotemTypes.WATER]
+        }
+    elseif spec == "Enhancement" and level < 60 then
+        totemSet = {
+            [TotemTypes.EARTH] = totemSet[TotemTypes.EARTH],
+            [TotemTypes.AIR] = totemSet[TotemTypes.AIR],
+            [TotemTypes.FIRE] = S.SearingTotem,
+            [TotemTypes.WATER] = totemSet[TotemTypes.WATER]
+        }
+    end
+
+    local protectedTotems = {
+        [S.FireElementalTotem] = true,
+        [S.EarthElementalTotem] = true,
+        [S.ManaTideTotem] = true
+    }
+    local emptySlots, hasProtectedTotem = 0, false
+    for slot = 1, 4 do
+        local activeTotem, timeLeft = self:GetActiveShamanTotem(slot)
+        if not activeTotem then emptySlots = emptySlots + 1 end
+        local trackedUntil = self.shamanProtectedTotemUntil and self.shamanProtectedTotemUntil[slot] or 0
+        local graceUntil = self.shamanProtectedTotemGraceUntil and self.shamanProtectedTotemGraceUntil[slot] or 0
+        if trackedUntil > GetTime() and (activeTotem or graceUntil > GetTime()) then
+            hasProtectedTotem = true
         end
-        
-        -- Strategic Totemic Recall before Call spells
-        if activeSlots >= 3 and self:CanUseShamanSpell(S.TotemicRecall) and Throttle("TotemicRecall", 5.0) then
-            local needsNewTotems = false
-            if spec == "Enhancement" then
-                needsNewTotems = (emptySlots >= 2 or expiringSlots >= 2 or (emptySlots + expiringSlots) >= 2)
-            else
-                needsNewTotems = (emptySlots >= 2 or expiringSlots >= 2)
+        for protectedName in pairs(protectedTotems) do
+            if ShamanTotemNameMatches(activeTotem, protectedName) and timeLeft > 1 then
+                hasProtectedTotem = true
             end
-            
-            if needsNewTotems then
-                if self:CastShamanSpell(S.TotemicRecall) then
-                    ShamanDebug("Totemic Recall before Call spell (" .. activeSlots .. " active, " .. emptySlots .. " empty, " .. expiringSlots .. " expiring)")
-                    return true
-                end
-            end
-        end
-        
-        -- More aggressive Call spell usage for Enhancement
-        local shouldUseCall = false
-        if spec == "Enhancement" then
-            -- Enhancement: Use Call if any 2+ slots need totems (aggressive)
-            shouldUseCall = (emptySlots >= 2 or expiringSlots >= 2 or (emptySlots + expiringSlots) >= 2)
-        else
-            -- Other specs: Original logic
-            shouldUseCall = (emptySlots >= 2 or expiringSlots >= 2) and UnitAffectingCombat("player")
-        end
-        
-        if shouldUseCall then
-            ShamanDebug("TOTEM DEBUG: shouldUseCall=true, emptySlots=" .. emptySlots .. ", expiringSlots=" .. expiringSlots .. ", activeSlots=" .. activeSlots)
-            
-            if Throttle("TotemCall", 8.0) then
-                local callSpell = self:CanUseShamanSpell(S.CallOfTheSpirits) and S.CallOfTheSpirits or 
-                                 (self:CanUseShamanSpell(S.CallOfTheAncestors) and S.CallOfTheAncestors or 
-                                 (self:CanUseShamanSpell(S.CallOfTheElements) and S.CallOfTheElements))
-                
-                ShamanDebug("TOTEM DEBUG: Available call spells - Spirits:" .. tostring(self:CanUseShamanSpell(S.CallOfTheSpirits)) .. 
-                          ", Ancestors:" .. tostring(self:CanUseShamanSpell(S.CallOfTheAncestors)) .. 
-                          ", Elements:" .. tostring(self:CanUseShamanSpell(S.CallOfTheElements)))
-                
-                if callSpell then
-                    ShamanDebug("TOTEM DEBUG: Attempting to cast " .. callSpell)
-                    if self:CastShamanSpell(callSpell) then 
-                        ShamanDebug("Called totems: " .. callSpell .. " (" .. spec .. " - " .. emptySlots .. " empty, " .. expiringSlots .. " expiring)")
-                        return true 
-                    else
-                        ShamanDebug("TOTEM DEBUG: Cast failed for " .. callSpell)
-                    end
-                else
-                    ShamanDebug("TOTEM DEBUG: No call spell available")
-                end
-            else
-                ShamanDebug("TOTEM DEBUG: Call spell throttled")
-            end
-        else
-            ShamanDebug("TOTEM DEBUG: shouldUseCall=false, emptySlots=" .. emptySlots .. ", expiringSlots=" .. expiringSlots .. ", spec=" .. spec)
         end
     end
 
-    -- Enhanced totem set selection
-    local totemSet = AC.ShamanTotemSets[spec:upper() .. "_" .. situation:upper()] or 
-                    AC.ShamanTotemSets[spec:upper() .. "_SOLO"]
-    
-    ShamanDebug("TOTEM DEBUG: Using totem set for " .. spec:upper() .. "_" .. situation:upper())
-    ShamanDebug("TOTEM DEBUG: TotemSet - Earth:" .. tostring(totemSet[TotemTypes.EARTH]) .. 
-               ", Air:" .. tostring(totemSet[TotemTypes.AIR]) .. 
-               ", Fire:" .. tostring(totemSet[TotemTypes.FIRE]) .. 
-               ", Water:" .. tostring(totemSet[TotemTypes.WATER]))
-    
-    -- Spec-optimized deployment priority
-    local slotPriority = {3, 2, 1, 4} -- Default: Fire, Air, Earth, Water
-    if spec == "Enhancement" then 
-        slotPriority = {2, 3, 1, 4} -- Air (Windfury), Fire, Earth, Water
-    elseif spec == "Restoration" then 
-        slotPriority = {4, 1, 2, 3} -- Water (healing), Earth, Air, Fire
-    elseif spec == "Elemental" then
-        slotPriority = {3, 2, 1, 4} -- Fire (ToW), Air (WoA), Earth, Water
+    -- Call spells use the player's saved multicast set. They are efficient for
+    -- an empty field; individual checks below correct any preset mismatch.
+    if level >= 30 and emptySlots >= 3 and not hasProtectedTotem then
+        local callSpell = self:IsShamanSpellReady(S.CallOfTheElements) and S.CallOfTheElements or
+                         (self:IsShamanSpellReady(S.CallOfTheAncestors) and S.CallOfTheAncestors or
+                         (self:IsShamanSpellReady(S.CallOfTheSpirits) and S.CallOfTheSpirits))
+        if callSpell and self:CastShamanSpell(callSpell) then
+            ShamanDebug("Called saved totem set with " .. callSpell)
+            return true
+        end
     end
-    
-    ShamanDebug("TOTEM DEBUG: Using priority order for " .. spec .. ": " .. table.concat(slotPriority, ","))
-    
+
+    local slotPriority = {TotemTypes.FIRE, TotemTypes.AIR, TotemTypes.EARTH, TotemTypes.WATER}
+    if spec == "Enhancement" then
+        slotPriority = {TotemTypes.FIRE, TotemTypes.EARTH, TotemTypes.AIR, TotemTypes.WATER}
+    elseif spec == "Restoration" then
+        slotPriority = {TotemTypes.WATER, TotemTypes.AIR, TotemTypes.EARTH, TotemTypes.FIRE}
+    end
+
+    local fallbacks = {
+        [TotemTypes.FIRE] = {S.SearingTotem, S.MagmaTotem},
+        [TotemTypes.EARTH] = {S.StrengthOfEarthTotem, S.StoneskinTotem, S.StoneclawTotem},
+        [TotemTypes.WATER] = {S.ManaSpringTotem, S.HealingStreamTotem},
+        [TotemTypes.AIR] = {S.WrathOfAirTotem, S.WindfuryTotem, S.GraceOfAirTotem}
+    }
+
     for _, slot in ipairs(slotPriority) do
         local activeTotem, timeLeft = self:GetActiveShamanTotem(slot)
-        local desiredTotem = totemSet[slot]
-        local slotName = ({"Earth", "Air", "Fire", "Water"})[slot]
-        
-        ShamanDebug("TOTEM DEBUG: Checking slot " .. slot .. " (" .. slotName .. ") - active:" .. tostring(activeTotem) .. 
-                   ", timeLeft:" .. tostring(timeLeft) .. ", desired:" .. tostring(desiredTotem))
-        
-        -- Enhanced fallback logic
-        if desiredTotem and not self:CanUseShamanSpell(desiredTotem) then
-            ShamanDebug("TOTEM DEBUG: Cannot use desired totem " .. desiredTotem .. ", using fallback")
-            if slot == TotemTypes.FIRE then
-                desiredTotem = self:CanUseShamanSpell(S.SearingTotem) and S.SearingTotem or
-                              self:CanUseShamanSpell(S.MagmaTotem) and S.MagmaTotem
-            elseif slot == TotemTypes.AIR then
-                desiredTotem = self:CanUseShamanSpell(S.GraceOfAirTotem) and S.GraceOfAirTotem or
-                              self:CanUseShamanSpell(S.WindfuryTotem) and S.WindfuryTotem
-            elseif slot == TotemTypes.EARTH then
-                desiredTotem = self:CanUseShamanSpell(S.StrengthOfEarthTotem) and S.StrengthOfEarthTotem or
-                              self:CanUseShamanSpell(S.StoneskinTotem) and S.StoneskinTotem
-            elseif slot == TotemTypes.WATER then
-                desiredTotem = self:CanUseShamanSpell(S.ManaSpringTotem) and S.ManaSpringTotem or
-                              self:CanUseShamanSpell(S.HealingStreamTotem) and S.HealingStreamTotem
+        local trackedUntil = self.shamanProtectedTotemUntil and self.shamanProtectedTotemUntil[slot] or 0
+        local graceUntil = self.shamanProtectedTotemGraceUntil and self.shamanProtectedTotemGraceUntil[slot] or 0
+        local protectedActive = trackedUntil > GetTime() and (activeTotem or graceUntil > GetTime())
+        for protectedName in pairs(protectedTotems) do
+            if ShamanTotemNameMatches(activeTotem, protectedName) and timeLeft > 1 then
+                protectedActive = true
+                break
             end
-            ShamanDebug("TOTEM DEBUG: Fallback totem: " .. tostring(desiredTotem))
         end
-        
-        if desiredTotem and self:CanUseShamanSpell(desiredTotem) then
-            local shouldDeploy = not activeTotem or 
-                               activeTotem ~= desiredTotem or 
-                               (timeLeft < 15 and timeLeft ~= 999)
-            
-            ShamanDebug("TOTEM DEBUG: shouldDeploy=" .. tostring(shouldDeploy) .. " for " .. desiredTotem)
-            
-            if shouldDeploy then
-                if Throttle("Totem_" .. slot, 2.0) then
-                    ShamanDebug("TOTEM DEBUG: Attempting to cast " .. desiredTotem)
-                    if self:CastShamanSpell(desiredTotem) then 
-                        ShamanDebug("Deployed " .. desiredTotem .. " for " .. situation)
-                        return true 
-                    else
-                        ShamanDebug("TOTEM DEBUG: Cast failed for " .. desiredTotem)
-                    end
-                else
-                    ShamanDebug("TOTEM DEBUG: Totem slot " .. slot .. " throttled")
+
+        if not protectedActive then
+            local desiredTotem = totemSet[slot]
+            if desiredTotem and not self:KnowsSpell(desiredTotem) then
+                desiredTotem = nil
+                for _, fallback in ipairs(fallbacks[slot]) do
+                    if self:KnowsSpell(fallback) then desiredTotem = fallback break end
                 end
             end
-        else
-            ShamanDebug("TOTEM DEBUG: Cannot use totem " .. tostring(desiredTotem) .. " or not available")
+
+            local shouldDeploy = desiredTotem and
+                                 (not activeTotem or not ShamanTotemNameMatches(activeTotem, desiredTotem) or
+                                  (timeLeft > 0 and timeLeft < 12))
+            if shouldDeploy and self:IsShamanSpellReady(desiredTotem) and
+               self:CastShamanSpell(desiredTotem) then
+                ShamanDebug("Deployed " .. desiredTotem .. " (" .. TotemSlotNames[slot] .. ", " .. situation .. ")")
+                return true
+            end
         end
     end
     return false
 end
 
+function AC:ApplyShamanWeaponImbue(spellName, inventorySlot)
+    if not self:IsShamanSpellReady(spellName) or UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return false
+    end
+    if not GetInventoryItemID("player", inventorySlot) then return false end
+
+    -- Weapon imbues open a spell-target cursor; /use 16 or /use 17 selects the
+    -- intended equipped weapon. Picking the item up first merely moves it and
+    -- was the reason the old off-hand path never applied Flametongue correctly.
+    local castOK = pcall(CastSpellByName, spellName)
+    if not castOK then return false end
+    local useOK = pcall(UseInventoryItem, inventorySlot)
+    if SpellIsTargeting and SpellIsTargeting() then SpellStopTargeting() end
+    if CursorHasItem and CursorHasItem() then ClearCursor() end
+    return useOK
+end
+
 function AC:ManageShamanWeaponImbues(spec, level)
-    if not Throttle("WeaponImbue_V22", 5.0) then return false end
-    
+    if not Throttle("WeaponImbue", 2.0) then return false end
+
     local hasMainHandEnchant, mainHandExpiration, _, _, hasOffHandEnchant, offHandExpiration = GetWeaponEnchantInfo()
-    mainHandExpiration = (hasMainHandEnchant and mainHandExpiration / 1000 or 0)
-    offHandExpiration = (hasOffHandEnchant and offHandExpiration / 1000 or 0)
-    
-    local reapplyThreshold = 30 
+    mainHandExpiration = hasMainHandEnchant and (mainHandExpiration or 0) / 1000 or 0
+    offHandExpiration = hasOffHandEnchant and (offHandExpiration or 0) / 1000 or 0
+    local reapplyThreshold = 60
 
-    -- Determine Main Hand Imbue
+    if self.shamanImbueSpec ~= spec then
+        self.shamanImbueSpec = spec
+        self.shamanVerifiedImbueSlots = {}
+    end
+    self.shamanVerifiedImbueSlots = self.shamanVerifiedImbueSlots or {}
+
     local mainHandImbue
-    if spec == "Enhancement" then 
-        mainHandImbue = self:CanUseShamanSpell(S.WindfuryWeapon) and S.WindfuryWeapon or S.FlametongueWeapon
-    elseif spec == "Elemental" then 
+    if spec == "Enhancement" then
+        mainHandImbue = self:KnowsSpell(S.WindfuryWeapon) and S.WindfuryWeapon or S.FlametongueWeapon
+    elseif spec == "Elemental" then
         mainHandImbue = S.FlametongueWeapon
-    elseif spec == "Restoration" then 
-        mainHandImbue = self:CanUseShamanSpell(S.EarthlivingWeapon) and S.EarthlivingWeapon or S.FlametongueWeapon 
+    elseif spec == "Restoration" then
+        mainHandImbue = self:KnowsSpell(S.EarthlivingWeapon) and S.EarthlivingWeapon or S.FlametongueWeapon
+    else
+        mainHandImbue = level >= 30 and self:KnowsSpell(S.WindfuryWeapon) and S.WindfuryWeapon or S.RockbiterWeapon
     end
-    mainHandImbue = self:CanUseShamanSpell(mainHandImbue) and mainHandImbue or S.RockbiterWeapon
+    if not self:KnowsSpell(mainHandImbue) then
+        mainHandImbue = self:KnowsSpell(S.RockbiterWeapon) and S.RockbiterWeapon or nil
+    end
 
-    -- Main Hand Logic
-    if mainHandImbue and self:CanUseShamanSpell(mainHandImbue) then
-        local shouldRecast = not hasMainHandEnchant or (hasMainHandEnchant and mainHandExpiration > 0 and mainHandExpiration < reapplyThreshold)
-        if shouldRecast then
-            if self.debugMode then self:Debug("|cFF2459FFShaman v22:|r " .. "Refreshing Main Hand Imbue: " .. mainHandImbue) end
-            PickupInventoryItem(16); if CursorHasItem() then PickupInventoryItem(16) end
-            if self:CastShamanSpell(mainHandImbue) then return true end
-        end
+    local refreshMain = mainHandImbue and (not self.shamanVerifiedImbueSlots[16] or
+                        not hasMainHandEnchant or (mainHandExpiration > 0 and mainHandExpiration < reapplyThreshold))
+    if refreshMain and self:ApplyShamanWeaponImbue(mainHandImbue, 16) then
+        self.shamanVerifiedImbueSlots[16] = true
+        ShamanDebug("Applied " .. mainHandImbue .. " to main hand")
+        return true
     end
-    
-    -- Off-Hand Logic
-    if spec == "Enhancement" and GetInventoryItemID("player", 17) then
-        local offHandImbue = self:CanUseShamanSpell(S.FlametongueWeapon) and S.FlametongueWeapon
-        if offHandImbue and self:CanUseShamanSpell(offHandImbue) then
-            local shouldRecastOffhand = not hasOffHandEnchant or (hasOffHandEnchant and offHandExpiration > 0 and offHandExpiration < reapplyThreshold)
-            if shouldRecastOffhand then
-                if self.debugMode then self:Debug("|cFF2459FFShaman v22:|r " .. "Refreshing Off-Hand Imbue: " .. offHandImbue) end
-                PickupInventoryItem(17); if CursorHasItem() then PickupInventoryItem(17) end
-                if self:CastShamanSpell(offHandImbue) then return true end
-            end
+
+    local hasOffHandWeapon = spec == "Enhancement" and GetInventoryItemID("player", 17) and
+                             (not OffhandHasWeapon or OffhandHasWeapon())
+    if hasOffHandWeapon and self:KnowsSpell(S.FlametongueWeapon) then
+        local refreshOff = not self.shamanVerifiedImbueSlots[17] or not hasOffHandEnchant or
+                           (offHandExpiration > 0 and offHandExpiration < reapplyThreshold)
+        if refreshOff and self:ApplyShamanWeaponImbue(S.FlametongueWeapon, 17) then
+            self.shamanVerifiedImbueSlots[17] = true
+            ShamanDebug("Applied Flametongue Weapon to off hand")
+            return true
         end
     end
     return false
 end
 
 function AC:ManageShamanShields(spec, level)
-    if not Throttle("Shield_V22", 5.0) then return false end
-    
-    local shield = (spec == "Restoration" and self:CanUseShamanSpell(S.WaterShield)) and S.WaterShield or (self:CanUseShamanSpell(S.LightningShield) and S.LightningShield)
+    if not Throttle("ShamanShield", 2.0) then return false end
+
+    local wantsWaterShield = spec == "Restoration" or spec == "Elemental"
+    local shield = wantsWaterShield and self:KnowsSpell(S.WaterShield) and S.WaterShield or
+                   (self:KnowsSpell(S.LightningShield) and S.LightningShield)
     if shield then
         local hasBuff, _, stacks = self:HasBuff("player", shield)
         if not hasBuff or (shield == S.LightningShield and stacks and stacks <= 1) then
@@ -654,425 +687,340 @@ end
 
 -- ENHANCED ROTATIONS: Ultimate Optimization for All Specs
 
--- ELEMENTAL ROTATION: Spell Power Master (Lava Burst + Thunderstorm Beast)
 function AC:ElementalRotation(level, hasTarget, targetHP, manaPercent, enemies)
+    if not hasTarget then return false end
+
+    if self.TryInterrupt and self:TryInterrupt(S.WindShear, "target") then
+        ShamanDebug("Interrupted with Wind Shear")
+        return true
+    end
+
+    local targetClassification = UnitClassification("target")
+    local isElite = targetClassification == "worldboss" or targetClassification == "elite" or
+                    targetClassification == "rareelite"
+    local isBoss = self:IsShamanBossTarget("target")
+    local meaningfulTarget = isBoss or (isElite and targetHP > 60) or (enemies >= 3 and targetHP > 50)
+
+    if isBoss and targetHP > 80 and self:IsShamanSpellReady(S.FireElementalTotem) and
+       self:CastShamanSpell(S.FireElementalTotem) then
+        self.shamanProtectedTotemUntil = self.shamanProtectedTotemUntil or {}
+        self.shamanProtectedTotemGraceUntil = self.shamanProtectedTotemGraceUntil or {}
+        self.shamanProtectedTotemUntil[TotemTypes.FIRE] = GetTime() + 120
+        self.shamanProtectedTotemGraceUntil[TotemTypes.FIRE] = GetTime() + 3
+        ShamanDebug("Fire Elemental for sustained boss damage")
+        return true
+    end
+
     local situation = enemies >= 3 and "AOE" or (IsInGroup() and "GROUP" or "SOLO")
     if self:DeployShamanTotems("Elemental", level, situation) then return true end
-    if not hasTarget then return false end
-    
-    -- Enhanced interrupt with priority
-    if self.TryInterrupt and self:TryInterrupt(S.WindShear, "target") then 
-        ShamanDebug("Interrupted with Wind Shear")
-        return true 
-    end
-    
-    -- Use racials for offense
-    self:UseShamanRacials(true, false)
-    
-    -- Ultimate cooldown management for tough targets
-    local targetClassification = UnitClassification("target")
-    local isBoss = targetClassification == "worldboss" or targetClassification == "elite" or targetClassification == "rareelite"
-    
-    if (targetHP > 50 or enemies >= 2) and (isBoss or not IsInGroup()) then
-        -- Elemental Mastery + Nature's Swiftness combo
-        if self:CanUseShamanSpell(S.ElementalMastery) and manaPercent > 20 and Throttle("ElementalMastery", 180) then
-            if self:CastShamanSpell(S.ElementalMastery) then
-                ShamanDebug("Elemental Mastery burst phase")
-                
-                -- Chain with Nature's Swiftness if available
-                if self:CanUseShamanSpell(S.NaturesSwiftness) then
-                    self:CastShamanSpell(S.NaturesSwiftness)
-                    ShamanDebug("Nature's Swiftness combo")
-                end
-                
-                -- Use trinkets and consumables
-                if self.UseTrinkets then self:UseTrinkets() end
-                if self.UseOffensivePotion then self:UseOffensivePotion(true) end
-                
-                return true
-            end
-        end
-        
-        -- Fire Elemental for sustained DPS
-        if targetHP > 70 and self:CanUseShamanSpell(S.FireElementalTotem) and Throttle("FireElemental", 600) then
-            if self:CastShamanSpell(S.FireElementalTotem) then
-                ShamanDebug("Fire Elemental totem for boss DPS")
-                return true
-            end
-        end
-    end
-    
-    -- Enhanced AoE rotation
-    if enemies >= 3 then
-        -- Fire Nova optimization with totem synergy
-        local fireTotem = self:GetActiveShamanTotem(TotemTypes.FIRE)
-        if fireTotem and self:CanUseShamanSpell(S.FireNova) and manaPercent > 20 then
-            if self:CastShamanSpell(S.FireNova) then
-                ShamanDebug("Fire Nova with " .. fireTotem .. " totem")
-                return true
-            end
-        end
-        
-        -- Chain Lightning for multi-target
-        if self:CanUseShamanSpell(S.ChainLightning) and manaPercent > 30 then
-            if self:CastShamanSpell(S.ChainLightning) then
-                ShamanDebug("Chain Lightning AoE")
-                return true
-            end
-        end
-        
-        -- Thunderstorm for positioning + damage
-        if self:CanUseShamanSpell(S.Thunderstorm) and CheckInteractDistance("target", 2) then
-            if self:CastShamanSpell(S.Thunderstorm) then
-                ShamanDebug("Thunderstorm knockback + damage")
-                return true
-            end
-        end
-    end
-    
-    -- Enhanced single-target rotation with Lava Burst mastery
-    local isMoving = self:IsPlayerMoving()
-    local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
 
-    -- Flame Shock application/refresh
-    if self:CanUseShamanSpell(S.FlameShock) and flameShockDuration < 2 and manaPercent > 10 then
-        if self:CastShamanSpell(S.FlameShock) then
-            ShamanDebug("Flame Shock application")
+    local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
+    local targetWillLive = isElite or targetHP > 18
+    if targetWillLive and self:IsShamanSpellReady(S.FlameShock) and flameShockDuration < 2.5 and
+       self:CastShamanSpell(S.FlameShock) then
+        ShamanDebug("Flame Shock for Lava Burst")
+        return true
+    end
+
+    if meaningfulTarget and self:IsShamanSpellReady(S.ElementalMastery) and
+       self:CastShamanSpell(S.ElementalMastery) then
+        ShamanDebug("Elemental Mastery burst")
+        if self.UseTrinkets then self:UseTrinkets() end
+        if isBoss and self.UseOffensivePotion then self:UseOffensivePotion(true) end
+        return true
+    end
+
+    if meaningfulTarget and self:UseShamanRacials(true, false) then return true end
+
+    local isMoving = self:IsPlayerMoving()
+    local fireTotem = self:GetActiveShamanTotem(TotemTypes.FIRE)
+    local targetClose = CheckInteractDistance("target", 2)
+
+    if enemies >= 3 and targetClose and fireTotem and self:IsShamanSpellReady(S.FireNova) and
+       self:CastShamanSpell(S.FireNova) then
+        ShamanDebug("Fire Nova on " .. enemies .. " nearby enemies")
+        return true
+    end
+
+    -- Thunderstorm is excellent mana recovery, but an unglyphed knockback can
+    -- scatter a tank's pull. Use it offensively only while solo, or for mana
+    -- when no enemy is close enough to be displaced.
+    local safeThunderstorm = (not IsInGroup() and enemies >= 2 and targetClose) or
+                             (manaPercent < 35 and not targetClose)
+    if safeThunderstorm and self:IsShamanSpellReady(S.Thunderstorm) and
+       self:CastShamanSpell(S.Thunderstorm) then
+        ShamanDebug("Thunderstorm for " .. (manaPercent < 35 and "mana" or "solo AoE"))
+        return true
+    end
+
+    if isMoving then
+        if flameShockDuration > 4 and targetHP > 10 and self:IsShamanSpellReady(S.EarthShock) and
+           self:CastShamanSpell(S.EarthShock) then
+            ShamanDebug("Earth Shock while moving")
             return true
         end
-    end
-
-    -- Movement-safe filler: prefer instant shocks over hard casts while repositioning.
-    if isMoving then
-        if self:CanUseShamanSpell(S.Thunderstorm) and enemies >= 3 and CheckInteractDistance("target", 2) then
-            if self:CastShamanSpell(S.Thunderstorm) then
-                ShamanDebug("Thunderstorm movement damage")
-                return true
-            end
-        end
-
-        if self:CanUseShamanSpell(S.EarthShock) and manaPercent > 5 then
-            if self:CastShamanSpell(S.EarthShock) then
-                ShamanDebug("Earth Shock movement filler")
-                return true
-            end
-        end
-
         return false
     end
 
-    -- Lava Burst with Flame Shock synergy (guaranteed crit)
-    if flameShockDuration > 2 and self:CanUseShamanSpell(S.LavaBurst) and manaPercent > 15 then
-        if self:CastShamanSpell(S.LavaBurst) then
-            ShamanDebug("Lava Burst (guaranteed crit with Flame Shock)")
-            return true
-        end
+    if flameShockDuration > 2.5 and self:IsShamanSpellReady(S.LavaBurst) and
+       self:CastShamanSpell(S.LavaBurst) then
+        ShamanDebug("Lava Burst with Flame Shock active")
+        return true
     end
-    
-    -- Chain Lightning for 2+ targets
-    if enemies >= 2 and self:CanUseShamanSpell(S.ChainLightning) and manaPercent > 25 then
-        if self:CastShamanSpell(S.ChainLightning) then
-            ShamanDebug("Chain Lightning (2+ targets)")
-            return true
-        end
+
+    if enemies >= 2 and manaPercent > 15 and self:IsShamanSpellReady(S.ChainLightning) and
+       self:CastShamanSpell(S.ChainLightning) then
+        ShamanDebug("Chain Lightning cleave")
+        return true
     end
-    
-    -- Lightning Bolt filler
-    if self:CanUseShamanSpell(S.LightningBolt) and manaPercent > 5 then
-        if self:CastShamanSpell(S.LightningBolt) then
-            ShamanDebug("Lightning Bolt filler")
-            return true
-        end
+
+    if self:IsShamanSpellReady(S.LightningBolt) and self:CastShamanSpell(S.LightningBolt) then
+        ShamanDebug("Lightning Bolt filler")
+        return true
     end
-    
+
     return false
 end
 
--- ENHANCEMENT ROTATION: Melee DPS Beast (Maelstrom Weapon + Windfury Master)
 function AC:EnhancementRotation(level, hasTarget, targetHP, manaPercent, enemies)
+    if not hasTarget then return false end
+
+    if not IsCurrentSpell("Attack") then
+        StartAttack()
+    end
+
+    if self.TryInterrupt and self:TryInterrupt(S.WindShear, "target") then
+        ShamanDebug("Interrupted with Wind Shear")
+        return true
+    end
+
+    local classification = UnitClassification("target")
+    local isElite = classification == "worldboss" or classification == "elite" or
+                    classification == "rareelite"
+    local isBoss = self:IsShamanBossTarget("target")
+    local meaningfulTarget = isBoss or (isElite and targetHP > 55) or (enemies >= 3 and targetHP > 45)
+    local health = self:GetPlayerHealthPercent()
+
+    if isBoss and targetHP > 80 and self:IsShamanSpellReady(S.FireElementalTotem) and
+       self:CastShamanSpell(S.FireElementalTotem) then
+        self.shamanProtectedTotemUntil = self.shamanProtectedTotemUntil or {}
+        self.shamanProtectedTotemGraceUntil = self.shamanProtectedTotemGraceUntil or {}
+        self.shamanProtectedTotemUntil[TotemTypes.FIRE] = GetTime() + 120
+        self.shamanProtectedTotemGraceUntil[TotemTypes.FIRE] = GetTime() + 3
+        ShamanDebug("Fire Elemental for sustained boss damage")
+        return true
+    end
+
     local situation = enemies >= 2 and "AOE" or (IsInGroup() and "GROUP" or "SOLO")
     if self:DeployShamanTotems("Enhancement", level, situation) then return true end
-    if not hasTarget then return false end
-    
-    -- Enhanced auto-attack management
-    if CheckInteractDistance("target", 3) and not IsCurrentSpell("Attack") then 
-        StartAttack()
-        ShamanDebug("Started auto-attack")
+
+    if meaningfulTarget and self:IsShamanSpellReady(S.FeralSpirit) and
+       self:CastShamanSpell(S.FeralSpirit) then
+        ShamanDebug("Feral Spirit on a durable target")
+        if self.UseTrinkets then self:UseTrinkets() end
+        if isBoss and self.UseOffensivePotion then self:UseOffensivePotion(true) end
+        return true
     end
-    
-    -- Enhanced interrupt
-    if self.TryInterrupt and self:TryInterrupt(S.WindShear, "target") then 
-        ShamanDebug("Interrupted with Wind Shear")
-        return true 
-    end
-    
-    -- Use racials for offense
-    self:UseShamanRacials(true, false)
-    
-    -- Enhanced defensive and utility cooldowns
-    if UnitAffectingCombat("player") then
-        local health = self:GetPlayerHealthPercent()
-        
-        -- Shamanistic Rage for mana efficiency + damage reduction
-        if self:CanUseShamanSpell(S.ShamanisticRage) and (manaPercent < 40 or health < 60) then
-            if self:CastShamanSpell(S.ShamanisticRage) then
-                ShamanDebug("Shamanistic Rage (mana: " .. manaPercent .. "%, health: " .. health .. "%)")
-                return true
-            end
-        end
-        
-        -- Enhanced Feral Spirit management
-        local targetClassification = UnitClassification("target")
-        local isBoss = targetClassification == "worldboss" or targetClassification == "elite" or targetClassification == "rareelite"
-        
-        if self:CanUseShamanSpell(S.FeralSpirit) and (isBoss or targetHP > 50 or enemies >= 2) and Throttle("FeralSpirit", 180) then
-            if self:CastShamanSpell(S.FeralSpirit) then
-                ShamanDebug("Feral Spirit wolves")
-                
-                -- Chain with other cooldowns
-                if self.UseTrinkets then self:UseTrinkets() end
-                if self.UseOffensivePotion then self:UseOffensivePotion(true) end
-                
-                return true
-            end
-        end
-        
-        -- Enhanced Bloodlust/Heroism timing
-        local bloodlust = UnitFactionGroup("player") == "Horde" and S.Bloodlust or S.Heroism
-        if self:CanUseShamanSpell(bloodlust) and IsInGroup() and (isBoss or targetHP > 60) and Throttle("Bloodlust", 600) then
-            if self:CastShamanSpell(bloodlust) then
-                ShamanDebug("Bloodlust/Heroism for group")
-                return true
-            end
-        end
-    end
-    
-    -- ULTIMATE: Maelstrom Weapon stack optimization
+
+    if meaningfulTarget and self:UseShamanRacials(true, false) then return true end
+
     local mwStacks = self:GetMaelstromStacks()
+    local fireTotem = self:GetActiveShamanTotem(TotemTypes.FIRE)
+    local targetClose = CheckInteractDistance("target", 2)
+
+    if enemies >= 3 and targetClose and fireTotem and self:IsShamanSpellReady(S.FireNova) and
+       self:CastShamanSpell(S.FireNova) then
+        ShamanDebug("Fire Nova AoE")
+        return true
+    end
+
     if mwStacks >= 5 then
-        local health = self:GetPlayerHealthPercent()
-        
-        -- Emergency self-heal with 5 stacks
-        if health < 30 and self:CanUseShamanSpell(S.HealingWave) then
-            if self:CastShamanSpell(S.HealingWave, "player") then
-                ShamanDebug("Emergency instant Healing Wave (5 MW stacks)")
-                return true
-            end
+        if health < 35 and self:IsShamanSpellReady(S.HealingWave) and
+           self:CastShamanSpell(S.HealingWave, "player") then
+            ShamanDebug("Instant emergency Healing Wave at 5 Maelstrom")
+            return true
         end
-        
-        -- Optimal instant cast spell selection
-        local spell = enemies >= 2 and S.ChainLightning or S.LightningBolt
-        if self:CanUseShamanSpell(spell) then
-            if self:CastShamanSpell(spell) then
-                ShamanDebug("Instant " .. spell .. " (5 MW stacks)")
-                return true
-            end
-        end
-    elseif mwStacks >= 3 and enemies >= 3 then
-        -- Use 3+ stacks for AoE situations
-        if self:CanUseShamanSpell(S.ChainLightning) then
-            if self:CastShamanSpell(S.ChainLightning) then
-                ShamanDebug("Chain Lightning (" .. mwStacks .. " MW stacks, AoE)")
-                return true
-            end
-        end
-    end
-    
-    -- Enhanced AoE with Fire Nova optimization
-    if enemies >= 2 then
-        local fireTotem = self:GetActiveShamanTotem(TotemTypes.FIRE)
-        if fireTotem and self:CanUseShamanSpell(S.FireNova) and manaPercent > 20 then
-            if self:CastShamanSpell(S.FireNova) then
-                ShamanDebug("Fire Nova AoE with " .. fireTotem)
-                return true
-            end
-        end
-    end
-    
-    -- Enhanced shield management
-    if not self:HasBuff("player", S.LightningShield) and self:CanUseShamanSpell(S.LightningShield) then
-        if self:CastShamanSpell(S.LightningShield) then
-            ShamanDebug("Lightning Shield refresh")
+        local maelstromSpell = enemies >= 2 and S.ChainLightning or S.LightningBolt
+        if self:IsShamanSpellReady(maelstromSpell) and self:CastShamanSpell(maelstromSpell) then
+            ShamanDebug("Instant " .. maelstromSpell .. " at 5 Maelstrom")
             return true
         end
     end
-    
-    -- Enhanced melee rotation priority
-    
-    -- Stormstrike (highest priority - applies Nature Vulnerability)
-    if self:CanUseShamanSpell(S.Stormstrike) and manaPercent > 15 then
-        if self:CastShamanSpell(S.Stormstrike) then
-            ShamanDebug("Stormstrike (Nature Vulnerability)")
-            return true
-        end
+
+    if self:IsShamanSpellReady(S.Stormstrike) and self:CastShamanSpell(S.Stormstrike) then
+        ShamanDebug("Stormstrike")
+        return true
     end
-    
-    -- Flame Shock maintenance
+
+    if self:IsShamanSpellReady(S.ShamanisticRage) and (manaPercent < 70 or health < 65) and
+       self:CastShamanSpell(S.ShamanisticRage) then
+        ShamanDebug("Shamanistic Rage for sustain")
+        return true
+    end
+
     local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
-    if self:CanUseShamanSpell(S.FlameShock) and flameShockDuration < 2 and manaPercent > 10 then
-        if self:CastShamanSpell(S.FlameShock) then
-            ShamanDebug("Flame Shock refresh")
-            return true
-        end
+    local targetWillLive = isElite or targetHP > 20
+    if targetWillLive and flameShockDuration < 2.5 and self:IsShamanSpellReady(S.FlameShock) and
+       self:CastShamanSpell(S.FlameShock) then
+        ShamanDebug("Flame Shock maintenance")
+        return true
     end
-    
-    -- Earth Shock for interrupt/filler (when Flame Shock is up)
-    if flameShockDuration > 10 and self:CanUseShamanSpell(S.EarthShock) and manaPercent > 10 then
-        if self:CastShamanSpell(S.EarthShock) then
-            ShamanDebug("Earth Shock filler")
-            return true
-        end
+
+    if flameShockDuration > 4.5 and self:IsShamanSpellReady(S.EarthShock) and
+       self:CastShamanSpell(S.EarthShock) then
+        ShamanDebug("Earth Shock filler")
+        return true
     end
-    
-    -- Lava Lash (requires off-hand weapon)
-    if self:CanUseShamanSpell(S.LavaLash) and GetInventoryItemID("player", 17) and manaPercent > 10 then
-        if self:CastShamanSpell(S.LavaLash) then
-            ShamanDebug("Lava Lash (off-hand weapon)")
-            return true
-        end
+
+    if enemies >= 2 and targetClose and fireTotem and self:IsShamanSpellReady(S.FireNova) and
+       self:CastShamanSpell(S.FireNova) then
+        ShamanDebug("Fire Nova cleave")
+        return true
     end
-    
+
+    local hasOffHandWeapon = GetInventoryItemID("player", 17) and
+                             (not OffhandHasWeapon or OffhandHasWeapon())
+    if hasOffHandWeapon and self:IsShamanSpellReady(S.LavaLash) and
+       self:CastShamanSpell(S.LavaLash) then
+        ShamanDebug("Lava Lash filler")
+        return true
+    end
+
     return false
 end
 
--- RESTORATION ROTATION: Ultimate Healer (Advanced Prioritization + Chain Heal Master)
 function AC:RestorationRotation(level, hasTarget, targetHP, manaPercent, enemies)
     local situation = GetNumRaidMembers() > 0 and "RAID" or (IsInGroup() and "GROUP" or "SOLO")
+
+    local healTarget, healTargetHP, targetInfo = self:FindShamanHealingTarget("normal")
+    local groupAnalysis = self:AnalyzeGroupDamage()
+    local isMoving = self:IsPlayerMoving()
+
+    -- Consume Nature's Swiftness immediately. Letting another instant spell
+    -- take this branch would waste the emergency cooldown.
+    if healTarget and self:HasBuff("player", S.NaturesSwiftness) and
+       self:IsShamanSpellReady(S.HealingWave) and self:CastShamanSpell(S.HealingWave, healTarget) then
+        ShamanDebug("Nature's Swiftness Healing Wave on " .. (UnitName(healTarget) or healTarget))
+        return true
+    end
+
+    if healTarget and healTargetHP < 0.35 then
+        if self:IsShamanSpellReady(S.NaturesSwiftness) and self:CastShamanSpell(S.NaturesSwiftness) then
+            ShamanDebug("Nature's Swiftness for critical healing")
+            return true
+        end
+        if self:IsShamanSpellReady(S.TidalForce) and self:CastShamanSpell(S.TidalForce) then
+            ShamanDebug("Tidal Force for critical healing")
+            return true
+        end
+        if self:IsShamanSpellReady(S.Riptide) and self:CastShamanSpell(S.Riptide, healTarget) then
+            ShamanDebug("Emergency Riptide on " .. (UnitName(healTarget) or healTarget))
+            return true
+        end
+        if not isMoving and self:IsShamanSpellReady(S.LesserHealingWave) and
+           self:CastShamanSpell(S.LesserHealingWave, healTarget) then
+            ShamanDebug("Emergency Lesser Healing Wave")
+            return true
+        end
+        if not isMoving and self:IsShamanSpellReady(S.HealingWave) and
+           self:CastShamanSpell(S.HealingWave, healTarget) then
+            ShamanDebug("Emergency Healing Wave")
+            return true
+        end
+    end
+
+    if hasTarget and self.TryInterrupt and self:TryInterrupt(S.WindShear, "target") then
+        ShamanDebug("Interrupted with Wind Shear")
+        return true
+    end
+
+    local tankUnit = IsInGroup() and self:FindShamanTankUnit() or "player"
+    if tankUnit and self:IsShamanSpellReady(S.EarthShield) then
+        local hasEarthShield, charges = self:HasBuff(tankUnit, S.EarthShield)
+        if (not hasEarthShield or (charges and charges <= 1)) and
+           self:CastShamanSpell(S.EarthShield, tankUnit) then
+            ShamanDebug("Earth Shield on " .. (UnitName(tankUnit) or tankUnit))
+            return true
+        end
+    end
+
+    if healTarget then
+        local hasRiptide = self:HasBuff(healTarget, S.Riptide)
+        if not hasRiptide and self:IsShamanSpellReady(S.Riptide) and
+           self:CastShamanSpell(S.Riptide, healTarget) then
+            ShamanDebug("Riptide on " .. (UnitName(healTarget) or healTarget))
+            return true
+        end
+
+        if groupAnalysis.needsChainHeal and not isMoving and self:IsShamanSpellReady(S.ChainHeal) then
+            local chainTarget = groupAnalysis.chainHealTargets[1] and
+                                groupAnalysis.chainHealTargets[1].unit or healTarget
+            if self:CastShamanSpell(S.ChainHeal, chainTarget) then
+                ShamanDebug("Chain Heal for " .. groupAnalysis.damagedMembers .. " injured allies")
+                return true
+            end
+        end
+
+        local hasTidalWaves = self:HasBuff("player", S.TidalWaves)
+        if healTargetHP < 0.60 and not isMoving and hasTidalWaves and
+           self:IsShamanSpellReady(S.HealingWave) and self:CastShamanSpell(S.HealingWave, healTarget) then
+            ShamanDebug("Tidal Waves Healing Wave")
+            return true
+        end
+        if healTargetHP < 0.78 and not isMoving and self:IsShamanSpellReady(S.LesserHealingWave) and
+           self:CastShamanSpell(S.LesserHealingWave, healTarget) then
+            ShamanDebug("Lesser Healing Wave spot heal")
+            return true
+        end
+        if healTargetHP < 0.60 and not isMoving and self:IsShamanSpellReady(S.HealingWave) and
+           self:CastShamanSpell(S.HealingWave, healTarget) then
+            ShamanDebug("Healing Wave large heal")
+            return true
+        end
+    end
+
+    if self:ManageShamanShields("Restoration", level) then return true end
+
+    local lowManaUsers = self:GetShamanGroupManaPressure()
+    if IsInGroup() and (manaPercent < 55 or lowManaUsers >= 2) and
+       self:IsShamanSpellReady(S.ManaTideTotem) and self:CastShamanSpell(S.ManaTideTotem) then
+        self.shamanProtectedTotemUntil = self.shamanProtectedTotemUntil or {}
+        self.shamanProtectedTotemGraceUntil = self.shamanProtectedTotemGraceUntil or {}
+        self.shamanProtectedTotemUntil[TotemTypes.WATER] = GetTime() + 12
+        self.shamanProtectedTotemGraceUntil[TotemTypes.WATER] = GetTime() + 3
+        ShamanDebug("Mana Tide for group mana pressure")
+        return true
+    end
+
+    -- Utility and setup are intentionally below urgent healing.
+    if self:HandleShamanCleansing() then return true end
+    if manaPercent > 45 and hasTarget and self:HandleShamanPurge() then return true end
     if self:DeployShamanTotems("Restoration", level, situation) then return true end
-    
-    -- Use defensive racials when needed
-    self:UseShamanRacials(false, true)
-    
-    if IsInGroup() then
-        -- EPIC PRIORITY: Handle cleansing and purging
-        if self:HandleShamanCleansing() then return true end
-        if self:HandleShamanPurge() then return true end
-        
-        -- Enhanced tank detection and Earth Shield management
-        local tankUnit = nil
-        
-        -- Check focus first
-        if UnitExists("focus") and UnitIsFriend("player", "focus") and not UnitIsDeadOrGhost("focus") then
-            tankUnit = "focus"
-        else
-            -- Auto-detect tank by class
-            local maxMembers = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
-            for i = 1, maxMembers do
-                local unit = GetNumRaidMembers() > 0 and "raid"..i or "party"..i
-                if UnitExists(unit) and not UnitIsDeadOrGhost(unit) then
-                    local _, uClass = UnitClass(unit)
-                    if uClass == "WARRIOR" or uClass == "PALADIN" or uClass == "DEATHKNIGHT" then
-                        tankUnit = unit
-                        break
-                    end
-                end
-            end
-        end
-        
-        -- Earth Shield maintenance on tank
-        if tankUnit and self:CanUseShamanSpell(S.EarthShield) and not self:HasBuff(tankUnit, S.EarthShield) then
-            if Throttle("EarthShield", 2.0) and self:CastShamanSpell(S.EarthShield, tankUnit) then
-                ShamanDebug("Earth Shield on tank: " .. UnitName(tankUnit))
-                return true
-            end
-        end
-        
-        -- Enhanced Mana Tide coordination
-        if manaPercent < 40 and self:CanUseShamanSpell(S.ManaTideTotem) and Throttle("ManaTide", 300) then
-            if self:CastShamanSpell(S.ManaTideTotem) then
-                ShamanDebug("Mana Tide for group mana regen")
-                return true
-            end
-        end
-        
-        -- Advanced healing target prioritization
-        local healTarget, healTargetHP, targetInfo = self:FindShamanHealingTarget("normal")
-        
-        if healTarget and healTargetHP < 0.95 then
-            -- Emergency cooldowns for critical situations
-            if healTargetHP < 0.30 then
-                -- Tidal Force for emergency burst healing
-                if self:CanUseShamanSpell(S.TidalForce) and Throttle("TidalForce", 180) then
-                    if self:CastShamanSpell(S.TidalForce) then
-                        ShamanDebug("Tidal Force emergency")
-                        return true
-                    end
-                end
-                
-                -- Nature's Swiftness for instant cast
-                if self:CanUseShamanSpell(S.NaturesSwiftness) then
-                    if self:CastShamanSpell(S.NaturesSwiftness) then
-                        ShamanDebug("Nature's Swiftness instant cast")
-                        return true
-                    end
-                end
-            end
-            
-            -- Riptide for HoT coverage
-            if self:CanUseShamanSpell(S.Riptide) and not self:HasBuff(healTarget, S.Riptide) then
-                if self:CastShamanSpell(S.Riptide, healTarget) then
-                    ShamanDebug("Riptide HoT on " .. UnitName(healTarget))
-                    return true
-                end
-            end
-            
-            -- Enhanced Chain Heal optimization
-            local groupAnalysis = self:AnalyzeGroupDamage()
-            if groupAnalysis.needsChainHeal and self:CanUseShamanSpell(S.ChainHeal) and manaPercent > 25 then
-                if self:CastShamanSpell(S.ChainHeal, healTarget) then
-                    ShamanDebug("Chain Heal (" .. groupAnalysis.damagedMembers .. " damaged, " .. 
-                               math.floor(groupAnalysis.avgHealth * 100) .. "% avg HP)")
-                    return true
-                end
-            end
-            
-            -- Single target healing priority
-            if healTargetHP < 0.50 and self:CanUseShamanSpell(S.HealingWave) and manaPercent > 20 then
-                if self:CastShamanSpell(S.HealingWave, healTarget) then
-                    ShamanDebug("Healing Wave on " .. UnitName(healTarget) .. " (" .. 
-                               math.floor(healTargetHP * 100) .. "% HP)")
-                    return true
-                end
-            end
-            
-            -- Lesser Healing Wave for efficiency
-            if healTargetHP < 0.80 and self:CanUseShamanSpell(S.LesserHealingWave) and manaPercent > 15 then
-                if self:CastShamanSpell(S.LesserHealingWave, healTarget) then
-                    ShamanDebug("Lesser Healing Wave (efficient heal)")
-                    return true
-                end
-            end
-        end
-    end
-    
-    -- DPS when safe (solo or high mana in group)
-    if hasTarget and (not IsInGroup() or manaPercent > 70) then
-        -- Flame Shock for DoT damage
+
+    if self:GetPlayerHealthPercent() < 45 and self:UseShamanRacials(false, true) then return true end
+
+    local safeToDPS = not healTarget and groupAnalysis.damagedMembers == 0 and
+                      (not IsInGroup() or manaPercent > 75)
+    if hasTarget and safeToDPS then
         local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
-        if self:CanUseShamanSpell(S.FlameShock) and flameShockDuration < 2 and manaPercent > 20 then
-            if self:CastShamanSpell(S.FlameShock) then
-                ShamanDebug("Flame Shock (Resto DPS)")
-                return true
-            end
+        local targetWillLive = self:IsShamanBossTarget("target") or targetHP > 20
+        if targetWillLive and flameShockDuration < 2.5 and self:IsShamanSpellReady(S.FlameShock) and
+           self:CastShamanSpell(S.FlameShock) then
+            ShamanDebug("Flame Shock during healing downtime")
+            return true
         end
-        
-        -- Lava Burst with Flame Shock synergy
-        if flameShockDuration > 2 and self:CanUseShamanSpell(S.LavaBurst) and manaPercent > 25 then
-            if self:CastShamanSpell(S.LavaBurst) then
-                ShamanDebug("Lava Burst (Resto DPS)")
-                return true
-            end
+        if not isMoving and flameShockDuration > 2.5 and self:IsShamanSpellReady(S.LavaBurst) and
+           self:CastShamanSpell(S.LavaBurst) then
+            ShamanDebug("Lava Burst during healing downtime")
+            return true
         end
-        
-        -- Lightning Bolt filler
-        if self:CanUseShamanSpell(S.LightningBolt) and manaPercent > 15 then
-            if self:CastShamanSpell(S.LightningBolt) then
-                ShamanDebug("Lightning Bolt (Resto filler)")
-                return true
-            end
+        if not isMoving and self:IsShamanSpellReady(S.LightningBolt) and
+           self:CastShamanSpell(S.LightningBolt) then
+            ShamanDebug("Lightning Bolt during healing downtime")
+            return true
         end
     end
-    
+
     return false
 end
 
@@ -1098,7 +1046,7 @@ function AC:CheckShamanBuffs(spec)
         end
         
         -- Only recall if we have multiple totems and low mana
-        if activeTotemCount >= 2 and self:CanUseShamanSpell(S.TotemicRecall) and Throttle("TotemicRecallOOC", 60) then
+        if activeTotemCount >= 2 and self:IsShamanSpellReady(S.TotemicRecall) then
             if self:CastShamanSpell(S.TotemicRecall) then
                 ShamanDebug("Totemic Recall for mana efficiency (OOC - " .. math.floor(manaPercent) .. "% mana, " .. activeTotemCount .. " totems)")
                 return true
@@ -1131,7 +1079,7 @@ function AC:UseShamanDefensives()
     
     -- Shamanistic Rage for damage reduction (Enhancement)
     local spec = self:GetPlayerSpec()
-    if spec == "Enhancement" and health < 60 and self:CanUseShamanSpell(S.ShamanisticRage) then
+    if spec == "Enhancement" and health < 60 and self:IsShamanSpellReady(S.ShamanisticRage) then
         if self:CastShamanSpell(S.ShamanisticRage) then
             ShamanDebug("Shamanistic Rage (defensive)")
             return true
@@ -1139,16 +1087,89 @@ function AC:UseShamanDefensives()
     end
     
     -- Self-heal with Maelstrom Weapon stacks
-    if spec == "Enhancement" and health < 50 then
+    if spec == "Enhancement" and health < 40 then
         local mwStacks = self:GetMaelstromStacks()
-        if mwStacks >= 3 and self:CanUseShamanSpell(S.HealingWave) then
+        if mwStacks >= 5 and self:IsShamanSpellReady(S.HealingWave) then
             if self:CastShamanSpell(S.HealingWave, "player") then
                 ShamanDebug("Emergency self-heal (" .. mwStacks .. " MW stacks)")
                 return true
             end
         end
     end
+
+    if spec ~= "Restoration" and health < 30 then
+        if self:HasBuff("player", S.NaturesSwiftness) and self:IsShamanSpellReady(S.HealingWave) and
+           self:CastShamanSpell(S.HealingWave, "player") then
+            ShamanDebug("Instant emergency self-heal")
+            return true
+        end
+        if self:IsShamanSpellReady(S.NaturesSwiftness) and self:CastShamanSpell(S.NaturesSwiftness) then
+            ShamanDebug("Nature's Swiftness for self-healing")
+            return true
+        end
+        if not self:IsPlayerMoving() and self:IsShamanSpellReady(S.LesserHealingWave) and
+           self:CastShamanSpell(S.LesserHealingWave, "player") then
+            ShamanDebug("Emergency Lesser Healing Wave")
+            return true
+        end
+        if not IsInGroup() and self:IsShamanSpellReady(S.StoneclawTotem) and
+           self:CastShamanSpell(S.StoneclawTotem) then
+            ShamanDebug("Stoneclaw Totem for solo survival")
+            return true
+        end
+    end
     
+    return false
+end
+
+function AC:ShamanLevelingRotation(level, hasTarget, targetHP, manaPercent, enemies)
+    if not hasTarget then return false end
+    if not IsCurrentSpell("Attack") then StartAttack() end
+
+    if self.TryInterrupt and self:TryInterrupt(S.WindShear, "target") then return true end
+
+    local classification = UnitClassification("target")
+    local durableTarget = classification == "elite" or classification == "rareelite" or
+                          classification == "worldboss" or enemies >= 2
+    if (durableTarget or IsInGroup()) and self:DeployShamanTotems("Leveling", level, "SOLO") then
+        return true
+    end
+
+    local close = CheckInteractDistance("target", 3)
+    local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
+    local mwStacks = self:GetMaelstromStacks()
+    if mwStacks >= 5 then
+        local spell = enemies >= 2 and S.ChainLightning or S.LightningBolt
+        if self:IsShamanSpellReady(spell) and self:CastShamanSpell(spell) then return true end
+    end
+
+    if close and self:IsShamanSpellReady(S.Stormstrike) and self:CastShamanSpell(S.Stormstrike) then
+        return true
+    end
+    if (durableTarget or targetHP > 25) and flameShockDuration < 2.5 and
+       self:IsShamanSpellReady(S.FlameShock) and self:CastShamanSpell(S.FlameShock) then
+        return true
+    end
+    if flameShockDuration > 4.5 and self:IsShamanSpellReady(S.EarthShock) and
+       self:CastShamanSpell(S.EarthShock) then
+        return true
+    end
+    if close and self:IsShamanSpellReady(S.LavaLash) and self:CastShamanSpell(S.LavaLash) then
+        return true
+    end
+
+    local fireTotem = self:GetActiveShamanTotem(TotemTypes.FIRE)
+    if close and enemies >= 2 and fireTotem and self:IsShamanSpellReady(S.FireNova) and
+       self:CastShamanSpell(S.FireNova) then
+        return true
+    end
+
+    -- Once the mob reaches melee, preserve weapon swings and mana instead of
+    -- hard-casting Lightning Bolt through the auto-attack cycle.
+    if not close and manaPercent > 10 and not self:IsPlayerMoving() and
+       self:IsShamanSpellReady(S.LightningBolt) and self:CastShamanSpell(S.LightningBolt) then
+        return true
+    end
     return false
 end
 
@@ -1174,31 +1195,39 @@ function AC:ShamanRotation()
         return false
     end
     
-    -- Find target if needed (except for Restoration in group)
-    if not hasTarget and spec ~= "Restoration" then
-        if self.FindAndSetTarget and self:FindAndSetTarget() then
-            hasTarget = true
-            ShamanDebug("Auto-targeted enemy")
-        else
-            return false
-        end
-    end
-    
     -- Emergency defensives
     if health < 40 then
         if self:UseShamanDefensives() then
             return true
         end
     end
-    
-    -- Enhanced shield management in combat
-    if self:ManageShamanShields(spec, level) then return true end
+
+    -- Find target if needed (except for Restoration, which must keep healing
+    -- even when no hostile target is selected).
+    if not hasTarget and spec ~= "Restoration" then
+        if self.FindAndSetTarget and self:FindAndSetTarget() then
+            hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and
+                        not UnitIsDeadOrGhost("target")
+            ShamanDebug("Auto-targeted enemy")
+        end
+        if not hasTarget then return false end
+    end
     
     -- Calculate combat parameters
     local targetHP = hasTarget and (self.GetTargetHealthPercent and self:GetTargetHealthPercent("target") or 
                      (UnitHealth("target") / UnitHealthMax("target") * 100)) or 100
     local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
     local enemies = self.GetEnemyCount and self:GetEnemyCount() or 1
+
+    -- Do not spend the interrupt window refreshing a shield. Restoration owns
+    -- this check inside its triage flow so a missing Water Shield cannot delay
+    -- an emergency heal.
+    local interruptibleCast = hasTarget and self.GetInterruptibleCastInfo and
+                              self:GetInterruptibleCastInfo("target")
+    if spec ~= "Restoration" and not interruptibleCast and
+       self:ManageShamanShields(spec, level) then
+        return true
+    end
 
     -- Spec-specific rotations
     local rotationResult = false
@@ -1208,37 +1237,8 @@ function AC:ShamanRotation()
         rotationResult = self:EnhancementRotation(level, hasTarget, targetHP, manaPercent, enemies)
     elseif spec == "Restoration" then 
         rotationResult = self:RestorationRotation(level, hasTarget, targetHP, manaPercent, enemies)
-    else 
-        -- Leveling rotation (simplified)
-        ShamanDebug("Using leveling rotation")
-        
-        if hasTarget then
-            -- Basic Flame Shock
-            if self:CanUseShamanSpell(S.FlameShock) and self:DebuffTimeRemaining("target", S.FlameShock) < 1 then
-                if self:CastShamanSpell(S.FlameShock) then
-                    rotationResult = true
-                end
-            end
-            
-            -- Earth Shock filler
-            if not rotationResult and self:CanUseShamanSpell(S.EarthShock) then
-                if self:CastShamanSpell(S.EarthShock) then
-                    rotationResult = true
-                end
-            end
-            
-            -- Lightning Bolt
-            if not rotationResult and self:CanUseShamanSpell(S.LightningBolt) then
-                if self:CastShamanSpell(S.LightningBolt) then
-                    rotationResult = true
-                end
-            end
-            
-            -- Auto-attack for melee
-            if CheckInteractDistance("target", 3) and not IsCurrentSpell("Attack") then 
-                StartAttack()
-            end
-        end
+    else
+        rotationResult = self:ShamanLevelingRotation(level, hasTarget, targetHP, manaPercent, enemies)
     end
     
     return rotationResult
@@ -1268,7 +1268,7 @@ function AC:ShamanDebugInfo()
     self:Print("=== ACTIVE TOTEMS ===")
     for i = 1, 4 do
         local totem, timeLeft = self:GetActiveShamanTotem(i)
-        local slotName = ({"Earth", "Air", "Fire", "Water"})[i]
+        local slotName = TotemSlotNames[i]
         if totem then
             self:Print(slotName .. ": " .. totem .. " (" .. math.floor(timeLeft) .. "s)")
         else
@@ -1312,7 +1312,7 @@ function AC:SetupShamanSlashCommands()
                     self:Print("=== TOTEM STATUS ===")
                     for i = 1, 4 do
                         local totem, timeLeft = self:GetActiveShamanTotem(i)
-                        local slotName = ({"Earth", "Air", "Fire", "Water"})[i]
+                        local slotName = TotemSlotNames[i]
                         if totem then
                             self:Print(slotName .. ": " .. totem .. " (" .. math.floor(timeLeft) .. "s remaining)")
                         else
@@ -1332,27 +1332,27 @@ function AC:SetupShamanSlashCommands()
                     
                     if spec == "Elemental" then
                         self:Print("WotLK 3.3.5a Elemental Priority:")
-                        self:Print("1. Flame Shock for Lava Burst synergy")
-                        self:Print("2. Lava Burst (guaranteed crit with FS)")
-                        self:Print("3. Chain Lightning for 2+ enemies")
+                        self:Print("1. Wind Shear and boss cooldowns")
+                        self:Print("2. Flame Shock > Lava Burst")
+                        self:Print("3. Fire Nova / Chain Lightning for AoE")
                         self:Print("4. Lightning Bolt filler")
-                        self:Print("5. Fire Nova for AoE with totems")
+                        self:Print("5. Safe movement shocks and Thunderstorm")
                         
                     elseif spec == "Enhancement" then
                         self:Print("WotLK 3.3.5a Enhancement Priority:")
-                        self:Print("1. Maelstrom Weapon 5-stack instants")
-                        self:Print("2. Stormstrike (Nature Vulnerability)")
-                        self:Print("3. Flame Shock maintenance")
-                        self:Print("4. Lava Lash (with off-hand)")
-                        self:Print("5. Earth Shock filler")
+                        self:Print("1. Fire Elemental / Feral Spirit on durable targets")
+                        self:Print("2. Fire Nova AoE / Maelstrom 5-stack instants")
+                        self:Print("3. Stormstrike and Shamanistic Rage")
+                        self:Print("4. Flame Shock > Earth Shock")
+                        self:Print("5. Fire Nova cleave > Lava Lash filler")
                         
                     elseif spec == "Restoration" then
                         self:Print("WotLK 3.3.5a Restoration Priority:")
-                        self:Print("1. Earth Shield on tank")
-                        self:Print("2. Emergency healing (Tank > Healer > DPS)")
-                        self:Print("3. Chain Heal for group damage")
-                        self:Print("4. Riptide for HoT coverage")
-                        self:Print("5. Efficient single-target heals")
+                        self:Print("1. Critical healing and Wind Shear")
+                        self:Print("2. Earth Shield tank maintenance")
+                        self:Print("3. Riptide / Chain Heal for Tidal Waves")
+                        self:Print("4. Tidal Waves single-target healing")
+                        self:Print("5. Mana Tide, cleanse, totems, then safe DPS")
                     else
                         self:Print("Unknown spec - using basic rotation")
                     end
