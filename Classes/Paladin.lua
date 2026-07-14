@@ -1000,6 +1000,27 @@ function AC:GetBestAvailableSeal(spec, level, manaPercent, combatContext, enemie
     return nil -- Should ideally always find SoR if level 1+
 end
 
+-- Missing seals are a functional failure, not an optional buff optimization:
+-- Judgement and melee seal procs depend on one being active. Refresh without
+-- the normal seal-switch throttle so an expiration in combat is repaired on
+-- the next available GCD.
+function AC:RefreshMissingPaladinSeal(spec, level, manaPercent, enemies)
+    if self:GetActiveSeal() then return false end
+
+    local bestSeal = self:GetBestAvailableSeal(spec, level, manaPercent, "missing", enemies)
+    if not bestSeal or not self:CanUsePaladinSpell(bestSeal) then return false end
+
+    if self:CastPaladinSpell(bestSeal, "player") then
+        PaladinDebug("Restored missing seal in combat: " .. bestSeal)
+        return true
+    end
+
+    if self.debugMode and self:Throttle("MissingSealCastFailure", 2) then
+        PaladinDebug("Missing seal detected but " .. bestSeal .. " could not be cast")
+    end
+    return false
+end
+
 -- SIMPLIFIED: WotLK judgement system - any judgement works with any seal
 function AC:CastJudgement()
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
@@ -1628,11 +1649,18 @@ function AC:PaladinRotation()
 
     if self:PaladinLevelingRecovery(spec, inCombat, health, manaPercent) then return true end
 
+    -- Holy emergency triage outranks spending a GCD on seal maintenance.
+    if spec == "Holy" and inCombat and self:PaladinEmergencyTriage() then return true end
+
+    -- Do this before normal Holy maintenance/healing and before DPS priorities;
+    -- otherwise any successful action above the old late seal check can starve
+    -- the refresh indefinitely.
+    if inCombat and self:RefreshMissingPaladinSeal(spec, level, manaPercent, enemies) then return true end
+
     -- A healer must remain functional when no hostile target is selected. This
     -- is common immediately after a tank pulls or while the last mob dies.
     if spec == "Holy" then
         if inCombat then
-            if self:PaladinEmergencyTriage() then return true end
             if self:MaintainHolyPaladinBuffs(manaPercent) then return true end
             if self:PaladinSmartHeal() then return true end
             if not hasTarget then return false end
@@ -1681,12 +1709,10 @@ function AC:PaladinRotation()
         local activeSeal = self:GetActiveSeal()
         local bestSeal = self:GetBestAvailableSeal(spec, level, manaPercent, "COMBAT", enemies)
         local shouldSwitchSeal = false
-        if not activeSeal then
-            shouldSwitchSeal = true
-        elseif spec == "Protection" and bestSeal and activeSeal ~= bestSeal then
+        if activeSeal and spec == "Protection" and bestSeal and activeSeal ~= bestSeal then
             shouldSwitchSeal = (bestSeal == S.SealCommand and enemies >= 3) or
                                ((bestSeal == S.SealVengeance or bestSeal == S.SealCorruption) and enemies <= 2)
-        elseif spec == "Retribution" and bestSeal and activeSeal ~= bestSeal then
+        elseif activeSeal and spec == "Retribution" and bestSeal and activeSeal ~= bestSeal then
             shouldSwitchSeal = (bestSeal == S.SealCommand and enemies >= 3) or
                                ((bestSeal == S.SealVengeance or bestSeal == S.SealCorruption) and enemies <= 2)
         end
