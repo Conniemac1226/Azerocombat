@@ -32,7 +32,7 @@ local S = {
     Charge = "Charge", Intercept = "Intercept", Hamstring = "Hamstring",
     
     -- Buffs/Debuffs
-    Rampage = "Rampage", SuddenDeath = "Sudden Death",
+    SuddenDeath = "Sudden Death",
     TasteForBlood = "Taste for Blood", SlamEffect = "Slam!",
     EnrageEffect = "Enrage", VictoryRushBuff = "Victorious",
     
@@ -68,7 +68,9 @@ local function QueueOnNextSwing(spellName, debugText)
         return false
     end
 
-    CastSpellByName(spellName, "target")
+    -- The second 3.3.5 argument is an onSelf boolean, not a unit token. These
+    -- are self/next-swing toggles, so queue them without a target argument.
+    CastSpellByName(spellName)
     if not IsCurrentSpell(spellName) then
         return false
     end
@@ -685,14 +687,6 @@ function AC:UseWarriorDefensives()
         end
     end
     
-    if (health < 35 or (spec == "Protection" and underHeavyPressure and health < 45)) and canRetry("trinkets", 20) then
-        if self:UseTrinketsFixed() then
-            markAttempt("trinkets")
-            WarriorDebug("Used defensive trinket")
-            return true
-        end
-    end
-    
     if (health < 30 or (spec == "Protection" and underHeavyPressure and health < 40)) and canRetry("defensivePotion", 20) then
         local usedPotion, reason = self:UseDefensivePotion(3)
         if usedPotion then
@@ -746,19 +740,44 @@ function AC:UseEnhancedSpellReflection()
         return false
     end
     
-    -- Check if target is casting a spell worth reflecting
-    local spellName, _, _, _, _, endTime = UnitCastingInfo("target")
-    
-    if not spellName then
-        spellName, _, _, _, _, endTime = UnitChannelInfo("target")
+    -- Spell Reflection only works on a spell aimed at the warrior (or, with
+    -- Improved Spell Reflection, a nearby friendly party member). Do not burn
+    -- it on an enemy healer's self-cast or another unrelated cast.
+    if not UnitExists("targettarget") then
+        return false
     end
-    
+
+    local castAimedAtPlayer = UnitIsUnit("targettarget", "player")
+    local canProtectParty = IsInGroup() and self:HasTalentByName("Improved Spell Reflection", "ImprovedSpellReflection")
+    local castAimedAtFriendly = canProtectParty and UnitIsFriend("player", "targettarget") and
+                                not UnitIsDeadOrGhost("targettarget")
+    if not castAimedAtPlayer and not castAimedAtFriendly then
+        return false
+    end
+
+    -- Channels have already landed by the time UnitChannelInfo reports them;
+    -- interrupt those instead of trying to reflect a later channel tick.
+    local spellName, _, _, _, _, endTime = UnitCastingInfo("target")
     if not spellName or not endTime then
         return false
     end
     
     local timeLeft = (endTime / 1000) - GetTime()
     local health = self:GetPlayerHealthPercent()
+
+    -- These casts cannot be reflected back as hostile targeted spells. This
+    -- also protects against an enemy healer retaining the warrior as a target
+    -- while using a self-cast modifier.
+    local nonReflectableSpells = {
+        "Blizzard", "Flamestrike", "Rain of Fire", "Hellfire", "Hurricane",
+        "Volley", "Arcane Explosion", "Holy Nova", "Psychic Scream", "Howl of Terror",
+        "Intimidating Shout", "Heal", "Holy Light", "Flash of Light", "Regrowth", "Tranquility"
+    }
+    for _, nonReflectable in ipairs(nonReflectableSpells) do
+        if spellName:find(nonReflectable) then
+            return false
+        end
+    end
 
     local function castReflection(reason)
         if self:CastSpell(S.SpellReflection, "player") then
@@ -771,21 +790,15 @@ function AC:UseEnhancedSpellReflection()
     -- High-priority dangerous spells that should ALWAYS be reflected
     local dangerousSpells = {
         -- Crowd Control (highest priority)
-        "Fear", "Psychic Scream", "Howl of Terror", "Intimidating Shout",
-        "Polymorph", "Hex", "Banish", "Hibernate", "Entangling Roots",
-        "Cyclone", "Freezing Trap", "Sap",
+        "Fear", "Polymorph", "Hex", "Banish", "Hibernate", "Entangling Roots", "Cyclone",
         
         -- High Damage Spells
-        "Fireball", "Greater Fireball", "Pyroblast", "Scorch", "Fire Blast",
-        "Frostbolt", "Ice Lance", "Cone of Cold", "Blizzard",
+        "Fireball", "Greater Fireball", "Pyroblast", "Scorch", "Frostbolt",
         "Lightning Bolt", "Chain Lightning", "Lava Burst", "Lightning Strike",
-        "Shadow Bolt", "Drain Soul", "Drain Life", "Shadowburn",
-        "Mind Blast", "Mind Flay", "Shadow Word: Pain", "Vampiric Touch",
-        "Wrath", "Starfire", "Moonfire", "Insect Swarm",
-        "Holy Light", "Flash of Light", "Greater Heal", "Heal",
+        "Shadow Bolt", "Mind Blast", "Vampiric Touch", "Wrath", "Starfire",
         
-        -- Debuffs and DoTs
-        "Curse of Agony", "Curse of Doom", "Corruption", "Immolate",
+        -- Casted debuffs and DoTs
+        "Immolate",
         "Unstable Affliction", "Haunt", "Seed of Corruption"
     }
     
@@ -829,13 +842,12 @@ function AC:UseWarriorOffensives()
     local targetHP = self:GetTargetHealthPercent("target")
     local targetMaxHealth = UnitHealthMax("target") or 0
     local targetClass = UnitClassification("target")
-    local spec = self:GetPlayerSpec()
-    
-    -- FIXED: Throttle offensive cooldowns to prevent spam
-    if not Throttle("WarriorOffensives", 5.0) then return false end
+    -- Poll quickly enough to place the second cooldown inside the first one's
+    -- burst window; the spell cooldowns remain the real spam protection.
+    if not Throttle("WarriorOffensives", 0.5) then return false end
     
     -- Don't blow CDs on trivial mobs
-    if targetClass == "trivial" or targetHP < 30 then
+    if targetClass == "trivial" or targetHP < 15 then
         return false
     end
     
@@ -846,32 +858,32 @@ function AC:UseWarriorOffensives()
     
     if not worthIt then return false end
     
-    -- FIXED: Check cooldowns before attempting
-    -- Recklessness (big DPS boost)
-    if self:IsUsableSpell(S.Recklessness) and self:GetSpellCooldown(S.Recklessness) == 0 and Throttle("Recklessness", 180) then
-        if self:CastSpell(S.Recklessness, "player") then
-            WarriorDebug("Recklessness - burst window")
-            -- Use offensive racial
+    self.warriorBurstWindowUntil = self.warriorBurstWindowUntil or 0
+
+    -- Death Wish is the primary Fury burst anchor and should carry racials and
+    -- on-use trinkets. Recklessness can then follow during the same window.
+    if self:KnowsSpell(S.DeathWish) and self:IsUsableSpell(S.DeathWish) and
+       self:GetSpellCooldown(S.DeathWish) == 0 and Throttle("DeathWish", 1.0) then
+        if self:CastSpell(S.DeathWish, "player") then
+            WarriorDebug("Death Wish - increased damage")
+            self.warriorBurstWindowUntil = GetTime() + 12
             self:UseRacialsWarrior(true, false)
-            -- Use offensive trinkets
             self:UseTrinketsFixed()
             return true
         end
     end
-    
-    -- Death Wish
-    if self:KnowsSpell(S.DeathWish) and self:IsUsableSpell(S.DeathWish) and self:GetSpellCooldown(S.DeathWish) == 0 and Throttle("DeathWish", 120) then
-        if self:CastSpell(S.DeathWish, "player") then
-            WarriorDebug("Death Wish - increased damage")
-            return true
-        end
-    end
-    
-    -- Arms handles Bladestorm inside its rotation so it does not delay Rend, Overpower, or Mortal Strike.
-    if spec ~= "Arms" and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm) and self:GetSpellCooldown(S.Bladestorm) == 0 and
-       (UnitExists("target") and self:GetEnemiesAtLocation("target", 10) >= 2 or targetHP > 50) and Throttle("Bladestorm", 90) then
-        if self:CastSpell(S.Bladestorm, "player") then
-            WarriorDebug("Bladestorm")
+
+    -- Recklessness is Berserker-Stance-only. Do not make Arms stance-dance;
+    -- Fury naturally satisfies this condition and can stack it with Death Wish.
+    local inBurstWindow = self:HasBuff("player", S.DeathWish) or GetTime() < self.warriorBurstWindowUntil
+    local deathWishUnavailable = not self:KnowsSpell(S.DeathWish) or self:GetSpellCooldown(S.DeathWish) > 0
+    if self:GetCurrentStance() == 3 and (inBurstWindow or deathWishUnavailable) and
+       self:IsUsableSpell(S.Recklessness) and self:GetSpellCooldown(S.Recklessness) == 0 and
+       Throttle("Recklessness", 1.0) then
+        if self:CastSpell(S.Recklessness, "player") then
+            WarriorDebug("Recklessness - burst window")
+            self:UseRacialsWarrior(true, false)
+            self:UseTrinketsFixed()
             return true
         end
     end
@@ -881,7 +893,7 @@ end
 
 -- ENHANCED: Better racial usage with cooldown checks
 function AC:UseRacialsWarrior(burst, emergency) 
-    local checkFrequency = (self:GetPlayerSpec() == "Protection") and 2.0 or 3.0  -- Increased throttle
+    local checkFrequency = emergency and 0.5 or ((self:GetPlayerSpec() == "Protection") and 2.0 or 3.0)
     if not Throttle("WarriorRacials", checkFrequency) then return false end
     
     local _, race = UnitRace("player")
@@ -899,6 +911,27 @@ function AC:UseRacialsWarrior(burst, emergency)
         end
         return false
     end
+
+    local function hasPlayerDebuff(types, nameFragments)
+        for i = 1, 40 do
+            local name, _, _, _, debuffType = UnitDebuff("player", i)
+            if not name then break end
+
+            if types and debuffType and types[debuffType] then
+                return true
+            end
+
+            local lowerName = string.lower(name)
+            if nameFragments then
+                for _, fragment in ipairs(nameFragments) do
+                    if string.find(lowerName, fragment, 1, true) then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
     
     -- Offensive racials during burst
     if burst and inCombat then
@@ -907,11 +940,29 @@ function AC:UseRacialsWarrior(burst, emergency)
     end
     
     -- Defensive/Emergency racials
-    if emergency or healthPercent < 50 then
-        if race == "DWARF" and castRacial(S.Stoneform, "Racial: Stoneform (Remove debuffs)") then return true end
-        if race == "HUMAN" and castRacial(S.EveryMan, "Racial: Every Man for Himself") then return true end
-        if race == "GNOME" and castRacial(S.EscapeArtist, "Racial: Escape Artist") then return true end
-        if (race == "UNDEAD" or race == "SCOURGE") and castRacial(S.WillOfForsaken, "Racial: Will of the Forsaken") then return true end
+    if emergency then
+        local hasFearCharmSleep = UnitIsFeared("player") or UnitIsCharmed("player") or
+            hasPlayerDebuff(nil, {"fear", "charm", "sleep", "hibernate", "wyvern sting"})
+        local hasLossOfControl = hasFearCharmSleep or hasPlayerDebuff(nil, {
+            "stun", "polymorph", "sap", "hex", "cyclone", "banish", "freeze",
+            "hammer of justice", "kidney shot", "cheap shot", "repentance", "gouge", "blind"
+        })
+        local hasMovementImpair = hasPlayerDebuff(nil, {
+            "slow", "root", "snare", "frost nova", "entangling roots", "hamstring",
+            "crippling poison", "chains of ice", "wing clip", "piercing howl"
+        })
+        local hasStoneformDebuff = hasPlayerDebuff({Poison = true, Disease = true}, {
+            "bleed", "rend", "rupture", "garrote", "rake", "rip", "deep wound"
+        })
+
+        if race == "DWARF" and (hasStoneformDebuff or healthPercent < 25) and
+           castRacial(S.Stoneform, "Racial: Stoneform (defensive)") then return true end
+        if race == "HUMAN" and hasLossOfControl and
+           castRacial(S.EveryMan, "Racial: Every Man for Himself") then return true end
+        if race == "GNOME" and hasMovementImpair and
+           castRacial(S.EscapeArtist, "Racial: Escape Artist") then return true end
+        if (race == "UNDEAD" or race == "SCOURGE") and hasFearCharmSleep and
+           castRacial(S.WillOfForsaken, "Racial: Will of the Forsaken") then return true end
         if race == "DRAENEI" and healthPercent < 70 and castRacial(S.GiftOfNaaru, "Racial: Gift of Naaru (HoT)") then return true end
     end
     
@@ -922,7 +973,7 @@ function AC:UseRacialsWarrior(burst, emergency)
            castRacial(S.WarStomp, "Racial: War Stomp (AoE Stun)") then return true end
         if race == "BLOODELF" and self:IsUsableSpell(S.ArcaneTorrent) and self:GetSpellCooldown(S.ArcaneTorrent) == 0 and self:IsInMeleeRange("target") then
             -- Use for rage generation or silence
-            local targetCasting = UnitCastingInfo("target")
+            local targetCasting = self:GetInterruptibleCastInfo("target")
             if targetCasting or UnitPower("player", 1) < 20 then
                 if castRacial(S.ArcaneTorrent, "Racial: Arcane Torrent") then return true end
             end
@@ -946,7 +997,8 @@ function AC:UseProtectionWarriorCombatRacials(nearbyEnemies)
                         targetClass == "worldboss" or nearbyEnemies >= 2 or
                         (IsInGroup() and targetHP > 50)
 
-    if not burstWindow and nearbyEnemies < 2 and UnitPower("player", 1) >= 20 and not UnitCastingInfo("target") then
+    if not burstWindow and nearbyEnemies < 2 and UnitPower("player", 1) >= 20 and
+       not self:GetInterruptibleCastInfo("target") then
         return false
     end
 
@@ -1119,7 +1171,7 @@ function AC:TryArmsInterrupt(unit)
         return false
     end
 
-    local spellName, _, _, _, _, endTime, _, _, uninterruptible = UnitCastingInfo(unit)
+    local spellName, _, uninterruptible = self:GetInterruptibleCastInfo(unit)
     if not spellName or uninterruptible then
         return false
     end
@@ -1136,6 +1188,15 @@ function AC:TryArmsInterrupt(unit)
         end
     end
 
+    -- Never stance-dance Arms for an interrupt. Shield Bash is still available
+    -- when the player has deliberately equipped a shield in Battle/Defensive.
+    if (currentStance == 1 or currentStance == 2) and IsEquippedItemType("Shields") then
+        if self:TryInterrupt(S.ShieldBash, unit) then
+            WarriorDebug("Arms: Shield Bash interrupt (no stance swap)")
+            return true
+        end
+    end
+
     return false
 end
 
@@ -1146,7 +1207,7 @@ function AC:TryFuryInterrupt(unit)
         return false
     end
 
-    local spellName, _, _, _, _, endTime, _, _, uninterruptible = UnitCastingInfo(unit)
+    local spellName, endTime, uninterruptible = self:GetInterruptibleCastInfo(unit)
     if not spellName or uninterruptible then
         return false
     end
@@ -1215,6 +1276,39 @@ function AC:HasTalentByName(talentName, cacheKey)
         value = found
     }
     return found
+end
+
+function AC:GetWarriorTalentRank(talentName, cacheKey)
+    if not talentName then return 0 end
+
+    self.warriorTalentRankCache = self.warriorTalentRankCache or {}
+    local key = cacheKey or talentName
+    local now = GetTime()
+    local cached = self.warriorTalentRankCache[key]
+    if cached and (now - cached.time) < 5 then
+        return cached.rank
+    end
+
+    local rank = 0
+    local success, numTabs = pcall(GetNumTalentTabs)
+    if success then
+        for tab = 1, numTabs do
+            local tabSuccess, numTalents = pcall(GetNumTalents, tab)
+            if tabSuccess then
+                for talent = 1, numTalents do
+                    local talentSuccess, name, _, _, _, currentRank = pcall(GetTalentInfo, tab, talent)
+                    if talentSuccess and name and name:find(talentName) then
+                        rank = currentRank or 0
+                        break
+                    end
+                end
+                if rank > 0 then break end
+            end
+        end
+    end
+
+    self.warriorTalentRankCache[key] = {time = now, rank = rank}
+    return rank
 end
 
 function AC:HasWarbringerTalent()
@@ -1387,8 +1481,9 @@ function AC:ShouldMaintainArmsSunder(unit)
         return false
     end
 
-    -- Expose Armor shares the same armor-debuff slot. Don't fight it.
-    if self:HasDebuff(unit, "Expose Armor") then
+    -- Expose Armor and a hunter worm's Acid Spit share the major armor-debuff
+    -- slot. Do not spend filler globals fighting equivalent coverage.
+    if self:HasDebuff(unit, "Expose Armor") or self:HasDebuff(unit, "Acid Spit") then
         return false
     end
 
@@ -1847,14 +1942,11 @@ function AC:ProtectionWarriorRotation()
             end
         end
         
-        -- Enhanced interrupt system - Protection stays in Defensive Stance for Shield Bash.
-        if UnitCastingInfo("target") then
-            -- Shield Bash first (Protection preferred, silences for 6 seconds)
-            if self:IsUsableSpell(S.ShieldBash) and self:GetSpellCooldown(S.ShieldBash) == 0 then
-                if not self:CastSpell(S.ShieldBash, "target") then return false end
-                WarriorDebug("Prot: Shield Bash interrupt")
-                return true
-            end
+        -- Protection stays in Defensive Stance and uses the shared cast/channel
+        -- priority filter, including the not-interruptible flag.
+        if IsEquippedItemType("Shields") and self:TryInterrupt(S.ShieldBash, "target") then
+            WarriorDebug("Prot: Shield Bash interrupt")
+            return true
         end
         
         -- Victory Rush for free healing
@@ -2050,6 +2142,70 @@ function AC:ArmsWarriorRotation()
     if hasTarget then StartAttack() end
     if not inCombat and hasTarget and level >= 4 then
         if self:TryCharge() then return true end
+    end
+
+    -- Recklessness is the one Arms utility worth a controlled stance dance.
+    -- Keep interrupt handling stance-locked, but allow this five-minute burst
+    -- cooldown on boss-like targets when no proc is waiting and little rage can
+    -- be lost through a fully talented Tactical Mastery swap.
+    local now = GetTime()
+    self.armsRecklessnessPendingUntil = self.armsRecklessnessPendingUntil or 0
+    self.armsRecklessnessTargetGUID = self.armsRecklessnessTargetGUID or nil
+    if self.armsRecklessnessPendingUntil <= now then
+        self.armsRecklessnessPendingUntil = 0
+        self.armsRecklessnessTargetGUID = nil
+    end
+
+    local targetGUID = hasTarget and UnitGUID("target") or nil
+    local armsRecklessnessPending = self.armsRecklessnessPendingUntil > now and hasTarget and
+                                    targetGUID == self.armsRecklessnessTargetGUID
+    local targetMaxHealth = hasTarget and (UnitHealthMax("target") or 0) or 0
+    local playerMaxHealth = UnitHealthMax("player") or 1
+    local targetClassification = hasTarget and UnitClassification("target") or "normal"
+    local bossLikeTarget = targetClassification == "worldboss" or targetClassification == "rareelite" or
+                           targetMaxHealth >= playerMaxHealth * 6
+    local shouldStartArmsRecklessness = inCombat and hasTarget and currentStance == 1 and bossLikeTarget and
+        self:IsInMeleeRange("target") and self:GetTargetHealthPercent("target") > 50 and rage <= 30 and
+        self:GetWarriorTalentRank("Tactical Mastery", "TacticalMasteryRank") >= 3 and
+        self:KnowsSpell(S.Recklessness) and self:GetSpellCooldown(S.Recklessness) == 0 and
+        not self:HasBuff("player", S.TasteForBlood) and not self:HasBuff("player", S.SuddenDeath) and
+        self:DebuffTimeRemaining("target", S.Rend) > 3 and not armsRecklessnessPending and
+        Throttle("ArmsRecklessnessStart", 5.0)
+
+    if shouldStartArmsRecklessness then
+        self.armsRecklessnessPendingUntil = now + 3.0
+        self.armsRecklessnessTargetGUID = targetGUID
+        armsRecklessnessPending = true
+    end
+
+    if armsRecklessnessPending then
+        local pendingTargetValid = hasTarget and targetGUID == self.armsRecklessnessTargetGUID and
+                                   self:GetTargetHealthPercent("target") > 20
+        if not pendingTargetValid then
+            self.armsRecklessnessPendingUntil = 0
+            self.armsRecklessnessTargetGUID = nil
+            armsRecklessnessPending = false
+        elseif currentStance ~= 3 then
+            if self:ForceBerserkerStance() then
+                WarriorDebug("Arms: Berserker Stance for Recklessness")
+                return true
+            end
+        elseif self:IsUsableSpell(S.Recklessness) and self:GetSpellCooldown(S.Recklessness) == 0 then
+            if self:CastSpell(S.Recklessness, "player") then
+                self.armsRecklessnessPendingUntil = 0
+                self.armsRecklessnessTargetGUID = nil
+                self.warriorBurstWindowUntil = now + 12
+                self:UseRacialsWarrior(true, false)
+                self:UseTrinketsFixed()
+                WarriorDebug("Arms: Recklessness burst")
+                return true
+            end
+            self.armsRecklessnessPendingUntil = 0
+            self.armsRecklessnessTargetGUID = nil
+            armsRecklessnessPending = false
+        else
+            return false
+        end
     end
 
     -- Stance management
@@ -2365,9 +2521,15 @@ function AC:FuryWarriorRotation()
     self.furyRendWeavePendingUntil = self.furyRendWeavePendingUntil or 0
     self.furyRendWeaveLastAttempt = self.furyRendWeaveLastAttempt or 0
     self.furyRendWeaveTargetGUID = self.furyRendWeaveTargetGUID or nil
+    self.furyShatteringThrowPendingUntil = self.furyShatteringThrowPendingUntil or 0
+    self.furyShatteringThrowTargetGUID = self.furyShatteringThrowTargetGUID or nil
     if self.furyRendWeavePendingUntil <= now then
         self.furyRendWeavePendingUntil = 0
         self.furyRendWeaveTargetGUID = nil
+    end
+    if self.furyShatteringThrowPendingUntil <= now then
+        self.furyShatteringThrowPendingUntil = 0
+        self.furyShatteringThrowTargetGUID = nil
     end
 
     local targetGUID = hasTarget and UnitGUID("target") or nil
@@ -2379,12 +2541,18 @@ function AC:FuryWarriorRotation()
     end
 
     local rendWeavePending = self.furyRendWeavePendingUntil > now and hasTarget and targetGUID == self.furyRendWeaveTargetGUID
+    local shatteringThrowPending = self.furyShatteringThrowPendingUntil > now and hasTarget and
+                                   targetGUID == self.furyShatteringThrowTargetGUID
     local preTargetHP = hasTarget and self:GetTargetHealthPercent("target") or 100
     local preNearbyEnemies = hasTarget and self:GetEnemiesInThunderClapReach(20) or 0
     local preTargetClassification = hasTarget and UnitClassification("target") or "normal"
+    local preTargetMaxHealth = hasTarget and (UnitHealthMax("target") or 0) or 0
+    local playerMaxHealth = UnitHealthMax("player") or 1
     local inGroup = IsInGroup()
     local durableGroupTarget = preTargetClassification == "elite" or preTargetClassification == "rareelite" or
                                preTargetClassification == "worldboss"
+    local bossLikeGroupTarget = inGroup and (preTargetClassification == "worldboss" or
+                                preTargetMaxHealth >= playerMaxHealth * 6)
     local canRendWeave = self:HasTalentByName("Improved Rend", "ImprovedRend") and
                          self:HasWarriorGlyph("Glyph of Rending")
     local preBTCooldown = self:GetSpellCooldown(S.Bloodthirst)
@@ -2402,8 +2570,57 @@ function AC:FuryWarriorRotation()
         and self:IsUsableSpell(S.Rend)
         and self:GetSpellCooldown(S.Rend) == 0
 
+    -- Shattering Throw is valuable raid armor utility but requires Battle
+    -- Stance and 25 rage. Only start the dance with Tactical Mastery, at nearly
+    -- exactly the retained-rage cap, and well away from core Fury buttons.
+    local shouldStartShatteringThrow = inCombat and hasTarget and bossLikeGroupTarget and
+        preNearbyEnemies < 2 and not shatteringThrowPending and
+        self:GetWarriorTalentRank("Tactical Mastery", "TacticalMasteryRank") >= 3 and
+        self:KnowsSpell(S.ShatteringThrow) and
+        self:GetSpellCooldown(S.ShatteringThrow) == 0 and
+        preTargetHP > 35 and rage >= 25 and rage <= 30 and
+        preBTCooldown > 2.5 and preWWCooldown > 2.5 and
+        not self:HasBuff("player", S.SlamEffect) and not self:IsPlayerMoving() and
+        not UnitCastingInfo("player") and Throttle("FuryShatteringThrowStart", 5.0)
+
+    if shouldStartShatteringThrow then
+        self.furyShatteringThrowPendingUntil = now + 3.0
+        self.furyShatteringThrowTargetGUID = targetGUID
+        shatteringThrowPending = true
+    end
+
+    if shatteringThrowPending then
+        local pendingTargetValid = hasTarget and targetGUID == self.furyShatteringThrowTargetGUID and
+                                   preTargetHP > 20 and not self:IsPlayerMoving()
+        if not pendingTargetValid or rage < 25 then
+            self.furyShatteringThrowPendingUntil = 0
+            self.furyShatteringThrowTargetGUID = nil
+            shatteringThrowPending = false
+        elseif currentStance ~= 1 then
+            if self:ForceBattleStance() then
+                WarriorDebug("Fury: Battle Stance for Shattering Throw")
+                return true
+            end
+        elseif self:IsUsableSpell(S.ShatteringThrow) and self:GetSpellCooldown(S.ShatteringThrow) == 0 and
+               not UnitCastingInfo("player") then
+            if self:CastSpell(S.ShatteringThrow, "target") then
+                self.furyShatteringThrowPendingUntil = 0
+                self.furyShatteringThrowTargetGUID = nil
+                WarriorDebug("Fury: Shattering Throw raid utility")
+                return true
+            end
+            self.furyShatteringThrowPendingUntil = 0
+            self.furyShatteringThrowTargetGUID = nil
+            shatteringThrowPending = false
+        else
+            -- Hold Battle Stance briefly for the stance/GCD state to settle.
+            return false
+        end
+    end
+
     -- Stance management
-    if inCombat and level >= 30 and currentStance ~= 3 and not (currentStance == 1 and (shouldStartRendWeave or rendWeavePending)) then
+    if inCombat and level >= 30 and currentStance ~= 3 and
+       not (currentStance == 1 and (shouldStartRendWeave or rendWeavePending or shatteringThrowPending)) then
         if self:ForceBerserkerStance() then return true end
     elseif inCombat and level < 30 and currentStance ~= 1 then
         if self:ForceBattleStance() then return true end
@@ -2487,13 +2704,6 @@ function AC:FuryWarriorRotation()
         -- Victory Rush
         if self:TryVictoryRush() then return true end
 
-        -- Rampage upkeep is core Fury maintenance in WotLK.
-        if self:KnowsSpell(S.Rampage) and not self:HasBuff("player", S.Rampage) and self:IsUsableSpell(S.Rampage) and rage >= 20 then
-            if not self:CastSpell(S.Rampage) then return false end
-            WarriorDebug("Fury: Rampage upkeep")
-            return true
-        end
-
         -- Keep shout buff maintained in combat.
         local combatShout = self:GetPreferredWarriorShout("Fury")
         if combatShout and rage >= 10 and Throttle("FuryCombatShout", 10) and self:IsUsableSpell(combatShout) then
@@ -2550,6 +2760,17 @@ function AC:FuryWarriorRotation()
            and Throttle("FurySlamProc", 0.35) then
             if self:CastSpell(S.Slam, "target") then
                 WarriorDebug("Fury: Slam proc")
+                return true
+            end
+        end
+
+        -- Maintain the major armor debuff only on durable grouped targets and
+        -- only when BT, Whirlwind, and Bloodsurge are safely out of the way.
+        if bossLikeGroupTarget and rage >= 15 and not self:HasBuff("player", S.SlamEffect) and
+           self:GetSpellCooldown(S.Bloodthirst) > 1.5 and self:GetSpellCooldown(S.Whirlwind) > 1.5 and
+           self:ShouldMaintainArmsSunder("target") and Throttle("FurySunderMaintain", 1.2) then
+            if self:CastSpell(S.SunderArmor, "target") then
+                WarriorDebug("Fury: Sunder Armor maintenance")
                 return true
             end
         end
@@ -2693,7 +2914,9 @@ function AC:LevelingWarriorRotation()
         return true
     end
 
-    if level >= 8 and self:HasBuff("player", S.TasteForBlood) and self:IsUsableSpell(S.Overpower) and rage >= 5 then
+    -- IsUsableSpell covers both Taste for Blood and ordinary dodge procs. The
+    -- latter matters for untalented/low-level characters.
+    if level >= 12 and self:KnowsSpell(S.Overpower) and self:IsUsableSpell(S.Overpower) and rage >= 5 then
         if not self:CastSpell(S.Overpower, "target") then return false end
         WarriorDebug("Leveling mode: Overpower")
         return true
@@ -2766,6 +2989,11 @@ function AC:InitWarriorRotations()
     self.furyRendWeavePendingUntil = 0
     self.furyRendWeaveLastAttempt = 0
     self.furyRendWeaveTargetGUID = nil
+    self.furyShatteringThrowPendingUntil = 0
+    self.furyShatteringThrowTargetGUID = nil
+    self.armsRecklessnessPendingUntil = 0
+    self.armsRecklessnessTargetGUID = nil
+    self.warriorBurstWindowUntil = 0
     
     -- FIXED: Register all spec rotations
     self.rotations["WARRIOR"]["Arms"] = function(s) return s:WarriorRotation() end
@@ -2790,6 +3018,11 @@ function AC:InitWarriorRotations()
             end
             self.furyRendWeavePendingUntil = 0
             self.furyRendWeaveTargetGUID = nil
+            self.furyShatteringThrowPendingUntil = 0
+            self.furyShatteringThrowTargetGUID = nil
+            self.armsRecklessnessPendingUntil = 0
+            self.armsRecklessnessTargetGUID = nil
+            self.warriorBurstWindowUntil = 0
             WarriorDebug("Combat ended - cleaned up tracking data")
         end)
         

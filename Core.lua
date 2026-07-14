@@ -2644,13 +2644,33 @@ function AC:ShouldInterruptSpell(spellName)
     return false
 end
 
+-- Return the active cast or channel using a single WotLK-safe shape. Different
+-- 3.3.5 clients expose the not-interruptible flag in the eighth or ninth slot,
+-- so accept a literal boolean from either position.
+function AC:GetInterruptibleCastInfo(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) then return nil end
+
+    local spellName, _, _, _, _, endTime, _, flagEight, flagNine = UnitCastingInfo(unit)
+    if spellName then
+        return spellName, endTime, flagEight == true or flagNine == true, false
+    end
+
+    spellName, _, _, _, _, endTime, _, flagEight, flagNine = UnitChannelInfo(unit)
+    if spellName then
+        return spellName, endTime, flagEight == true or flagNine == true, true
+    end
+
+    return nil
+end
+
 -- Enhanced interrupt function for all classes
 function AC:TryInterrupt(interruptSpell, unit)
     unit = unit or "target"
-    
+
     if not UnitExists(unit) then return false end
-    
-    local spellName, _, _, _, _, _, _, _, uninterruptible = UnitCastingInfo(unit)
+
+    local spellName, _, uninterruptible = self:GetInterruptibleCastInfo(unit)
     if not spellName or uninterruptible then return false end
     
     -- Check if we should interrupt this spell
