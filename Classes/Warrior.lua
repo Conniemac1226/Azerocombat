@@ -1027,10 +1027,20 @@ function AC:WarriorHasAttackPowerBuff()
         ["Blessing of Might"] = true, 
         ["Greater Blessing of Might"] = true,
     }
+
+    -- Prefer exact name lookup so a sparse/stale indexed aura list cannot make
+    -- the Warrior overwrite a Paladin's Might at combat start.
+    for buffName in pairs(buffsToCheck) do
+        if UnitBuff("player", buffName) then
+            if Throttle("ConflictingBuffDebug", 10.0) then
+                WarriorDebug("Found active attack power buff: " .. buffName)
+            end
+            return true
+        end
+    end
     
-    for i = 1, 32 do
+    for i = 1, 40 do
         local buffName = UnitBuff("player", i)
-        if not buffName then break end
         if buffsToCheck[buffName] then
             if Throttle("ConflictingBuffDebug", 10.0) then
                 WarriorDebug("Found active attack power buff: " .. buffName)
@@ -1049,9 +1059,12 @@ function AC:WarriorHasCommandingBuff()
         ["Prayer of Fortitude"] = true,
     }
 
-    for i = 1, 32 do
+    for buffName in pairs(buffsToCheck) do
+        if UnitBuff("player", buffName) then return true end
+    end
+
+    for i = 1, 40 do
         local buffName = UnitBuff("player", i)
-        if not buffName then break end
         if buffsToCheck[buffName] then
             return true
         end

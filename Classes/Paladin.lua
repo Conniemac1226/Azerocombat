@@ -178,8 +178,83 @@ local SpellLevels = {
     [S.CrusaderAura] = 62,
 }
 
+-- WotLK party-unit aura queries are most reliable when buffs are scanned by
+-- index. Keep blessing recognition in one place so the maintenance and cast
+-- paths cannot disagree about whether a unit is already blessed.
+local BlessingTypes = {
+    [S.BlessingOfMight] = "Might",
+    [S.GreaterBlessingOfMight] = "Might",
+    [S.BlessingOfWisdom] = "Wisdom",
+    [S.GreaterBlessingOfWisdom] = "Wisdom",
+    [S.BlessingOfKings] = "Kings",
+    [S.GreaterBlessingOfKings] = "Kings",
+    [S.BlessingOfSanctuary] = "Sanctuary",
+    [S.GreaterBlessingOfSanctuary] = "Sanctuary",
+}
+
+local PaladinDebug
+
+local function GetUnitBlessing(unit)
+    if not unit or not UnitExists(unit) then return nil, nil end
+
+    for i = 1, 40 do
+        local buffName = UnitBuff(unit, i)
+        local blessingType = BlessingTypes[buffName]
+        if blessingType then
+            return buffName, blessingType
+        end
+    end
+
+    return nil, nil
+end
+
+local function UnitHasBuffByScan(unit, wantedBuff)
+    if not unit or not wantedBuff or not UnitExists(unit) then return false end
+
+    -- Name lookup is the most direct path on 3.3.5; retain the full scan for
+    -- private-server clients that do not support named party aura queries.
+    local directName = UnitBuff(unit, wantedBuff)
+    if directName == wantedBuff then return true end
+
+    for i = 1, 40 do
+        local buffName = UnitBuff(unit, i)
+        if buffName == wantedBuff then return true end
+    end
+
+    return false
+end
+
+local PaladinAuras = {
+    [S.DevotionAura] = true,
+    [S.RetributionAura] = true,
+    [S.ConcentrationAura] = true,
+    [S.FireResistanceAura] = true,
+    [S.FrostResistanceAura] = true,
+    [S.ShadowResistanceAura] = true,
+    [S.CrusaderAura] = true,
+}
+
+local function GetPlayerPaladinAura()
+    local ownAura = nil
+    local casterlessAura = nil
+    local activeAuras = {}
+    for i = 1, 40 do
+        local buffName, _, _, _, _, _, _, caster = UnitBuff("player", i)
+        if PaladinAuras[buffName] then
+            activeAuras[buffName] = true
+            if caster == "player" or (caster and UnitExists(caster) and UnitIsUnit(caster, "player")) then
+                ownAura = ownAura or buffName
+            end
+            -- Some private-server clients omit the caster field. Preserve a
+            -- usable fallback without mistaking a known ally aura for ours.
+            if not caster then casterlessAura = casterlessAura or buffName end
+        end
+    end
+    return ownAura or casterlessAura, activeAuras
+end
+
 -- FIXED: Debug function with correct class label
-local function PaladinDebug(msg)
+PaladinDebug = function(msg)
     if AC.debugMode then
         AC:Debug("|cFFFFD700Paladin:|r " .. tostring(msg))
     end
@@ -233,7 +308,8 @@ function AC:GetSpellIndex(spellName)
     return nil
 end
 
--- Cast blessing on specific unit with proper targeting
+-- Cast a blessing on a specific unit without relying on the unsupported
+-- CastSpell return value or on ambiguous character names.
 function AC:CastBlessingOnUnit(spellName, unit)
     if not spellName or not unit or not UnitExists(unit) then
         PaladinDebug("Invalid blessing target: " .. (unit or "nil"))
@@ -260,32 +336,15 @@ function AC:CastBlessingOnUnit(spellName, unit)
         end
     end
     
-    -- Check what blessings the unit already has
-    local existingBlessings = {}
-    for i = 1, 40 do
-        local buffName = UnitBuff(unit, i)
-        if buffName and string.find(buffName, "Blessing") then
-            existingBlessings[buffName] = true
-            PaladinDebug(UnitName(unit) .. " already has: " .. buffName)
-        end
-    end
-    
-    -- If they already have this specific blessing, don't recast it
-    if existingBlessings[spellName] then
-        PaladinDebug("Unit already has " .. spellName .. ", skipping")
+    local existingBlessing, existingType = GetUnitBlessing(unit)
+    local requestedType = BlessingTypes[spellName]
+    if existingBlessing and (existingBlessing == spellName or existingType == requestedType) then
+        PaladinDebug((UnitName(unit) or unit) .. " already has " .. existingBlessing .. ", skipping")
         return false
     end
-    
-    -- If they have a different blessing and we're trying to cast the same type, skip
-    -- (e.g., they have Greater Blessing of Might and we're trying regular Blessing of Might)
-    local spellBase = string.match(spellName, "Blessing of (%w+)")
-    if spellBase then
-        for existing, _ in pairs(existingBlessings) do
-            if string.find(existing, spellBase) then
-                PaladinDebug("Unit already has a " .. spellBase .. " blessing: " .. existing)
-                return false
-            end
-        end
+    if requestedType == "Might" and UnitHasBuffByScan(unit, "Battle Shout") then
+        PaladinDebug((UnitName(unit) or unit) .. " has Battle Shout; skipping conflicting " .. spellName)
+        return false
     end
     
     -- Skip range check for self
@@ -311,7 +370,7 @@ function AC:CastBlessingOnUnit(spellName, unit)
         return false
     end
     
-    local unitName = UnitName(unit)
+    local unitName = UnitName(unit) or unit
     PaladinDebug("Attempting to bless " .. unitName .. " (" .. unit .. ") with " .. spellName)
     
     -- Check if unit is actually in our party/raid
@@ -335,159 +394,39 @@ function AC:CastBlessingOnUnit(spellName, unit)
         return false
     end
     
-    -- Store original target
-    local originalTarget = UnitExists("target") and UnitGUID("target") or nil
-    local originalTargetName = UnitExists("target") and UnitName("target") or nil
-    
-    -- CRITICAL: Clear target completely first
-    ClearTarget()
-    
-    -- Small delay to ensure clear completes
-    local attempts = 0
-    while UnitExists("target") and attempts < 3 do
-        ClearTarget()
-        attempts = attempts + 1
-    end
-    
-    -- Target the unit using the unit ID directly
-    TargetUnit(unit)
-    
-    -- Verify we targeted correctly - this is where it might fail
-    if not UnitExists("target") then
-        PaladinDebug("ERROR: No target after TargetUnit(" .. unit .. ")")
-        -- Try to restore
-        if originalTargetName then
-            TargetLastEnemy()
-        end
-        return false
-    end
-    
-    local actualTarget = UnitName("target")
-    if actualTarget ~= unitName then
-        PaladinDebug("ERROR: Wrong target! Expected " .. unitName .. " but got " .. actualTarget)
-        -- The targeting failed - this is the issue!
-        -- Try alternative method - assist the unit then retarget
-        AssistUnit(unit)  -- Target what they're targeting
-        TargetUnit(unit)  -- Then target them
-        
-        -- Check again
-        actualTarget = UnitExists("target") and UnitName("target") or "nothing"
-        if actualTarget ~= unitName then
-            PaladinDebug("ERROR: Still wrong target after assist! Got " .. actualTarget)
-            -- Last attempt - cycle through friends
-            for i = 1, 5 do
-                TargetNearestFriend()
-                if UnitExists("target") and UnitName("target") == unitName then
-                    PaladinDebug("Found target via TargetNearestFriend after " .. i .. " attempts")
-                    break
-                end
-            end
-        end
-    end
-    
-    -- Final check
-    if not (UnitExists("target") and UnitName("target") == unitName) then
-        PaladinDebug("ERROR: GIVING UP - Cannot target " .. unitName)
-        if originalTargetName then
-            TargetLastEnemy()
-        end
-        return false
-    end
-    
-    -- WE HAVE THE RIGHT TARGET - CAST THE SPELL
-    PaladinDebug("SUCCESS: Targeted " .. UnitName("target") .. " - casting " .. spellName)
-    
-    -- Check our own blessing status BEFORE cast
-    local selfHadBlessing = self:HasAnyBlessing("player")
-    
-    -- CRITICAL FIX: In WotLK, CastSpellByName doesn't accept unit parameter!
-    -- We MUST have the right target selected first
-    
-    -- Final verification that we have the right target
-    if not (UnitExists("target") and UnitName("target") == unitName) then
-        PaladinDebug("CRITICAL ERROR: Lost target before cast!")
-        return false
-    end
-    
-    -- Cast using the spell index (most reliable for targeted spells)
-    local castStarted = CastSpell(spellIndex, bookType)
-    
-    -- Check if the cast actually started
-    if not castStarted then
-        PaladinDebug("ERROR: CastSpell returned false/nil - spell did not cast!")
-        -- Try fallback with CastSpellByName on current target
-        CastSpellByName(spellName)
-        PaladinDebug("Attempted fallback cast with CastSpellByName")
-    end
-    
-    -- Check if spell entered targeting mode (shouldn't happen for blessings on friendly target)
-    local castConfirmed = UnitCastingInfo("player") or UnitChannelInfo("player") or
-                          (SpellIsTargeting and SpellIsTargeting()) or
-                          self:GetSpellCooldown(spellName) > 0.05
+    local hadOriginalTarget = UnitExists("target")
+    local targetWasUnit = hadOriginalTarget and UnitIsUnit("target", unit)
+    if not targetWasUnit then TargetUnit(unit) end
 
-    if SpellIsTargeting() then
-        PaladinDebug("Spell entered targeting mode - applying to " .. unit)
+    if not UnitExists("target") or not UnitIsUnit("target", unit) then
+        PaladinDebug("ERROR: Cannot target " .. unitName .. " for " .. spellName)
+        return false
+    end
+
+    local beforeSpellCooldown = self:GetSpellCooldown(spellName)
+    local beforeGlobalCooldown = self:GetSpellCooldown(61304)
+    CastSpell(spellIndex, bookType)
+
+    if SpellIsTargeting and SpellIsTargeting() then
         SpellTargetUnit(unit)
-    else
-        PaladinDebug("Spell cast on current target: " .. UnitName("target"))
     end
-    
-    -- Check if we're actually casting
-    local castingSpell = UnitCastingInfo("player")
-    if castingSpell then
-        PaladinDebug("NOW CASTING: " .. castingSpell)
-    else
-        PaladinDebug("WARNING: Not casting anything after spell cast attempt!")
-        
-        -- Check if the spell is on cooldown now (which would mean it cast)
-        local cdRemaining = self:GetSpellCooldown(spellName)
-        if cdRemaining > 0 then
-            PaladinDebug("Spell IS on cooldown (" .. cdRemaining .. "s) - cast succeeded but instant")
-        else
-            PaladinDebug("Spell is NOT on cooldown - cast may have failed!")
-            
-            -- One more attempt - use the spell name directly
-            local spellLink = GetSpellLink(spellName)
-            if spellLink then
-                PaladinDebug("Attempting direct cast with spell link...")
-                CastSpellByName(spellName)
-            end
-        end
 
-        castConfirmed = UnitCastingInfo("player") or UnitChannelInfo("player") or
-                        (SpellIsTargeting and SpellIsTargeting()) or
-                        self:GetSpellCooldown(spellName) > 0.05
+    local castConfirmed = UnitCastingInfo("player") or UnitChannelInfo("player") or
+                          self:GetSpellCooldown(spellName) > beforeSpellCooldown + 0.05 or
+                          self:GetSpellCooldown(61304) > beforeGlobalCooldown + 0.05
+
+    if not targetWasUnit then
+        if hadOriginalTarget then TargetLastTarget() else ClearTarget() end
     end
 
     if not castConfirmed then
-        PaladinDebug("Blessing cast did not start; returning failure")
+        PaladinDebug("Blessing cast did not start: " .. spellName .. " on " .. unitName)
         return false
     end
-    
-    -- NEVER use CastSpellByName with a unit parameter in WotLK - it doesn't work!
-    
-    PaladinDebug(">>> BLESSING CAST COMPLETED <<<")
-    
-    -- Check if WE got the blessing instead of the target
-    local selfHasBlessingNow = self:HasAnyBlessing("player")
-    if not selfHadBlessing and selfHasBlessingNow then
-        PaladinDebug("!!! WARNING: Blessing went to PLAYER instead of target!!!")
-    end
-    
-    -- Restore original target after a small delay
-    if originalTargetName then
-        -- Create a delay frame
-        local restoreFrame = CreateFrame("Frame")
-        restoreFrame.elapsed = 0
-        restoreFrame:SetScript("OnUpdate", function(frame, elapsed)
-            frame.elapsed = frame.elapsed + elapsed
-            if frame.elapsed > 0.5 then  -- Wait half a second
-                TargetLastEnemy()
-                frame:SetScript("OnUpdate", nil)
-            end
-        end)
-    end
-    
+
+    self.paladinLastSuccessfulCast = self.paladinLastSuccessfulCast or {}
+    self.paladinLastSuccessfulCast[spellName] = GetTime()
+    PaladinDebug("Cast " .. spellName .. " on " .. unitName)
     return true
 end
 
@@ -500,8 +439,6 @@ end
 function AC:ShouldUseBurstCooldowns(hasTarget, targetHP, enemies, inCombat)
     if not hasTarget or not inCombat then return false end
     
-    local playerLevel = UnitLevel("player")
-    local targetLevel = UnitLevel("target") or playerLevel
     local isElite = UnitClassification("target") == "elite" or UnitClassification("target") == "worldboss" or UnitClassification("target") == "rareelite"
     
     -- Use burst cooldowns for:
@@ -511,12 +448,9 @@ function AC:ShouldUseBurstCooldowns(hasTarget, targetHP, enemies, inCombat)
     -- 2. Multiple enemies (3+ for AoE value)
     if enemies >= 3 then return true end
     
-    -- 3. Execute phase on tough enemies (last 20%)
-    if targetHP <= 20 and targetLevel >= (playerLevel - 2) then return true end
-    
-    -- 4. Long fights (target has been in combat for 10+ seconds and still >60% health)
-    if targetHP > 60 and UnitAffectingCombat("target") then
-        return true -- Assume this is a tough enemy worth cooldowns
+    -- 3. Long fights that have actually lasted at least 10 seconds.
+    if targetHP > 60 and self:GetCombatTime() >= 10 then
+        return true
     end
     
     return false
@@ -539,9 +473,12 @@ function AC:UseUtilityCooldowns()
     if self:CanUsePaladinSpell(S.HandOfFreedom) and self:IsUsableSpell(S.HandOfFreedom) then
         -- Check for slowing debuffs (basic check)
         for i = 1, 16 do
-            local name, _, _, debuffType = UnitDebuff("player", i)
+            local name = UnitDebuff("player", i)
             if not name then break end
-            if debuffType == "Magic" or name:find("Slow") or name:find("Root") or name:find("Snare") then
+            if name:find("Slow") or name:find("Root") or name:find("Snare") or
+               name:find("Frost Nova") or name:find("Entangling Roots") or
+               name:find("Hamstring") or name:find("Crippling Poison") or
+               name:find("Chains of Ice") then
                 if self:CastPaladinSpell(S.HandOfFreedom, "player") then
                     PaladinDebug("Used Hand of Freedom (movement impaired)")
                     return true
@@ -554,9 +491,10 @@ function AC:UseUtilityCooldowns()
     if spec ~= "Protection" and playerHealth < 40 and self:CanUsePaladinSpell(S.HandOfProtection) and self:IsUsableSpell(S.HandOfProtection) then
         -- Check for physical debuffs
         for i = 1, 16 do
-            local name, _, _, debuffType = UnitDebuff("player", i)
+            local name = UnitDebuff("player", i)
             if not name then break end
-            if debuffType == "Disease" or debuffType == "Poison" or name:find("Bleed") then
+            if name:find("Bleed") or name:find("Rend") or name:find("Garrote") or
+               name:find("Rupture") or name:find("Deep Wound") then
                 if self:CastPaladinSpell(S.HandOfProtection, "player") then
                     PaladinDebug("Used Hand of Protection (physical debuff)")
                     return true
@@ -677,6 +615,37 @@ function AC:PaladinSmartHeal()
     return self:CastPaladinSpell(S.FlashOfLight, target)
 end
 
+-- Preserve leveling momentum without turning Ret/Prot into full-time healers.
+-- Out of combat this tops up meaningful damage; in combat it only consumes a
+-- free Art of War proc when health is genuinely low.
+function AC:PaladinLevelingRecovery(spec, inCombat, healthPercent, manaPercent)
+    if spec == "Holy" then return false end
+
+    if inCombat then
+        if healthPercent < 55 and self:HasArtOfWarProc() and
+           self:CastPaladinSpell(S.FlashOfLight, "player") then
+            PaladinDebug("Used Art of War for emergency self-healing")
+            return true
+        end
+        return false
+    end
+
+    if healthPercent >= 70 or manaPercent < 35 then return false end
+
+    if self:CanUsePaladinSpell(S.FlashOfLight) and
+       self:CastPaladinSpell(S.FlashOfLight, "player") then
+        PaladinDebug("Recovered health between pulls with Flash of Light")
+        return true
+    end
+    if self:CanUsePaladinSpell(S.HolyLight) and
+       self:CastPaladinSpell(S.HolyLight, "player") then
+        PaladinDebug("Recovered health between pulls with Holy Light")
+        return true
+    end
+
+    return false
+end
+
 function AC:MaintainHolyPaladinBuffs(manaPercent)
     local tankUnit = self:GetPaladinTankUnit()
     local _, lowestHealth = self:GetPaladinHealingTarget()
@@ -721,6 +690,12 @@ function AC:CastPaladinSpell(spellName, unit)
     -- Skip if the spell doesn't exist or has no valid target
     if not spellName or (unit ~= "player" and not UnitExists(unit)) then
         PaladinDebug("FAILED to cast " .. (spellName or "unknown") .. " - invalid spell or target")
+        return false
+    end
+
+    local now = GetTime()
+    if self.paladinSpellSkipUntil and self.paladinSpellSkipUntil[spellName] and
+       self.paladinSpellSkipUntil[spellName] > now then
         return false
     end
 
@@ -795,34 +770,30 @@ function AC:CastPaladinSpell(spellName, unit)
     local beforeChannel = UnitChannelInfo("player")
 
     -- Actually cast the spell using the WoW API directly
-    if unit == "player" then
-        CastSpellByName(spellName)
-        PaladinDebug("Cast " .. spellName .. " (on self)")
-    elseif unit == "target" then
+    local castTargetName = UnitName(unit) or unit
+    if unit == "target" then
         CastSpellByName(spellName) -- Implicitly casts on current target
-        PaladinDebug("Cast " .. spellName)
     else
-        -- For specific unit targets (party/raid members)
-        -- Store current target to restore later
-        local currentTarget = UnitExists("target") and UnitName("target") or nil
-        
-        -- Target the unit
-        TargetUnit(unit)
-        
-        -- Cast the spell on the new target
-        if UnitExists("target") and UnitIsUnit("target", unit) then
-            CastSpellByName(spellName)
-            PaladinDebug("Cast " .. spellName .. " on " .. (UnitName(unit) or unit))
-            
-            -- Restore previous target
-            if currentTarget then
-                TargetLastTarget()
-            else
-                ClearTarget()
+        -- CastSpellByName has no unit argument in 3.3.5. Explicitly target
+        -- self as well as party members; otherwise Holy Shock can damage the
+        -- hostile target instead of healing the player.
+        local hadOriginalTarget = UnitExists("target")
+        local targetWasUnit = hadOriginalTarget and UnitIsUnit("target", unit)
+        if not targetWasUnit then TargetUnit(unit) end
+
+        if not UnitExists("target") or not UnitIsUnit("target", unit) then
+            if not targetWasUnit then
+                if hadOriginalTarget then TargetLastTarget() else ClearTarget() end
             end
-        else
             PaladinDebug("FAILED to target " .. unit .. " for spell cast")
             return false
+        end
+
+        CastSpellByName(spellName)
+        if SpellIsTargeting and SpellIsTargeting() then SpellTargetUnit(unit) end
+
+        if not targetWasUnit then
+            if hadOriginalTarget then TargetLastTarget() else ClearTarget() end
         end
     end
 
@@ -834,11 +805,18 @@ function AC:CastPaladinSpell(spellName, unit)
        afterGlobalCooldown <= beforeGlobalCooldown + 0.05 and
        not (SpellIsTargeting and SpellIsTargeting()) then
         PaladinDebug("Cast rejected by client: " .. spellName)
+        self.paladinSpellSkipUntil = self.paladinSpellSkipUntil or {}
+        self.paladinSpellSkipUntil[spellName] = GetTime() + 0.25
         return false
     end
 
     self.paladinLastSuccessfulCast = self.paladinLastSuccessfulCast or {}
     self.paladinLastSuccessfulCast[spellName] = GetTime()
+    if unit == "target" then
+        PaladinDebug("Cast " .. spellName)
+    else
+        PaladinDebug("Cast " .. spellName .. " on " .. castTargetName)
+    end
 
     return true
 end
@@ -876,17 +854,24 @@ function AC:CastPaladinSpellEmergency(spellName, unit)
     local beforeCast = UnitCastingInfo("player")
     local beforeChannel = UnitChannelInfo("player")
 
-    -- For emergencies, skip most checks and just try to cast
+    -- For emergencies, keep validation minimal but still target the requested
+    -- unit explicitly. Self-heals must not become offensive Holy Shock casts.
     local hadTarget = UnitExists("target")
-    local targetChanged = unit ~= "player" and unit ~= "target"
-    if unit == "player" then
-        CastSpellByName(spellName)
-    else
-        TargetUnit(unit) -- Ensure correct target for emergency heals on others
-        CastSpellByName(spellName)
+    local targetWasUnit = hadTarget and UnitIsUnit("target", unit)
+    if unit ~= "target" and not targetWasUnit then TargetUnit(unit) end
+
+    if unit ~= "target" and (not UnitExists("target") or not UnitIsUnit("target", unit)) then
+        if not targetWasUnit then
+            if hadTarget then TargetLastTarget() else ClearTarget() end
+        end
+        PaladinDebug("EMERGENCY failed to target " .. unit .. " for " .. spellName)
+        return false
     end
 
-    if targetChanged then
+    CastSpellByName(spellName)
+    if SpellIsTargeting and SpellIsTargeting() then SpellTargetUnit(unit) end
+
+    if unit ~= "target" and not targetWasUnit then
         if hadTarget then TargetLastTarget() else ClearTarget() end
     end
 
@@ -1056,9 +1041,8 @@ function AC:CastJudgement()
         end
     end
     
-    if bestJudgement and self:IsUsableSpell(bestJudgement) and self:GetSpellCooldown(bestJudgement) == 0 then
+    if bestJudgement and self:IsPaladinSpellReady(bestJudgement) then
         if self:CastPaladinSpell(bestJudgement, "target") then
-            PaladinDebug("Cast " .. bestJudgement)
             return true
         end
     end
@@ -1534,7 +1518,10 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 25 then
             if self:CastPaladinSpell(S.Exorcism, "target") then return true end
         end
-        if self:CanUsePaladinSpell(S.Consecration) and self:IsUsableSpell(S.Consecration) and manaPercent > 20 and not self:IsPlayerMovingCached() then
+        -- Holy only spends healing mana on Consecration when the AoE value is
+        -- real and the mana pool is healthy.
+        if enemies >= 3 and manaPercent > 80 and self:CanUsePaladinSpell(S.Consecration) and
+           self:IsUsableSpell(S.Consecration) then
              if self:CastPaladinSpell(S.Consecration, "player") then return true end
         end
         
@@ -1546,7 +1533,8 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 20 then
             if self:CastPaladinSpell(S.Exorcism, "target") then return true end
         end
-        if self:CanUsePaladinSpell(S.Consecration) and self:IsUsableSpell(S.Consecration) and manaPercent > 15 and not self:IsPlayerMovingCached() then
+        if enemies >= 2 and manaPercent > 45 and self:CanUsePaladinSpell(S.Consecration) and
+           self:IsUsableSpell(S.Consecration) then
             if self:CastPaladinSpell(S.Consecration, "player") then return true end
         end
     end
@@ -1638,6 +1626,22 @@ function AC:PaladinRotation()
         end
     end
 
+    if self:PaladinLevelingRecovery(spec, inCombat, health, manaPercent) then return true end
+
+    -- A healer must remain functional when no hostile target is selected. This
+    -- is common immediately after a tank pulls or while the last mob dies.
+    if spec == "Holy" then
+        if inCombat then
+            if self:PaladinEmergencyTriage() then return true end
+            if self:MaintainHolyPaladinBuffs(manaPercent) then return true end
+            if self:PaladinSmartHeal() then return true end
+            if not hasTarget then return false end
+        elseif manaPercent > 30 then
+            if self:PaladinSmartHeal() then return true end
+            if self:MaintainHolyPaladinBuffs(manaPercent) then return true end
+        end
+    end
+
     -- Normal blessing maintenance is out of combat; combat GCDs belong to the rotation.
     if not inCombat and self:CheckPaladinBuffs(spec) then return true end
     
@@ -1706,7 +1710,8 @@ function AC:PaladinRotation()
         -- Mana efficiency management (seal switching during combat)
         if self:ManageManaEfficiency(spec, manaPercent, inCombat) then return true end
 
-        local targetHP = UnitHealth("target") / UnitHealthMax("target") * 100
+        local targetMaxHealth = UnitHealthMax("target")
+        local targetHP = targetMaxHealth > 0 and (UnitHealth("target") / targetMaxHealth * 100) or 100
 
         -- Main DPS rotation FIRST - tanks need to be beasts with excellent DPS
         local rotationResult = self:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent, enemies, inCombat)
@@ -1723,14 +1728,38 @@ end
 -- =============================================
 
 function AC:HasAnyBlessing(unit)
-    if not UnitExists(unit) then return false end
-    local blessings = { S.BlessingOfMight, S.BlessingOfKings, S.BlessingOfWisdom, 
-                        S.BlessingOfSanctuary, S.GreaterBlessingOfMight, S.GreaterBlessingOfKings,
-                        S.GreaterBlessingOfWisdom, S.GreaterBlessingOfSanctuary }
-    for _, bName in ipairs(blessings) do
-        if bName and self:HasBuff(unit, bName) then return true, bName end
+    local blessingName, blessingType = GetUnitBlessing(unit)
+    return blessingName ~= nil, blessingName, blessingType
+end
+
+function AC:GetPaladinBlessingRole(unit)
+    if not UnitExists(unit) then return "HYBRID" end
+
+    local _, class = UnitClass(unit)
+    if UnitIsUnit(unit, "player") then
+        local spec = self:GetPlayerSpec()
+        if spec == "Protection" then return "TANK" end
+        if spec == "Retribution" then return "PHYSICAL" end
+        if spec == "Holy" then return "HEALER" end
     end
-    return false, nil
+
+    -- WotLK cannot inspect another unit's specialization synchronously. Use
+    -- explicit raid assignment and visible tank state instead of accidentally
+    -- reusing the player's own spec for every party member.
+    if GetPartyAssignment and GetPartyAssignment("MAINTANK", unit) then return "TANK" end
+    if UnitExists("focus") and UnitIsUnit(unit, "focus") then return "TANK" end
+
+    local tankBuffs = {"Defensive Stance", S.RighteousFury, "Bear Form", "Dire Bear Form", "Frost Presence"}
+    for _, buffName in ipairs(tankBuffs) do
+        if UnitHasBuffByScan(unit, buffName) then return "TANK" end
+    end
+
+    if class == "WARRIOR" or class == "ROGUE" or class == "HUNTER" or class == "DEATHKNIGHT" then
+        return "PHYSICAL"
+    end
+    if class == "PRIEST" then return "HEALER" end
+    if class == "MAGE" or class == "WARLOCK" then return "CASTER" end
+    return "HYBRID"
 end
 
 function AC:GetBestBlessingForUnit(unit, level)
@@ -1738,61 +1767,33 @@ function AC:GetBestBlessingForUnit(unit, level)
     local _, class = UnitClass(unit)
     if not class then return nil end
 
-    -- Check what blessings they already have
-    local hasWisdom = false
-    local hasMight = false
-    local hasKings = false
-    local hasSanctuary = false
-    for i = 1, 40 do
-        local buffName = UnitBuff(unit, i)
-        if buffName then
-            if string.find(buffName, "Wisdom") then hasWisdom = true end
-            if string.find(buffName, "Might") then hasMight = true end
-            if string.find(buffName, "Kings") then hasKings = true end
-            if string.find(buffName, "Sanctuary") then hasSanctuary = true end
-        end
-    end
+    local _, existingType = GetUnitBlessing(unit)
+    local hasBattleShout = UnitHasBuffByScan(unit, "Battle Shout")
 
     -- Check if we have reagents for Greater Blessings
     local symbolOfKings = GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0
-    local useGreater = level >= 60 and symbolOfKings
-    
-    local bMight = useGreater and S.GreaterBlessingOfMight or S.BlessingOfMight
-    local bWisdom = useGreater and S.GreaterBlessingOfWisdom or S.BlessingOfWisdom
-    local bKings = useGreater and S.GreaterBlessingOfKings or S.BlessingOfKings
-    local bSanctuary = useGreater and S.GreaterBlessingOfSanctuary or S.BlessingOfSanctuary
+    local function bestRank(greaterBlessing, regularBlessing)
+        if symbolOfKings and self:CanUsePaladinSpell(greaterBlessing) then return greaterBlessing end
+        return regularBlessing
+    end
+
+    local bMight = bestRank(S.GreaterBlessingOfMight, S.BlessingOfMight)
+    local bWisdom = bestRank(S.GreaterBlessingOfWisdom, S.BlessingOfWisdom)
+    local bKings = bestRank(S.GreaterBlessingOfKings, S.BlessingOfKings)
+    local bSanctuary = bestRank(S.GreaterBlessingOfSanctuary, S.BlessingOfSanctuary)
 
     -- Build a priority list based on class/role
     local priorities = {}
-    local spec = self:GetPlayerSpec(unit)
-    local isTank = (class == "WARRIOR") or
-                   (class == "PALADIN" and spec == "Protection") or
-                   (class == "DRUID" and spec == "Feral") or
-                   (class == "DEATHKNIGHT")
-    
-    -- Physical DPS classes
-    if isTank then
+    local role = self:GetPaladinBlessingRole(unit)
+
+    if role == "TANK" then
         priorities = {bSanctuary, bKings, bMight, bWisdom}
-    elseif class == "WARRIOR" or class == "ROGUE" or class == "HUNTER" or class == "DEATHKNIGHT" or 
-       (class == "PALADIN" and spec == "Retribution") or 
-       (class == "SHAMAN" and spec == "Enhancement") or 
-       (class == "DRUID" and spec == "Feral") then
+    elseif role == "PHYSICAL" then
         priorities = {bMight, bKings, bWisdom}
-    -- Casters
-    elseif class == "MAGE" or class == "WARLOCK" or 
-           (class == "PRIEST" and spec == "Shadow") or 
-           (class == "SHAMAN" and spec == "Elemental") or 
-           (class == "DRUID" and spec == "Balance") then
+    elseif role == "CASTER" then
         priorities = {bKings, bWisdom, bMight}
-    -- Healers - WORKAROUND: PlayerBots can't receive Blessing of Wisdom in AzerothCore
-    elseif (class == "PRIEST") or 
-           (class == "PALADIN" and spec == "Holy") or 
-           (class == "SHAMAN" and spec == "Restoration") or 
-           (class == "DRUID" and spec == "Restoration") then
-        -- PlayerBots bug: Can't apply Wisdom to bots, use Kings instead
-        -- TODO: Detect if unit is a bot more reliably
-        priorities = {bKings, bMight, bWisdom}  -- Kings first, Wisdom last due to bot issues
-    -- Default (tanks, unknowns)
+    elseif role == "HEALER" then
+        priorities = {bWisdom, bKings, bMight}
     else
         priorities = {bKings, bMight, bWisdom}
     end
@@ -1801,11 +1802,10 @@ function AC:GetBestBlessingForUnit(unit, level)
     for _, blessing in ipairs(priorities) do
         if self:CanUsePaladinSpell(blessing) then
             -- Check if they already have this type of blessing
-            if (string.find(blessing, "Wisdom") and hasWisdom) or
-               (string.find(blessing, "Might") and hasMight) or
-               (string.find(blessing, "Kings") and hasKings) or
-               (string.find(blessing, "Sanctuary") and hasSanctuary) then
+            if BlessingTypes[blessing] == existingType then
                 PaladinDebug("Skipping " .. blessing .. " for " .. UnitName(unit) .. " - already has that type")
+            elseif BlessingTypes[blessing] == "Might" and hasBattleShout then
+                PaladinDebug("Skipping " .. blessing .. " for " .. UnitName(unit) .. " - Battle Shout covers attack power")
             else
                 return blessing
             end
@@ -1817,9 +1817,10 @@ function AC:GetBestBlessingForUnit(unit, level)
     return nil
 end
 
-function AC:CheckPaladinBuffs(spec) -- This is primarily for OOC party buffing
-    if not self:Throttle("PaladinPartyBuffCheck", 3) then return false end -- Check every 3 seconds for faster blessing
-    if UnitChannelInfo("player") or UnitCastingInfo("player") then return false end -- Removed combat check - can buff in combat
+function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party buffing
+    if not force and not self:Throttle("PaladinPartyBuffCheck", 3) then return false end
+    if UnitAffectingCombat("player") then return false end
+    if UnitChannelInfo("player") or UnitCastingInfo("player") then return false end
     
     -- Check if on GCD
     local gcdStart, gcdDuration = GetSpellCooldown("61304") -- GCD reference spell
@@ -1852,20 +1853,10 @@ function AC:CheckPaladinBuffs(spec) -- This is primarily for OOC party buffing
         for i = 1, GetNumPartyMembers() do
             local unit = "party"..i
             if UnitExists(unit) then
-                local _, class = UnitClass(unit)
                 local role = 3 -- Default DPS priority
-                -- Healers get highest priority
-                if class == "PRIEST" or class == "PALADIN" or class == "SHAMAN" or class == "DRUID" then
-                    local spec = self:GetPlayerSpec(unit)
-                    if spec == "Holy" or spec == "Restoration" or spec == "Discipline" then
-                        role = 1 -- Healer priority
-                    end
-                end
-                -- Tanks get second priority
-                if class == "WARRIOR" or (class == "PALADIN" and self:GetPlayerSpec(unit) == "Protection") or
-                   (class == "DRUID" and self:GetPlayerSpec(unit) == "Feral") or class == "DEATHKNIGHT" then
-                    if role ~= 1 then role = 2 end -- Tank priority if not healer
-                end
+                local blessingRole = self:GetPaladinBlessingRole(unit)
+                if blessingRole == "HEALER" then role = 1 end
+                if blessingRole == "TANK" then role = 2 end
                 table.insert(unitsToBuff, {unit = unit, priority = role})
             end
         end
@@ -1883,7 +1874,9 @@ function AC:CheckPaladinBuffs(spec) -- This is primarily for OOC party buffing
             if group == playerGroup then
                 local unit = "raid"..i
                 if UnitExists(unit) and not UnitIsUnit(unit, "player") then
-                    table.insert(unitsToBuff, {unit = unit, priority = 3})
+                    local blessingRole = self:GetPaladinBlessingRole(unit)
+                    local priority = blessingRole == "HEALER" and 1 or (blessingRole == "TANK" and 2 or 3)
+                    table.insert(unitsToBuff, {unit = unit, priority = priority})
                 end
             end
         end
@@ -1919,8 +1912,8 @@ function AC:CheckPaladinBuffs(spec) -- This is primarily for OOC party buffing
                 local hasBlessingAlready, _ = self:HasAnyBlessing(unit)
                 if spec == "Protection" and unit == "player" and
                    self:CanUsePaladinSpell(S.BlessingOfSanctuary) and
-                   not self:HasBuff("player", S.BlessingOfSanctuary) and
-                   not self:HasBuff("player", S.GreaterBlessingOfSanctuary) then
+                   not UnitHasBuffByScan("player", S.BlessingOfSanctuary) and
+                   not UnitHasBuffByScan("player", S.GreaterBlessingOfSanctuary) then
                     local sanctuary = (level >= 60 and (GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0) and
                                        self:CanUsePaladinSpell(S.GreaterBlessingOfSanctuary)) and
                                        S.GreaterBlessingOfSanctuary or S.BlessingOfSanctuary
@@ -1956,8 +1949,6 @@ function AC:CheckPaladinBuffs(spec) -- This is primarily for OOC party buffing
                                             local buffName = UnitBuff(frame.unit, i)
                                             if buffName then
                                                 PaladinDebug("    - " .. buffName)
-                                            else
-                                                break
                                             end
                                         end
                                     end
@@ -2019,11 +2010,10 @@ function AC:GetBestAura(spec, inGroup, inCombat, enemies)
     
     -- Holy: Prioritize mana efficiency and casting
     elseif spec == "Holy" then
-        if inCombat and level >= 22 then
-            -- Concentration Aura for uninterrupted healing
-            if self:CanUsePaladinSpell(S.ConcentrationAura) then
-                return S.ConcentrationAura
-            end
+        -- Concentration Aura remains useful between pulls and avoids spending a
+        -- healing GCD to correct the aura after combat begins.
+        if level >= 22 and self:CanUsePaladinSpell(S.ConcentrationAura) then
+            return S.ConcentrationAura
         end
         -- Devotion Aura as fallback
         if self:CanUsePaladinSpell(S.DevotionAura) then
@@ -2032,11 +2022,8 @@ function AC:GetBestAura(spec, inGroup, inCombat, enemies)
     
     -- Retribution: Prioritize damage
     elseif spec == "Retribution" then
-        if inCombat and level >= 16 then
-            -- Retribution Aura for damage reflection
-            if self:CanUsePaladinSpell(S.RetributionAura) then
-                return S.RetributionAura
-            end
+        if level >= 16 and self:CanUsePaladinSpell(S.RetributionAura) then
+            return S.RetributionAura
         end
         -- Devotion Aura as fallback
         if self:CanUsePaladinSpell(S.DevotionAura) then
@@ -2056,53 +2043,35 @@ end
 function AC:ManagePaladinAuras(spec)
     if not self:Throttle("PaladinAuraManagement", 10) then return false end -- Increased throttle
     
-    local level = UnitLevel("player")
     local inGroup = (GetNumPartyMembers() > 0 or GetNumRaidMembers() > 0)
     local inCombat = UnitAffectingCombat("player")
     local enemies = self:GetEnemyCount()
     
-    -- Check if we have ANY aura active first
-    local hasAnyAura = self:HasBuff("player", S.DevotionAura) or 
-                       self:HasBuff("player", S.RetributionAura) or 
-                       self:HasBuff("player", S.ConcentrationAura) or 
-                       self:HasBuff("player", S.FireResistanceAura) or
-                       self:HasBuff("player", S.FrostResistanceAura) or
-                       self:HasBuff("player", S.ShadowResistanceAura) or
-                       (level >= 62 and self:HasBuff("player", S.CrusaderAura))
-    
-    -- Only switch auras if we have none or if there's a significant reason
+    local currentAura, activeAuras = GetPlayerPaladinAura()
+    local hasAnyAura = currentAura ~= nil
+    local bestAura = self:GetBestAura(spec, inGroup, inCombat, enemies)
+
+    -- Do not duplicate the same aura when another paladin already supplies it.
+    if bestAura and activeAuras[bestAura] then return false end
+
+    -- Only switch auras if we have none or the spec's normal aura is wrong.
     if not hasAnyAura then
-        local bestAura = self:GetBestAura(spec, inGroup, inCombat, enemies)
         if bestAura and self:CastPaladinSpell(bestAura, "player") then
             PaladinDebug("Activated " .. bestAura .. " (no aura was active)")
             return true
         end
-    elseif inCombat then
-        -- Only switch in combat for significant changes
-        local currentAura = nil
-        if self:HasBuff("player", S.DevotionAura) then currentAura = S.DevotionAura
-        elseif self:HasBuff("player", S.RetributionAura) then currentAura = S.RetributionAura
-        elseif self:HasBuff("player", S.ConcentrationAura) then currentAura = S.ConcentrationAura
-        elseif self:HasBuff("player", S.FireResistanceAura) then currentAura = S.FireResistanceAura
-        elseif self:HasBuff("player", S.FrostResistanceAura) then currentAura = S.FrostResistanceAura
-        elseif self:HasBuff("player", S.ShadowResistanceAura) then currentAura = S.ShadowResistanceAura
-        elseif level >= 62 and self:HasBuff("player", S.CrusaderAura) then currentAura = S.CrusaderAura
-        end
-        
-        local bestAura = self:GetBestAura(spec, inGroup, inCombat, enemies)
-        -- Only switch if significantly different (not just enemy count changes)
+    else
         if bestAura and currentAura ~= bestAura then
-            -- For Protection, stick with current aura unless critical
-            if spec == "Protection" and currentAura == S.DevotionAura then
-                return false -- Keep Devotion for tanking
+            -- Preserve deliberate travel/resistance choices. Otherwise Ret and
+            -- Holy should not remain in Devotion Aura for an entire encounter.
+            if currentAura == S.FireResistanceAura or currentAura == S.FrostResistanceAura or
+               currentAura == S.ShadowResistanceAura or
+               (currentAura == S.CrusaderAura and IsMounted and IsMounted()) then
+                return false
             end
-            -- Only switch for major changes
-            if (enemies >= 4 and currentAura ~= S.RetributionAura and bestAura == S.RetributionAura) or
-               (spec == "Holy" and currentAura ~= S.ConcentrationAura and bestAura == S.ConcentrationAura) then
-                if self:CastPaladinSpell(bestAura, "player") then
-                    PaladinDebug("Switched from " .. currentAura .. " to " .. bestAura)
-                    return true
-                end
+            if self:CastPaladinSpell(bestAura, "player") then
+                PaladinDebug("Switched from " .. currentAura .. " to " .. bestAura)
+                return true
             end
         end
     end
@@ -2188,7 +2157,7 @@ function AC:UsePaladinRacials(offensiveUsage) -- offensiveUsage determines if we
                 PaladinDebug("Used Berserking (offensive)")
                 return true 
             end
-        elseif race == "Blood Elf" and self:CanUsePaladinSpell(R.ArcaneTorrent) and self:IsUsableSpell(R.ArcaneTorrent) and CheckInteractDistance("target", 3) then
+        elseif race == "BloodElf" and self:CanUsePaladinSpell(R.ArcaneTorrent) and self:IsUsableSpell(R.ArcaneTorrent) and CheckInteractDistance("target", 3) then
             if self:CastPaladinSpell(R.ArcaneTorrent, "player") then 
                 PaladinDebug("Used Arcane Torrent (silence + mana)")
                 return true 
@@ -2345,12 +2314,9 @@ function AC:SetupPaladinSlashCommands()
             elseif subcommand == "judgement" then 
                 if not UnitExists("target") then self:Print("Need target for Judgement test."); return; end
                 self:Print("Judgement Test: " .. (self:CastJudgement() and "OK" or "Fail"))
-            elseif subcommand == "bless" then 
-                -- Force blessing check by clearing throttle
-                self.throttleTable = self.throttleTable or {}
-                self.throttleTable["PaladinPartyBuffCheck"] = nil
+            elseif subcommand == "bless" then
                 self:Print("Forcing blessing check...")
-                local result = self:CheckPaladinBuffs(self:GetPlayerSpec())
+                local result = self:CheckPaladinBuffs(self:GetPlayerSpec(), true)
                 self:Print("Blessing Test: " .. (result and "Applied blessing to someone" or "Everyone has blessings or all out of range"))
             elseif subcommand == "party" then
                 self:Print("PARTY BLESSING STATUS:")
