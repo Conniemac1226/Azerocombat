@@ -194,18 +194,69 @@ local BlessingTypes = {
 
 local PaladinDebug
 
-local function GetUnitBlessing(unit)
-    if not unit or not UnitExists(unit) then return nil, nil end
+-- UnitBuff normally identifies the caster, but some 3.3.5 private-server
+-- clients omit it for party auras. Remember successful casts by destination
+-- GUID so this Paladin can still distinguish its own blessing from another
+-- Paladin's blessing until the expected expiration time.
+local OwnBlessingCasts = {}
+
+local function RememberOwnBlessing(unit, buffName, blessingType, duration, expirationTime)
+    local guid = unit and UnitGUID(unit)
+    if not guid or not buffName or not blessingType then return end
+
+    local now = GetTime()
+    local expiresAt = tonumber(expirationTime) or 0
+    if expiresAt <= now then
+        local fallback = string.find(buffName, "Greater Blessing", 1, true) and 1800 or 600
+        local observedDuration = tonumber(duration) or 0
+        expiresAt = now + (observedDuration > 0 and observedDuration or fallback)
+    end
+    OwnBlessingCasts[guid] = {name = buffName, blessingType = blessingType, expiresAt = expiresAt}
+end
+
+local function GetUnitBlessingState(unit)
+    local state = {byType = {}, typeCounts = {}, first = nil, own = nil}
+    if not unit or not UnitExists(unit) then return state end
 
     for i = 1, 40 do
-        local buffName = UnitBuff(unit, i)
+        local buffName, _, _, _, _, duration, expirationTime, caster = UnitBuff(unit, i)
         local blessingType = BlessingTypes[buffName]
         if blessingType then
-            return buffName, blessingType
+            local entry = {
+                name = buffName,
+                blessingType = blessingType,
+                caster = caster,
+                duration = duration,
+                expirationTime = expirationTime,
+            }
+            state.first = state.first or entry
+            state.byType[blessingType] = state.byType[blessingType] or entry
+            state.typeCounts[blessingType] = (state.typeCounts[blessingType] or 0) + 1
+
+            if caster == "player" or (caster and UnitExists(caster) and UnitIsUnit(caster, "player")) then
+                state.own = entry
+                RememberOwnBlessing(unit, buffName, blessingType, duration, expirationTime)
+            end
         end
     end
 
-    return nil, nil
+    local guid = UnitGUID(unit)
+    local cached = guid and OwnBlessingCasts[guid]
+    if cached then
+        if cached.expiresAt <= GetTime() or not state.byType[cached.blessingType] then
+            OwnBlessingCasts[guid] = nil
+        elseif not state.own then
+            state.own = state.byType[cached.blessingType]
+        end
+    end
+
+    return state
+end
+
+local function GetUnitBlessing(unit)
+    local state = GetUnitBlessingState(unit)
+    return state.first and state.first.name or nil,
+           state.first and state.first.blessingType or nil
 end
 
 local function UnitHasBuffByScan(unit, wantedBuff)
@@ -336,10 +387,11 @@ function AC:CastBlessingOnUnit(spellName, unit)
         end
     end
     
-    local existingBlessing, existingType = GetUnitBlessing(unit)
     local requestedType = BlessingTypes[spellName]
-    if existingBlessing and (existingBlessing == spellName or existingType == requestedType) then
-        PaladinDebug((UnitName(unit) or unit) .. " already has " .. existingBlessing .. ", skipping")
+    local blessingState = GetUnitBlessingState(unit)
+    local existingTypeBlessing = requestedType and blessingState.byType[requestedType]
+    if existingTypeBlessing then
+        PaladinDebug((UnitName(unit) or unit) .. " already has " .. existingTypeBlessing.name .. ", skipping")
         return false
     end
     if requestedType == "Might" and UnitHasBuffByScan(unit, "Battle Shout") then
@@ -426,6 +478,7 @@ function AC:CastBlessingOnUnit(spellName, unit)
 
     self.paladinLastSuccessfulCast = self.paladinLastSuccessfulCast or {}
     self.paladinLastSuccessfulCast[spellName] = GetTime()
+    RememberOwnBlessing(unit, spellName, requestedType)
     PaladinDebug("Cast " .. spellName .. " on " .. unitName)
     return true
 end
@@ -1788,12 +1841,42 @@ function AC:GetPaladinBlessingRole(unit)
     return "HYBRID"
 end
 
+local function GetPaladinRosterPosition()
+    local paladins, seen = {}, {}
+    local function addPaladin(unit)
+        if not UnitExists(unit) or not UnitIsConnected(unit) or select(2, UnitClass(unit)) ~= "PALADIN" then
+            return
+        end
+        local guid = UnitGUID(unit) or unit
+        if seen[guid] then return end
+        seen[guid] = true
+        local name = UnitName(unit) or unit
+        table.insert(paladins, {unit = unit, guid = guid, key = string.lower(name) .. "|" .. guid})
+    end
+
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do addPaladin("raid" .. i) end
+    else
+        addPaladin("player")
+        for i = 1, GetNumPartyMembers() do addPaladin("party" .. i) end
+    end
+
+    table.sort(paladins, function(a, b) return a.key < b.key end)
+    local playerGUID = UnitGUID("player")
+    for index, paladin in ipairs(paladins) do
+        if paladin.guid == playerGUID or UnitIsUnit(paladin.unit, "player") then
+            return index, #paladins
+        end
+    end
+    return 1, math.max(1, #paladins)
+end
+
 function AC:GetBestBlessingForUnit(unit, level)
     if not UnitExists(unit) then return nil end
     local _, class = UnitClass(unit)
     if not class then return nil end
 
-    local _, existingType = GetUnitBlessing(unit)
+    local blessingState = GetUnitBlessingState(unit)
     local hasBattleShout = UnitHasBuffByScan(unit, "Battle Shout")
 
     -- Check if we have reagents for Greater Blessings
@@ -1803,43 +1886,62 @@ function AC:GetBestBlessingForUnit(unit, level)
         return regularBlessing
     end
 
-    local bMight = bestRank(S.GreaterBlessingOfMight, S.BlessingOfMight)
-    local bWisdom = bestRank(S.GreaterBlessingOfWisdom, S.BlessingOfWisdom)
-    local bKings = bestRank(S.GreaterBlessingOfKings, S.BlessingOfKings)
-    local bSanctuary = bestRank(S.GreaterBlessingOfSanctuary, S.BlessingOfSanctuary)
+    local spellsByType = {
+        Might = bestRank(S.GreaterBlessingOfMight, S.BlessingOfMight),
+        Wisdom = bestRank(S.GreaterBlessingOfWisdom, S.BlessingOfWisdom),
+        Kings = bestRank(S.GreaterBlessingOfKings, S.BlessingOfKings),
+        Sanctuary = bestRank(S.GreaterBlessingOfSanctuary, S.BlessingOfSanctuary),
+    }
 
-    -- Build a priority list based on class/role
-    local priorities = {}
     local role = self:GetPaladinBlessingRole(unit)
+    local singleOrders = {
+        TANK = {"Sanctuary", "Kings", "Might", "Wisdom"},
+        PHYSICAL = {"Might", "Kings", "Wisdom", "Sanctuary"},
+        CASTER = {"Kings", "Wisdom", "Might", "Sanctuary"},
+        HEALER = {"Wisdom", "Kings", "Might", "Sanctuary"},
+        HYBRID = {"Kings", "Might", "Wisdom", "Sanctuary"},
+    }
+    local multiOrders = {
+        TANK = {"Kings", "Sanctuary", "Might", "Wisdom"},
+        PHYSICAL = {"Kings", "Might", "Wisdom", "Sanctuary"},
+        CASTER = {"Kings", "Wisdom", "Might", "Sanctuary"},
+        HEALER = {"Kings", "Wisdom", "Might", "Sanctuary"},
+        HYBRID = {"Kings", "Might", "Wisdom", "Sanctuary"},
+    }
 
-    if role == "TANK" then
-        priorities = {bSanctuary, bKings, bMight, bWisdom}
-    elseif role == "PHYSICAL" then
-        priorities = {bMight, bKings, bWisdom}
-    elseif role == "CASTER" then
-        priorities = {bKings, bWisdom, bMight}
-    elseif role == "HEALER" then
-        priorities = {bWisdom, bKings, bMight}
-    else
-        priorities = {bKings, bMight, bWisdom}
+    local slot, paladinCount = GetPaladinRosterPosition()
+    local roleOrder = (paladinCount > 1 and multiOrders[role] or singleOrders[role]) or singleOrders.HYBRID
+    local candidates, added = {}, {}
+    local function addType(blessingType)
+        if blessingType and not added[blessingType] then
+            added[blessingType] = true
+            table.insert(candidates, blessingType)
+        end
     end
-    
-    -- Try each blessing in priority order, skipping ones they already have
-    for _, blessing in ipairs(priorities) do
-        if self:CanUsePaladinSpell(blessing) then
-            -- Check if they already have this type of blessing
-            if BlessingTypes[blessing] == existingType then
-                PaladinDebug("Skipping " .. blessing .. " for " .. UnitName(unit) .. " - already has that type")
-            elseif BlessingTypes[blessing] == "Might" and hasBattleShout then
-                PaladinDebug("Skipping " .. blessing .. " for " .. UnitName(unit) .. " - Battle Shout covers attack power")
-            else
+
+    if paladinCount > 1 then
+        addType(roleOrder[((slot - 1) % #roleOrder) + 1])
+    end
+    for _, blessingType in ipairs(roleOrder) do addType(blessingType) end
+
+    for _, blessingType in ipairs(candidates) do
+        local blessing = spellsByType[blessingType]
+        if blessing and self:CanUsePaladinSpell(blessing) then
+            local covered = blessingState.byType[blessingType] or
+                            (blessingType == "Might" and hasBattleShout)
+            if not covered then
                 return blessing
+            end
+
+            local ownType = blessingState.own and blessingState.own.blessingType
+            local duplicateCount = blessingState.typeCounts[blessingType] or 0
+            if ownType == blessingType and duplicateCount <= 1 then
+                return nil -- Our assigned/selected blessing is already active.
             end
         end
     end
-    
-    -- If they have all blessing types, return nil (nothing we can give)
-    PaladinDebug("No suitable blessing for " .. UnitName(unit) .. " - they have all types")
+
+    PaladinDebug("No uncovered blessing available for " .. (UnitName(unit) or unit))
     return nil
 end
 
@@ -1933,24 +2035,10 @@ function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party bu
                     inRange = CheckInteractDistance(unit, 4) -- 28 yards
                 end
             end
-            
+
             if inRange then
-                local hasBlessingAlready, _ = self:HasAnyBlessing(unit)
-                if spec == "Protection" and unit == "player" and
-                   self:CanUsePaladinSpell(S.BlessingOfSanctuary) and
-                   not UnitHasBuffByScan("player", S.BlessingOfSanctuary) and
-                   not UnitHasBuffByScan("player", S.GreaterBlessingOfSanctuary) then
-                    local sanctuary = (level >= 60 and (GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0) and
-                                       self:CanUsePaladinSpell(S.GreaterBlessingOfSanctuary)) and
-                                       S.GreaterBlessingOfSanctuary or S.BlessingOfSanctuary
-                    if self:IsUsableSpell(sanctuary) and self:CastBlessingOnUnit(sanctuary, unit) then
-                        PaladinDebug("Applied Protection self blessing: " .. sanctuary)
-                        return true
-                    end
-                end
-                if not hasBlessingAlready then
-                    local bestBlessingForUnit = self:GetBestBlessingForUnit(unit, level)
-                    if bestBlessingForUnit and self:CanUsePaladinSpell(bestBlessingForUnit) then
+                local bestBlessingForUnit = self:GetBestBlessingForUnit(unit, level)
+                if bestBlessingForUnit and self:CanUsePaladinSpell(bestBlessingForUnit) then
                     -- Check if spell is actually usable (includes reagent check)
                     if self:IsUsableSpell(bestBlessingForUnit) then
                         -- Use our improved blessing function
@@ -2004,7 +2092,6 @@ function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party bu
                         end
                     end
                 end
-                end -- End of hasBlessingAlready check
             else
                 -- Unit is out of range
                 if self:Throttle("BlessingRangeWarning_" .. unit, 30) then
