@@ -6,8 +6,8 @@ local S = { -- Spells
     -- Core Abilities
     AutoShot = "Auto Shot", SteadyShot = "Steady Shot", AimedShot = "Aimed Shot", ArcaneShot = "Arcane Shot",
     MultiShot = "Multi-Shot", KillShot = "Kill Shot", SerpentSting = "Serpent Sting",
-    ScorpidSting = "Scorpid Sting", ViperSting = "Viper Sting", RaptorStrike = "Raptor Strike",
-    MongooseBite = "Mongoose Bite", WingClip = "Wing Clip", Disengage = "Disengage",
+    RaptorStrike = "Raptor Strike",
+    MongooseBite = "Mongoose Bite", WingClip = "Wing Clip",
     
     -- BM Abilities
     KillCommand = "Kill Command", BestialWrath = "Bestial Wrath", Intimidation = "Intimidation",
@@ -16,52 +16,55 @@ local S = { -- Spells
     ChimeraShot = "Chimera Shot", SilencingShot = "Silencing Shot", ReadinessSpell = "Readiness",
     
     -- SV Abilities
-    ExplosiveShot = "Explosive Shot", BlackArrow = "Black Arrow", ExplosiveTrap = "Explosive Trap",
-    FrostTrap = "Frost Trap", FreezingTrap = "Freezing Trap", ImmolationTrap = "Immolation Trap",
-    SnakeTrap = "Snake Trap",
+    ExplosiveShot = "Explosive Shot", BlackArrow = "Black Arrow", ExplosiveTrap = "Explosive Trap", ImmolationTrap = "Immolation Trap",
     
     -- Aspects
     AspectHawk = "Aspect of the Hawk", AspectDragonhawk = "Aspect of the Dragonhawk",
     AspectViper = "Aspect of the Viper", AspectCheetah = "Aspect of the Cheetah",
-    AspectPack = "Aspect of the Pack", AspectWild = "Aspect of the Wild",
-    AspectMonkey = "Aspect of the Monkey",
+    AspectPack = "Aspect of the Pack",
     
     -- Pet Management
     CallPet = "Call Pet", RevivePet = "Revive Pet", MendPet = "Mend Pet",
-    FeedPet = "Feed Pet", DismissPet = "Dismiss Pet", TameBeast = "Tame Beast",
-    BeastLore = "Beast Lore",
+    FeedPet = "Feed Pet",
     
     -- Misc
     HuntersMark = "Hunter's Mark", Misdirection = "Misdirection", FeignDeath = "Feign Death",
-    Deterrence = "Deterrence", MasterCall = "Master's Call", TranqShot = "Tranquilizing Shot",
-    ScatterShot = "Scatter Shot", ConcussiveShot = "Concussive Shot",
+    Deterrence = "Deterrence", MasterCall = "Master's Call",
+    ScatterShot = "Scatter Shot",
     
     -- Pet Abilities (for control)
     PetGrowl = "Growl", PetClaw = "Claw", PetBite = "Bite", PetSmack = "Smack", 
-    PetDash = "Dash", PetDive = "Dive", PetCower = "Cower", PetCharge = "Charge", PetProwl = "Prowl",
+    PetDash = "Dash", PetDive = "Dive", PetCower = "Cower", PetCharge = "Charge",
     
     -- Pet Family Abilities
+    PetCallOfTheWild = "Call of the Wild", -- Ferocity pet talent
+    PetRabid = "Rabid", -- Ferocity pet talent
     PetFuriousHowl = "Furious Howl", -- Wolf
     PetScorpidPoison = "Scorpid Poison", -- Scorpid
     PetShellShield = "Shell Shield", -- Turtle
     PetThunderstomp = "Thunderstomp", -- Gorilla
+    PetGore = "Gore", -- Boar
+    PetSwipe = "Swipe", -- Bear
+    PetRake = "Rake", -- Cat
+    PetSavageRend = "Savage Rend", -- Raptor
+    PetMonstrousBite = "Monstrous Bite", -- Devilsaur
+    PetSting = "Sting", -- Wasp
+    PetScreech = "Screech", -- Bat/Carrion Bird/Owl
+    PetSporeCloud = "Spore Cloud", -- Sporebat
+    PetLavaBreath = "Lava Breath", -- Core Hound
     PetFireBreath = "Fire Breath", -- Dragonhawk
     PetLightningBreath = "Lightning Breath", -- Wind Serpent
     PetAcidSpit = "Acid Spit", -- Worm
     PetSpiritStrike = "Spirit Strike", -- Spirit Beast (exotic BM only)
-    PetRoarOfRecovery = "Roar of Recovery", -- Spirit Beast heal
-    
-    -- Pet Stances
-    PetPassive = "Passive", PetDefensive = "Defensive", PetAggressive = "Aggressive",
+    PetRoarOfRecovery = "Roar of Recovery", -- Cunning pet mana recovery
     
     -- Cooldowns
-    RapidFire = "Rapid Fire", Volley = "Volley",
+    RapidFire = "Rapid Fire", Volley = "Volley", TrueshotAura = "Trueshot Aura",
     LaunchExplosiveTrap = "Launch Explosive Trap", LaunchImmolationTrap = "Launch Immolation Trap",
     
     -- Critical Proc Buffs for WotLK Hunter Optimization
     LockAndLoad = "Lock and Load",
-    ImprovedSteadyShot = "Improved Steady Shot",
-    ExposeWeakness = "Expose Weakness"
+    ImprovedSteadyShot = "Improved Steady Shot"
 }
 
 -- Racial Abilities with proper WotLK names
@@ -82,10 +85,21 @@ local R = {
     Stoneform = "Stoneform",
     -- Gnome
     EscapeArtist = "Escape Artist",
-    -- Night Elf
-    Shadowmeld = "Shadowmeld",
     -- Human
     EveryManForHimself = "Every Man for Himself"
+}
+
+-- Improved Tracking grants its damage bonus while any one of these creature
+-- tracking modes is active. Spell IDs keep the lookup locale-safe.
+local HUNTER_DAMAGE_TRACKING_IDS = { 1494, 19878, 19879, 19880, 19882, 19883, 19884 }
+local HUNTER_TRACKING_BY_CREATURE = {
+    Beast = 1494,
+    Demon = 19878,
+    Dragonkin = 19879,
+    Elemental = 19880,
+    Giant = 19882,
+    Humanoid = 19883,
+    Undead = 19884,
 }
 
 -- Local throttle system for pet abilities
@@ -128,6 +142,58 @@ function AC:PetNeedsFeeding()
     return happiness and happiness < 3
 end
 
+function AC:FindHunterPetFood()
+    local petLevel = UnitLevel("pet") or UnitLevel("player") or 1
+    local fallback = nil
+
+    for bag = 0, 4 do
+        for slot = 1, GetContainerNumSlots(bag) do
+            local itemLink = GetContainerItemLink(bag, slot)
+            if itemLink then
+                local itemName, _, _, itemLevel, requiredLevel, itemClass, itemSubClass = GetItemInfo(itemLink)
+                local isFood = itemClass == "Consumable" and itemSubClass and itemSubClass:find("Food")
+                if itemName and isFood then
+                    local foodLevel = math.max(itemLevel or 0, requiredLevel or 0)
+                    fallback = fallback or { bag = bag, slot = slot, name = itemName }
+
+                    -- Food more than 15 levels below the pet gives reduced or
+                    -- no useful happiness. Prefer a level-appropriate item,
+                    -- while retaining a fallback for clients with incomplete
+                    -- item-level data. The client performs the final diet check.
+                    if foodLevel == 0 or foodLevel >= math.max(1, petLevel - 15) then
+                        return bag, slot, itemName
+                    end
+                end
+            end
+        end
+    end
+
+    if fallback then
+        return fallback.bag, fallback.slot, fallback.name
+    end
+    return nil
+end
+
+function AC:FeedHunterPetIfNeeded()
+    if UnitAffectingCombat("player") or self:IsPlayerMoving() or self:IsChanneling() then return false end
+    if not self:PetNeedsFeeding() or not self:HunterSpellAvailable(S.FeedPet) then return false end
+    if not Throttle("HunterFeedPet", 5.0) then return false end
+
+    local bag, slot, itemName = self:FindHunterPetFood()
+    if not bag then
+        HunterDebugThrottled("NoPetFood", 10.0, "Pet needs feeding but no suitable food was found")
+        return false
+    end
+
+    local usable, noMana = IsUsableSpell(S.FeedPet)
+    if not usable or noMana then return false end
+
+    if not self:CastSpell(S.FeedPet, "pet") then return false end
+    UseContainerItem(bag, slot)
+    HunterDebug("Feeding pet with " .. itemName)
+    return true
+end
+
 -- Get pet focus/energy
 function AC:GetPetPower()
     if not UnitExists("pet") then return 0, 0 end
@@ -148,7 +214,7 @@ end
 
 -- Find pet ability slot by name
 function AC:FindPetAbilitySlot(abilityName)
-    for i = 1, 10 do -- Pet abilities are typically in slots 1-10
+    for i = 1, 12 do -- WotLK pet bars can expose up to 12 action slots
         local name, _, _, _, _, _, _, _, _, _ = GetPetActionInfo(i)
         if name and name == abilityName then
             return i
@@ -169,6 +235,10 @@ function AC:UsePetAbility(abilityName, focusCost)
     if focusCost and focus < focusCost then return false end
     
     CastPetAction(slot)
+    if self:GetPetAbilityCooldown(slot) <= 0 then
+        HunterDebug("Pet ability did not start: " .. abilityName)
+        return false
+    end
     HunterDebug("Pet used: " .. abilityName .. " (Focus: " .. focus .. "/" .. maxFocus .. ")")
     return true
 end
@@ -185,18 +255,10 @@ function AC:ManagePetDPS()
     
     if not Throttle("PetDPSAbilities", throttleTime) then return false end
     
-    -- Threat management check
+    -- Growl autocast is disabled in groups by UpdatePetGrowl(). Do not stop
+    -- all pet damage merely because the pet is high on threat; that heavily
+    -- penalizes BM and Cower is primarily a defensive tool in Wrath.
     local inGroup = IsInGroup() or GetNumRaidMembers() > 0
-    if inGroup and self:PetHasHighThreat() then
-        -- In groups, use Cower if available to reduce threat
-        if self:UsePetAbility(S.PetCower, 15) then
-            HunterDebug("Pet using Cower to reduce threat")
-            return true
-        end
-        -- Skip damage abilities if threat is too high
-        HunterDebugThrottled("PetThreatHigh", 3.0, "Skipping pet DPS - threat too high in group")
-        return false
-    end
     
     local focus, maxFocus = self:GetPetPower()
     local targetHealth = self:GetTargetHealthPercent("pettarget")
@@ -205,31 +267,67 @@ function AC:ManagePetDPS()
     HunterDebugThrottled("PetDPSCheck", 2.0, "Pet DPS check - Focus: " .. focus .. "/" .. maxFocus .. ", Target HP: " .. targetHealth .. "%, In melee: " .. tostring(inMelee) .. ", BW: " .. tostring(hasBestialWrath))
     
     -- Solo play: Use Growl aggressively to maintain threat
-    if not inGroup and not self:HasDebuff("pettarget", "Growl") then
+    if not inGroup then
         if self:UsePetAbility(S.PetGrowl, 15) then
             HunterDebug("Pet using Growl (solo threat generation)")
             return true
         end
     end
     
-    -- Priority 1: Special family abilities (RESEARCH-BASED PRIORITY)
-    -- Furious Howl is #1 meta ability (+320 AP for 20 seconds)
+    -- Priority 1: Pet cooldowns and family abilities.
+    -- Call of the Wild and Furious Howl are off-GCD damage buffs and should
+    -- not be left to a slow/optional autocast decision.
+    local petTargetClassification = UnitClassification("pettarget")
+    local petTargetIsTough = petTargetClassification == "elite" or petTargetClassification == "rareelite" or petTargetClassification == "worldboss" or UnitLevel("pettarget") == -1
+    if petTargetIsTough and self:UsePetAbility(S.PetCallOfTheWild) then
+        HunterDebug("Pet: Call of the Wild")
+        return true
+    end
+
+    if self:UsePetAbility(S.PetRabid) then
+        HunterDebug("Pet: Rabid")
+        return true
+    end
+
+    -- Roar of Recovery is a Cunning-pet mana cooldown, not a Spirit Beast
+    -- heal. Detect it from the action bar so any capable pet can use it.
+    local playerManaMax = UnitPowerMax("player", 0)
+    local playerManaPercent = playerManaMax > 0 and (UnitPower("player", 0) / playerManaMax * 100) or 100
+    if playerManaPercent < 35 and self:UsePetAbility(S.PetRoarOfRecovery) then
+        HunterDebug("Pet: Roar of Recovery (low mana)")
+        return true
+    end
+
     local familyAbilities = {
-        {name = S.PetFuriousHowl, cost = 60}, -- Wolf: +320 AP buff (META CHOICE)
-        {name = S.PetSpiritStrike, cost = 40}, -- Spirit Beast: High damage + heal (BM exotic)
-        {name = S.PetLightningBreath, cost = 50}, -- Wind Serpent: Nature damage
-        {name = S.PetFireBreath, cost = 50}, -- Dragonhawk: Fire cone
-        {name = S.PetAcidSpit, cost = 35}, -- Worm: -10% armor
-        {name = S.PetScorpidPoison, cost = 30}, -- Scorpid: Stacking poison
-        {name = S.PetThunderstomp, cost = 60}, -- Gorilla: AoE threat
+        {name = S.PetFuriousHowl}, -- Wolf: attack power buff
+        {name = S.PetMonstrousBite}, -- Devilsaur: damage/self-buff
+        {name = S.PetSavageRend}, -- Raptor: damage/bleed/self-buff
+        {name = S.PetRake}, -- Cat: damage/bleed
+        {name = S.PetSpiritStrike}, -- Spirit Beast: damage ability
+        {name = S.PetLavaBreath}, -- Core Hound: damage/caster slow
+        {name = S.PetLightningBreath}, -- Wind Serpent: damage ability
+        {name = S.PetFireBreath}, -- Dragonhawk: damage ability
+        {name = S.PetAcidSpit}, -- Worm: armor reduction/debuff
+        {name = S.PetSting}, -- Wasp: armor reduction/debuff
+        {name = S.PetScorpidPoison}, -- Scorpid: stacking poison
+        {name = S.PetGore}, -- Boar: damage
+        {name = S.PetSwipe}, -- Bear: AoE damage
+        {name = S.PetScreech}, -- Bat/Carrion Bird/Owl: AoE/debuff
+        {name = S.PetSporeCloud}, -- Sporebat: AoE/debuff
     }
     
     for _, ability in ipairs(familyAbilities) do
-        if focus >= ability.cost then
-            if self:UsePetAbility(ability.name, ability.cost) then
-                return true
-            end
+        if self:UsePetAbility(ability.name) then
+            return true
         end
+    end
+
+    -- Thunderstomp is useful for AoE, but its threat and cooldown make it a
+    -- poor single-target focus spend. Only fire it when there is a pack.
+    local petEnemies = self:GetEffectiveEnemyCount(self:GetEnemyCount())
+    if petEnemies >= 2 and self:UsePetAbility(S.PetThunderstomp) then
+        HunterDebug("Pet: Thunderstomp")
+        return true
     end
     
     -- Priority 2: Defensive abilities when pet is tanking (solo play)
@@ -237,16 +335,6 @@ function AC:ManagePetDPS()
         local petHealth = UnitHealth("pet")
         local petMaxHealth = UnitHealthMax("pet")
         local petHealthPercent = (petMaxHealth > 0) and (petHealth / petMaxHealth * 100) or 100
-        local playerHealthPercent = self:GetPlayerHealthPercent()
-        
-        -- Spirit Beast: Roar of Recovery (heal for lowest health target)
-        if UnitCreatureFamily("pet") == "Spirit Beast" then
-            if (playerHealthPercent < 50 or petHealthPercent < 50) and self:UsePetAbility(S.PetRoarOfRecovery, 25) then
-                HunterDebug("Spirit Beast: Roar of Recovery (emergency heal)")
-                return true
-            end
-        end
-        
         -- Use Shell Shield (turtle) or similar defensive abilities when tanking
         if petHealthPercent < 50 and self:PetHasAggro("pettarget") then
             if self:UsePetAbility(S.PetShellShield, 20) then
@@ -254,6 +342,15 @@ function AC:ManagePetDPS()
                 return true
             end
         end
+    end
+
+    -- Cower is defensive in Wrath. Use it to protect an endangered pet that
+    -- actually has aggro, rather than as a reason to suspend pet DPS.
+    local petMaxHealth = UnitHealthMax("pet")
+    local petHealthPercent = petMaxHealth > 0 and (UnitHealth("pet") / petMaxHealth * 100) or 100
+    if petHealthPercent < 35 and self:PetHasAggro("pettarget") and self:UsePetAbility(S.PetCower) then
+        HunterDebug("Pet using Cower (low-health mitigation)")
+        return true
     end
     
     -- Priority 3: Movement abilities for gap closing
@@ -269,33 +366,15 @@ function AC:ManagePetDPS()
         end
     end
     
-    -- Priority 4: Core damage abilities (RESEARCH-BASED OPTIMIZATION)
-    -- Claw is superior: 25 focus vs 35 for Bite/Smack, no cooldown
+    -- Priority 4: Core damage abilities.
+    -- Do not infer the active ability from the pet family. WotLK pets can
+    -- have different learned action bars, and the action bar is authoritative.
     local focusThreshold = hasBestialWrath and 20 or 30
     
-    if focus >= focusThreshold then
-        -- VERIFIED: Claw is best focus dump (lower cost, no CD)
-        local petFamily = UnitCreatureFamily("pet")
-        
-        -- Families with Claw (optimal)
-        if petFamily == "Cat" or petFamily == "Bear" or petFamily == "Raptor" or 
-           petFamily == "Tallstrider" or petFamily == "Core Hound" or petFamily == "Devilsaur" or
-           petFamily == "Spirit Beast" then
-            if focus >= 25 and self:UsePetAbility(S.PetClaw, 25) then
-                HunterDebug("Pet: Claw (optimal focus dump)")
-                return true
-            end
-        -- Families with Bite (less efficient but no choice)
-        elseif petFamily == "Wolf" or petFamily == "Hyena" or petFamily == "Bat" or 
-               petFamily == "Spider" or petFamily == "Serpent" then
-            if focus >= 35 and self:UsePetAbility(S.PetBite, 35) then
-                HunterDebug("Pet: Bite (35 focus)")
-                return true
-            end
-        -- Families with Smack (gorilla, crab, etc)
-        else
-            if focus >= 35 and self:UsePetAbility(S.PetSmack, 35) then
-                HunterDebug("Pet: Smack (35 focus)")
+    if inMelee and focus >= focusThreshold then
+        for _, abilityName in ipairs({S.PetClaw, S.PetBite, S.PetSmack}) do
+            if self:UsePetAbility(abilityName, 25) then
+                HunterDebug("Pet basic attack: " .. abilityName)
                 return true
             end
         end
@@ -313,20 +392,24 @@ function AC:ManagePetDPS()
     
     -- If we have special abilities, maintain some focus reserve
     -- During Bestial Wrath, dump all focus for maximum damage
-    local focusReserve = hasBestialWrath and 0 or (hasSpecialAbility and 40 or 25)
+    local focusReserve = hasBestialWrath and 0 or (hasSpecialAbility and 20 or 0)
     
-    if focus > focusReserve + 25 then
-        -- Use basic abilities when we have excess focus
-        if self:UsePetAbility(S.PetClaw, 25) or self:UsePetAbility(S.PetBite, 35) then
-            return true
+    if inMelee and focus > focusReserve + 25 then
+        -- Use whichever basic attack is actually on the pet bar.
+        for _, abilityName in ipairs({S.PetClaw, S.PetBite, S.PetSmack}) do
+            if self:UsePetAbility(abilityName, 25) then
+                return true
+            end
         end
     end
     
     -- Emergency focus dump during Bestial Wrath
-    if hasBestialWrath and focus > 25 then
-        if self:UsePetAbility(S.PetClaw, 25) or self:UsePetAbility(S.PetBite, 35) then
-            HunterDebug("BW Focus dump!")
-            return true
+    if hasBestialWrath and inMelee and focus > 25 then
+        for _, abilityName in ipairs({S.PetClaw, S.PetBite, S.PetSmack}) do
+            if self:UsePetAbility(abilityName, 25) then
+                HunterDebug("BW Focus dump: " .. abilityName)
+                return true
+            end
         end
     end
     
@@ -336,36 +419,25 @@ end
 
 
 
--- Helper function to check if we should prioritize pet revival
-function AC:ShouldPrioritizePet()
-    local petStatus = self:GetPetStatus()
-    local inCombat = UnitAffectingCombat("player")
-    local healthPercent = self:GetPlayerHealthPercent()
-    
-    -- Always prioritize if no pet and in combat
-    if petStatus == "nopet" and inCombat then
-        return true
-    end
-    
-    -- Prioritize dead pet revival if health is stable
-    if petStatus == "dead" and (healthPercent > 40 or not inCombat) then
-        return true
-    end
-    
-    return false
-end
-
 -- FIXED: Racial abilities system
 function AC:GetPlayerRace()
-    local race = UnitRace("player")
-    return race
+    local localizedRace, raceToken = UnitRace("player")
+    if raceToken and raceToken ~= "" then
+        return string.upper(raceToken)
+    end
+
+    -- Older/private clients may only expose the localized race name.
+    return localizedRace and string.upper((localizedRace:gsub("%s+", ""))) or ""
 end
 
 function AC:UseRacials(offensive, emergency)
     if not offensive and not emergency then return false end
     
-    -- Throttle racial checks to prevent spam
-    if not Throttle("RacialCooldowns", 5.0) then 
+    -- Keep emergency checks responsive even though the normal rotation polls
+    -- this function frequently.
+    local racialThrottleKey = emergency and "RacialEmergency" or "RacialOffensive"
+    local racialThrottleInterval = emergency and 0.5 or 1.0
+    if not Throttle(racialThrottleKey, racialThrottleInterval) then
         HunterDebug("Racial throttle active - skipping check")
         return false 
     end
@@ -379,30 +451,29 @@ function AC:UseRacials(offensive, emergency)
     -- Emergency racials (defensive/utility)
     if emergency then
         -- Will of the Forsaken (Undead) - removes fear, charm, sleep
-        if race == "Scourge" and self:IsUsableSpell(R.WillOfForsaken) then
+        if (race == "UNDEAD" or race == "SCOURGE") and self:IsUsableSpell(R.WillOfForsaken) then
             -- Check if we have a debuff that WotF can remove
             local hasRemovableDebuff = false
             for i = 1, 16 do
-                local name, _, _, debuffType = UnitDebuff("player", i)
-                if name and (debuffType == "Magic" or name:lower():find("fear") or name:lower():find("charm") or name:lower():find("sleep")) then
+                local name = UnitDebuff("player", i)
+                local lowerName = name and name:lower() or ""
+                if name and (lowerName:find("fear") or lowerName:find("charm") or lowerName:find("sleep")) then
                     hasRemovableDebuff = true
                     break
                 end
             end
             
-            if hasRemovableDebuff or healthPercent < 40 then
-                self:CastSpell(R.WillOfForsaken)
+            if hasRemovableDebuff and self:HunterTryCast(R.WillOfForsaken, "player") then
                 HunterDebug("Used Will of the Forsaken")
                 return true
             end
         end
         
         -- Stoneform (Dwarf) - removes poison, disease, bleed
-        if race == "Dwarf" and self:IsUsableSpell(R.Stoneform) then
+        if race == "DWARF" and self:IsUsableSpell(R.Stoneform) then
             for i = 1, 16 do
-                local name, _, _, debuffType = UnitDebuff("player", i)
-                if name and (debuffType == "Poison" or debuffType == "Disease" or name:lower():find("bleed")) then
-                    self:CastSpell(R.Stoneform)
+                local name, _, _, _, debuffType = UnitDebuff("player", i)
+                if name and (debuffType == "Poison" or debuffType == "Disease" or name:lower():find("bleed")) and self:HunterTryCast(R.Stoneform, "player") then
                     HunterDebug("Used Stoneform")
                     return true
                 end
@@ -410,30 +481,30 @@ function AC:UseRacials(offensive, emergency)
         end
         
         -- Gift of the Naaru (Draenei) - heal
-        if race == "Draenei" and healthPercent < 50 and self:IsUsableSpell(R.GiftOfNaaru) then
-            self:CastSpell(R.GiftOfNaaru, "player")
+        if race == "DRAENEI" and healthPercent < 50 and self:HunterTryCast(R.GiftOfNaaru, "player") then
             HunterDebug("Used Gift of the Naaru")
             return true
         end
         
         -- Escape Artist (Gnome) - removes movement impairing effects
-        if race == "Gnome" and self:IsUsableSpell(R.EscapeArtist) then
+        if race == "GNOME" and self:IsUsableSpell(R.EscapeArtist) then
             for i = 1, 16 do
                 local name = UnitDebuff("player", i)
                 if name and (name:lower():find("slow") or name:lower():find("root") or name:lower():find("snare")) then
-                    self:CastSpell(R.EscapeArtist)
-                    HunterDebug("Used Escape Artist")
-                    return true
+                    if self:HunterTryCast(R.EscapeArtist, "player") then
+                        HunterDebug("Used Escape Artist")
+                        return true
+                    end
                 end
             end
         end
         
         -- Every Man for Himself (Human) - removes stun, fear, charm
-        if race == "Human" and self:IsUsableSpell(R.EveryManForHimself) then
+        if race == "HUMAN" and self:IsUsableSpell(R.EveryManForHimself) then
             for i = 1, 16 do
-                local name, _, _, debuffType = UnitDebuff("player", i)
-                if name and (debuffType == "Magic" or name:lower():find("stun") or name:lower():find("fear") or name:lower():find("charm")) then
-                    self:CastSpell(R.EveryManForHimself)
+                local name = UnitDebuff("player", i)
+                local lowerName = name and name:lower() or ""
+                if name and (lowerName:find("stun") or lowerName:find("fear") or lowerName:find("charm")) and self:HunterTryCast(R.EveryManForHimself, "player") then
                     HunterDebug("Used Every Man for Himself")
                     return true
                 end
@@ -451,9 +522,8 @@ function AC:UseRacials(offensive, emergency)
         HunterDebug("Checking offensive racials for " .. race)
         
         -- Blood Fury (Orc) - increases attack power
-        if race == "Orc" then
-            if self:IsUsableSpell(R.BloodFury) then
-                self:CastSpell(R.BloodFury)
+        if race == "ORC" then
+            if self:HunterTryCast(R.BloodFury, "player") then
                 HunterDebug("Used Blood Fury")
                 return true
             else
@@ -462,32 +532,13 @@ function AC:UseRacials(offensive, emergency)
         end
         
         -- Berserking (Troll) - increases attack and casting speed
-        if race == "Troll" then
-            if self:IsUsableSpell(R.Berserking) then
-                self:CastSpell(R.Berserking)
+        if race == "TROLL" then
+            if self:HunterTryCast(R.Berserking, "player") then
                 HunterDebug("Used Berserking")
                 return true
             else
                 HunterDebug("Berserking not available (cooldown or conditions)")
             end
-        end
-        
-        -- Arcane Torrent (Blood Elf) - silences and restores mana
-        if race == "BloodElf" then
-            if self:IsUsableSpell(R.ArcaneTorrent) then
-                self:CastSpell(R.ArcaneTorrent)
-                HunterDebug("Used Arcane Torrent")
-                return true
-            else
-                HunterDebug("Arcane Torrent not available (cooldown or conditions)")
-            end
-        end
-        
-        -- War Stomp (Tauren) - stuns nearby enemies (utility, not pure offensive)
-        if race == "Tauren" and self:IsUsableSpell(R.WarStomp) then
-            self:CastSpell(R.WarStomp)
-            HunterDebug("Used War Stomp")
-            return true
         end
         
         HunterDebug("No offensive racials available for " .. race)
@@ -517,16 +568,40 @@ function AC:HunterIsInMeleeRange(unit)
         return false
     end
 
-    local sawRangeResult = false
+    -- IsSpellInRange() is not sufficiently trustworthy by itself on every
+    -- 3.3.5a client/server combination.  First require the target to be
+    -- inside the close-distance boundary, then use a precise 6-yard item
+    -- range when the client can report one.  This prevents a melee spell from
+    -- being selected for a target that is actually at normal bow range.
+    local closeOk, closeResult = pcall(CheckInteractDistance, unit, 3)
+    if not closeOk or not closeResult then
+        return false
+    end
+
+    local preciseRangeKnown = false
+    local preciseRangeItems = { 31463 } -- 6-yard range check
+    for _, itemID in ipairs(preciseRangeItems) do
+        local itemOk, itemResult = pcall(IsItemInRange, itemID, unit)
+        if itemOk and itemResult ~= nil then
+            preciseRangeKnown = true
+            if itemResult == 1 or itemResult == true then
+                return true
+            end
+        end
+    end
+
+    -- If a precise item check was available and said the target was beyond
+    -- its range, do not let a misleading melee spell range result override it.
+    if preciseRangeKnown then
+        return false
+    end
+
     local meleeSpells = { S.RaptorStrike, S.WingClip, S.MongooseBite }
     for _, spellName in ipairs(meleeSpells) do
         if self:KnowsSpell(spellName) or self:IsUsableSpell(spellName) then
             local result = self:HunterSpellRangeResult(spellName, unit)
-            if result ~= nil then
-                sawRangeResult = true
-                if result == 1 then
-                    return true
-                end
+            if result == 1 then
+                return true
             end
         end
     end
@@ -550,12 +625,10 @@ function AC:HunterIsInRangedRange(unit)
         S.KillShot,
     }
 
-    local sawRangeResult = false
     for _, spellName in ipairs(rangedSpells) do
         if spellName and (spellName == "Auto Shot" or self:KnowsSpell(spellName) or self:IsUsableSpell(spellName)) then
             local result = self:HunterSpellRangeResult(spellName, unit)
             if result ~= nil then
-                sawRangeResult = true
                 if result == 1 then
                     return true
                 end
@@ -563,11 +636,18 @@ function AC:HunterIsInRangedRange(unit)
         end
     end
 
-    if not self:HunterIsInMeleeRange(unit) then
-        local ok, result = pcall(CheckInteractDistance, unit, 1)
-        if ok and result then
-            return true
-        end
+    -- CheckInteractDistance(unit, 1) is roughly 28 yards.  It is only a
+    -- ranged fallback when the target is not inside the close/deadzone
+    -- boundary; otherwise it would incorrectly label deadzone targets as
+    -- ranged and repeatedly attempt shots that cannot fire.
+    local closeOk, closeResult = pcall(CheckInteractDistance, unit, 3)
+    if closeOk and closeResult then
+        return false
+    end
+
+    local ok, result = pcall(CheckInteractDistance, unit, 1)
+    if ok and result then
+        return true
     end
 
     return false
@@ -575,6 +655,9 @@ end
 
 function AC:GetHunterRangeState(unit)
     unit = unit or "target"
+    -- Favor a valid ranged result when both APIs report a boundary target.
+    -- This is the ordering used by the stable Hunter path and prevents a
+    -- noisy melee range result from trapping the rotation in melee actions.
     if self:HunterIsInRangedRange(unit) then
         return "ranged"
     end
@@ -651,12 +734,13 @@ function AC:CalculatePetThreatPriority(target)
     if not target then return 0 end
     
     -- Health percentage (lower health = higher priority for pet to finish off)
-    local healthPercent = (target.health / target.maxHealth) * 100
+    local maxHealth = target.maxHealth or 0
+    local healthPercent = maxHealth > 0 and ((target.health or 0) / maxHealth * 100) or 100
     priority = priority + (100 - healthPercent) * 0.5
     
     -- Level difference (higher level = higher priority)
     local playerLevel = UnitLevel("player")
-    local levelDiff = target.level - playerLevel
+    local levelDiff = (target.level or playerLevel) - playerLevel
     if levelDiff > 0 then
         priority = priority + (levelDiff * 10)
     end
@@ -691,8 +775,8 @@ function AC:CalculatePetThreatPriority(target)
 end
 
 -- Get the best target for pet to attack
-function AC:GetBestPetTarget()
-    local targets = self:GetNearbyHostileTargets()
+function AC:GetBestPetTarget(targets)
+    targets = targets or self:GetNearbyHostileTargets()
     local bestTarget = nil
     local highestPriority = 0
     
@@ -757,28 +841,39 @@ end
 function AC:ManageSmartPetTargeting()
     if not Throttle("SmartPetTargeting", 1) then return false end -- Faster for threat response
 
-    if self:EnsurePetAttackingCurrentTarget() then
-        return true
+    -- Group play should remain predictable and aligned with the tank/player's
+    -- chosen focus rather than allowing autonomous nameplate target swaps.
+    if IsInGroup() then
+        return self:EnsurePetAttackingCurrentTarget()
     end
 
-    if UnitExists("target") and UnitCanAttack("player", "target") and UnitExists("pettarget") and UnitIsUnit("pettarget", "target") then
-        return false
-    end
-    
     local targets = self:GetNearbyHostileTargets()
-    if #targets == 0 then return false end
+    if #targets == 0 then
+        return self:EnsurePetAttackingCurrentTarget()
+    end
     
     local currentPetTarget = UnitExists("pettarget") and "pettarget" or nil
     local bestTarget, bestPriority = nil, 0
     
-    -- Use threat-aware targeting for solo play
-    if not IsInGroup() then
-        bestTarget, bestPriority = self:GetBestSoloTarget()
-    else
-        bestTarget, bestPriority = self:GetBestPetTarget()
-    end
+    bestTarget, bestPriority = self:GetBestSoloTarget(targets)
     
     if not bestTarget then return false end
+
+    -- The player's selected target remains the default. Only peel the pet to a
+    -- different solo target when the scoring system finds a materially more
+    -- urgent threat (normally a loose mob attacking the hunter).
+
+    local selectedPriority = 0
+    for _, candidate in ipairs(targets) do
+        if candidate.unit == "target" then
+            selectedPriority = self:CalculatePetThreatPriority(candidate)
+            break
+        end
+    end
+
+    if bestTarget.unit == "target" or bestPriority <= selectedPriority + 50 then
+        return self:EnsurePetAttackingCurrentTarget()
+    end
     
     -- Check if pet should switch targets
     local shouldSwitch = false
@@ -814,13 +909,6 @@ function AC:ManageSmartPetTargeting()
     return false
 end
 
-function AC:GetKnownAspects()
-    local aspects = {}
-    if self:KnowsSpell(S.AspectDragonhawk) then table.insert(aspects, S.AspectDragonhawk) end
-    if self:KnowsSpell(S.AspectHawk) then table.insert(aspects, S.AspectHawk) end
-    return aspects
-end
-
 function AC:IsFastDyingMob(unit)
     unit = unit or "target"
     if not UnitExists(unit) then return false end
@@ -834,6 +922,8 @@ function AC:IsFastDyingMob(unit)
     if hp < 60 and targetLevel < playerLevel - 2 then return true end 
     return false
 end
+
+AC.HunterIsFastDyingMob = AC.IsFastDyingMob
 
 function AC:HunterShouldUseSerpentSting(unit, targetHP, targetIsTough, isFastDying)
     unit = unit or "target"
@@ -882,7 +972,8 @@ function AC:GetPetStatus()
     end
 
     local state = self:InitializeHunterState()
-    if state.petDeadPending and IsUsableSpell(S.RevivePet) then
+    if state.petDeadPending and self:HunterSpellAvailable(S.RevivePet) and
+       IsUsableSpell(S.RevivePet) then
         return "dead"
     end
     
@@ -896,10 +987,6 @@ function AC:IsInGroupWithTank()
         if self:IsTank(unit) then return true end 
     end
     return false
-end
-
-function AC:ShouldDisablePetGrowl()
-    return self:IsInGroupWithTank() or GetNumRaidMembers() > 0
 end
 
 -- Check if pet has high threat on current target
@@ -932,8 +1019,8 @@ function AC:PetHasHighThreat()
 end
 
 -- Enhanced threat-aware pet targeting for solo play
-function AC:GetBestSoloTarget()
-    local targets = self:GetNearbyHostileTargets()
+function AC:GetBestSoloTarget(targets)
+    targets = targets or self:GetNearbyHostileTargets()
     local bestTarget = nil
     local highestPriority = 0
     
@@ -984,12 +1071,15 @@ function AC:ManagePet(inCombat)
 
     -- Priority 1: Revive dead pet (critical for survival)
     if petStatus == "dead" and self:KnowsSpell(S.RevivePet) and not self:IsChanneling() then
-        local canRevive = IsUsableSpell(S.RevivePet) and not self:IsPlayerMoving()
+        local canRevive = self:HunterSpellAvailable(S.RevivePet) and
+                          IsUsableSpell(S.RevivePet) and not self:IsPlayerMoving()
         if canRevive and self:ActionThrottle("RevivePetAttempt", 2.0) then
             HunterDebug("Attempting to revive pet")
-            CastSpellByName(S.RevivePet)
-            state.petDeadPending = true
-            return true
+            if self:CastSpell(S.RevivePet, "player") then
+                state.petDeadPending = true
+                return true
+            end
+            HunterDebug("Revive Pet failed to start")
         elseif not canRevive and Throttle("RevivePetBlocked", 3.0) then
             HunterDebug("Revive Pet blocked - moving:" .. tostring(self:IsPlayerMoving()) .. ", usable:" .. tostring(IsUsableSpell(S.RevivePet)))
         end
@@ -1008,7 +1098,7 @@ function AC:ManagePet(inCombat)
             end
             if self:ActionThrottle("CallPetAttempt", 6.0) then
                 HunterDebug("Calling Pet (no pet active)")
-                if self:CastSpell(S.CallPet) then
+                if self:CastSpell(S.CallPet, "player") then
                     state.petDeadPending = false
                     return true
                 end
@@ -1032,11 +1122,14 @@ function AC:ManagePet(inCombat)
     if petStatus == "alive" then
         -- Emergency stance management (highest priority)
         if self:EmergencyPetPassive() then return true end
+
+        if not inCombat and self:FeedHunterPetIfNeeded() then return true end
         
         if self:PetNeedsMending() and self:IsUsableSpell(S.MendPet) then 
             HunterDebug("Mending Pet"); 
-            self:CastSpell(S.MendPet, "pet"); 
-            return true 
+            if self:CastSpell(S.MendPet, "pet") then
+                return true
+            end
         end
         
         -- Manage pet stance intelligently
@@ -1092,18 +1185,11 @@ function AC:UpdatePetGrowl()
     if not Throttle("PetGrowlToggle", 3) then return false end
     
     local growlKnown = false
-    local cowerKnown = false
-    local growlSlot = nil
-    local cowerSlot = nil
     
     for i=1,10 do
         local name = GetPetActionInfo(i)
         if name == S.PetGrowl then 
             growlKnown = true
-            growlSlot = i
-        elseif name == S.PetCower then
-            cowerKnown = true
-            cowerSlot = i
         end
     end
     
@@ -1122,21 +1208,13 @@ function AC:UpdatePetGrowl()
         return false
     end
     
-    -- Group/Raid: Disable Growl, use Cower if needed
+    -- Group/Raid: disable Growl. Cower is handled as low-health mitigation by
+    -- ManagePetDPS rather than being treated as a threat dump.
     if inGroup or inRaid then
         local changed = self:TogglePetSpell(S.PetGrowl, false)
         if changed then
             HunterDebugThrottled("GrowlGroupOff", 5.0, "Group mode: Growl OFF")
         end
-        
-        -- Use Cower if pet has too much threat in groups
-        if cowerKnown and self:PetHasHighThreat() then
-            if self:GetPetAbilityCooldown(cowerSlot) == 0 then
-                CastPetAction(cowerSlot)
-                HunterDebug("Using Cower to reduce pet threat in group")
-            end
-        end
-        
         return changed
     end
     
@@ -1189,7 +1267,7 @@ function AC:SetPetStance(stanceName)
     local currentStance = self:GetPetStance()
     if currentStance == stanceName then
         HunterDebug("Pet already in " .. stanceName .. " stance")
-        return true
+        return false
     end
     
     -- Find and activate the stance using flexible matching
@@ -1200,6 +1278,10 @@ function AC:SetPetStance(stanceName)
             local nameLower = string.lower(name)
             if string.find(nameLower, targetName) then
                 CastPetAction(i)
+                if self:GetPetStance() ~= stanceName then
+                    HunterDebug("Pet stance change did not confirm: " .. name)
+                    return false
+                end
                 HunterDebug("Set pet stance to: " .. name .. " (requested: " .. stanceName .. ")")
                 return true
             end
@@ -1245,10 +1327,11 @@ function AC:GetOptimalPetStance()
     local playerHealth = self:GetPlayerHealthPercent()
     local hasHostileTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     
-    -- Passive stance conditions (highest priority)
+    -- At critical health the pet must keep protecting the hunter. Passive
+    -- would stop pressure and can send a solo mob back onto the player.
     if playerHealth < 15 then
-        HunterDebug("Pet stance logic: Passive (emergency - low health)")
-        return "Passive"
+        HunterDebug("Pet stance logic: Defensive (emergency - low health)")
+        return "Defensive"
     end
     
     if not inCombat and isInGroup and hasLivingGroupMembers and not hasHostileTarget then
@@ -1297,7 +1380,7 @@ function AC:ManagePetStance()
     return false
 end
 
--- Emergency pet passive (for dangerous situations)
+-- Emergency pet stance handling (for dangerous situations)
 function AC:EmergencyPetPassive()
     if not UnitExists("pet") then return false end
     
@@ -1305,10 +1388,11 @@ function AC:EmergencyPetPassive()
     local inInstance = IsInInstance()
     local _, instanceType = IsInInstance()
     
-    -- Force passive in dangerous situations
+    -- Keep the pet engaged defensively when the hunter is in danger. Forcing
+    -- Passive here would drop the hunter's most important solo protection.
     if playerHealth < 20 then
-        HunterDebug("Emergency: Setting pet to Passive (low health)")
-        return self:SetPetStance("Passive")
+        HunterDebug("Emergency: Setting pet to Defensive (low health)")
+        return self:SetPetStance("Defensive")
     end
     
     if inInstance and (instanceType == "party" or instanceType == "raid") then
@@ -1328,14 +1412,12 @@ function AC:ShouldUseHuntersMark(unit)
 
     local classification = UnitClassification(unit)
     local level = UnitLevel(unit) or 0
-    local playerLevel = UnitLevel("player") or 0
-    local hp = self:GetTargetHealthPercent(unit)
     local isBoss = classification == "worldboss" or level == -1
-    local isTough = classification == "elite" or classification == "rareelite" or isBoss
 
-    -- Use on bosses/elites and tougher high-health targets.
-    if not (isTough or (hp > 80 and level >= (playerLevel + 2))) then
-        HunterDebugThrottled("HuntersMarkSkip", 5.0, "Skipping Hunter's Mark - low value target")
+    -- Hunter's Mark is deliberately boss-only.  Applying it to normal mobs,
+    -- elites, or high-level quest targets costs a GCD and is not worth it.
+    if not isBoss then
+        HunterDebugThrottled("HuntersMarkSkip", 5.0, "Skipping Hunter's Mark - target is not a boss")
         return false
     end
     
@@ -1359,12 +1441,6 @@ function AC:IsTargetFleeing(unit)
     unit = unit or "target"
     if not UnitExists(unit) then return false end
     return GetUnitSpeed(unit) > 1 and self:GetTargetHealthPercent(unit) < 20 
-end
-
-function AC:IsInHunterDeadzone(unit)
-    unit = unit or "target"
-    if not UnitExists(unit) or UnitIsDeadOrGhost(unit) then return false end
-    return self:GetHunterRangeState(unit) == "deadzone"
 end
 
 -- =============================================
@@ -1408,21 +1484,128 @@ function AC:HunterKnowsSpell(spellName)
     return self:GetHunterSpellIndex(spellName) ~= nil
 end
 
+function AC:GetHunterTalentRank(talentName)
+    if not talentName or not GetTalentInfo or not GetNumTalentTabs or not GetNumTalents then return 0 end
+
+    local now = GetTime()
+    self.hunterTalentRanks = self.hunterTalentRanks or {}
+    self.hunterTalentRankStamp = self.hunterTalentRankStamp or 0
+    if (now - self.hunterTalentRankStamp) > 2.0 then
+        self.hunterTalentRanks = {}
+        self.hunterTalentRankStamp = now
+    end
+
+    if self.hunterTalentRanks[talentName] ~= nil then
+        return self.hunterTalentRanks[talentName]
+    end
+
+    local rank = 0
+    for tab = 1, GetNumTalentTabs() do
+        for talent = 1, GetNumTalents(tab) do
+            local name, _, _, _, currentRank = GetTalentInfo(tab, talent)
+            if name == talentName then
+                rank = currentRank or 0
+                break
+            end
+        end
+        if rank > 0 then break end
+    end
+
+    self.hunterTalentRanks[talentName] = rank
+    return rank
+end
+
+function AC:ManageHunterImprovedTracking()
+    local improvedTrackingName = GetSpellInfo(52788) or "Improved Tracking"
+    if self:GetHunterTalentRank(improvedTrackingName) <= 0 then return false end
+    if not GetNumTrackingTypes or not GetTrackingInfo or not SetTracking then return false end
+    if not Throttle("HunterImprovedTracking", 2.0) then return false end
+
+    local validTrackingNames = {}
+    for _, spellID in ipairs(HUNTER_DAMAGE_TRACKING_IDS) do
+        local spellName = GetSpellInfo(spellID)
+        if spellName then
+            validTrackingNames[spellName] = true
+        end
+    end
+
+    local preferredSpellID = UnitExists("target") and
+                             HUNTER_TRACKING_BY_CREATURE[UnitCreatureType("target")] or nil
+    local preferredName = preferredSpellID and GetSpellInfo(preferredSpellID) or nil
+    local preferredIndex = nil
+    local fallbackIndex = nil
+
+    for index = 1, GetNumTrackingTypes() do
+        local name, _, active = GetTrackingInfo(index)
+        if name and validTrackingNames[name] then
+            -- Any qualifying creature tracker activates Improved Tracking for
+            -- all supported creature types, so never churn a valid selection.
+            if active then
+                return false
+            end
+            fallbackIndex = fallbackIndex or index
+            if preferredName and name == preferredName then
+                preferredIndex = index
+            end
+        end
+    end
+
+    local trackingIndex = preferredIndex or fallbackIndex
+    if not trackingIndex then return false end
+
+    SetTracking(trackingIndex)
+    local trackingName, _, active = GetTrackingInfo(trackingIndex)
+    if active then
+        HunterDebug("Improved Tracking enabled: " .. tostring(trackingName))
+        return true
+    end
+
+    HunterDebugThrottled("ImprovedTrackingRejected", 3.0, "Unable to enable creature tracking")
+    return false
+end
+
+function AC:IsCustomSpellAvailable(spellName)
+    return (spellName == S.LaunchExplosiveTrap or spellName == S.LaunchImmolationTrap) and
+           GetSpellInfo(spellName) ~= nil
+end
+
+function AC:GetHunterTrapForLauncher(spellName)
+    if spellName == S.LaunchExplosiveTrap then
+        return S.ExplosiveTrap
+    elseif spellName == S.LaunchImmolationTrap then
+        return S.ImmolationTrap
+    end
+    return nil
+end
+
 function AC:HunterSpellAvailable(spellName)
     if not spellName then return false end
     local level = UnitLevel("player") or 1
+
+    -- Auto Shot is the Hunter's baseline ranged attack.  Some 3.3.5a
+    -- spellbooks expose it as an innate client action rather than a normal
+    -- learned spellbook entry, so the spell entry plus level is authoritative
+    -- for this one ability.
+    if spellName == S.AutoShot then
+        return level >= 1 and GetSpellInfo(spellName) ~= nil
+    end
+
+    -- The launcher is custom, but it is only valid once the corresponding
+    -- normal trap has been learned. The server supplies the highest rank.
+    local trapSpell = self:GetHunterTrapForLauncher(spellName)
+    if trapSpell then
+        return self:HunterKnowsSpell(trapSpell) and self:IsCustomSpellAvailable(spellName)
+    end
+
     local learnedByLevel = {
         [S.AutoShot] = 1,
         [S.RaptorStrike] = 1,
-        [S.AspectMonkey] = 4,
         [S.SerpentSting] = 4,
         [S.ArcaneShot] = 6,
         [S.HuntersMark] = 6,
-        [S.ConcussiveShot] = 8,
         [S.WingClip] = 12,
         [S.MendPet] = 12,
         [S.MultiShot] = 18,
-        [S.Disengage] = 20,
         [S.FeignDeath] = 30,
         [S.Volley] = 40,
         [S.SteadyShot] = 50,
@@ -1433,11 +1616,21 @@ function AC:HunterSpellAvailable(spellName)
     }
 
     local learnedAt = learnedByLevel[spellName]
-    if learnedAt then
-        return level >= learnedAt
+    if learnedAt and level < learnedAt then
+        return false
     end
 
-    return self:HunterKnowsSpell(spellName) or GetSpellInfo(spellName) and true or false
+    -- GetSpellInfo() only proves that the client knows the spell's database
+    -- entry; it does not prove that this character learned the spell. The
+    -- old fallback made leveling rotations "successfully" cast unlearned
+    -- abilities such as Bestial Wrath and return before real attacks.
+    if self:HunterKnowsSpell(spellName) then
+        return true
+    end
+
+    -- These are AzerothCore custom launch spells, which may exist in the
+    -- spell database without appearing in the player's spellbook.
+    return self:IsCustomSpellAvailable(spellName)
 end
 
 function AC:HunterSpellInRange(spellName, unit, opts)
@@ -1445,14 +1638,17 @@ function AC:HunterSpellInRange(spellName, unit, opts)
     if not spellName or not unit or unit == "player" then return true end
     if not UnitExists(unit) then return false end
 
+    -- Never accept a melee spell solely because IsSpellInRange() returned 1;
+    -- that API can be overly permissive for melee abilities on private
+    -- 3.3.5a clients.  Use the guarded physical-range check instead.
+    if self:HunterIsMeleeSpell(spellName) then
+        return self:HunterIsInMeleeRange(unit)
+    end
+
     local ok, result = pcall(IsSpellInRange, spellName, unit)
     if ok and result ~= nil then
         if result == 1 then
             return true
-        end
-
-        if self:HunterIsMeleeSpell(spellName) then
-            return false
         end
 
         return self:HunterIsInRangedRange(unit)
@@ -1464,9 +1660,6 @@ function AC:HunterSpellInRange(spellName, unit, opts)
 
     if UnitCanAttack("player", unit) then
         local rangeState = self:GetHunterRangeState(unit)
-        if self:HunterIsMeleeSpell(spellName) then
-            return rangeState == "melee"
-        end
         return rangeState == "ranged"
     end
 
@@ -1515,7 +1708,10 @@ function AC:HunterCanCast(spellName, unit, opts)
         return false, "cooldown"
     end
 
-    local _, noMana = IsUsableSpell(spellName)
+    local usable, noMana = IsUsableSpell(spellName)
+    if not usable then
+        return false, "unusable"
+    end
     if noMana then
         return false, "no mana"
     end
@@ -1527,29 +1723,109 @@ function AC:HunterCanCast(spellName, unit, opts)
     return true
 end
 
+function AC:GetHunterSpellIndexForRank(spellName, rank)
+    if not spellName or not rank then return nil end
+
+    local wantedRank = "Rank " .. tostring(rank)
+    for tabIndex = 1, GetNumSpellTabs() do
+        local _, _, offset, numSpells = GetSpellTabInfo(tabIndex)
+        for i = offset + 1, offset + numSpells do
+            local name, bookRank = GetSpellName(i, BOOKTYPE_SPELL)
+            if name == spellName and bookRank and (bookRank == wantedRank or bookRank:find(wantedRank, 1, true)) then
+                return i
+            end
+        end
+    end
+
+    return nil
+end
+
 function AC:HunterTryCast(spellName, unit, opts)
     local canCast, reason = self:HunterCanCast(spellName, unit, opts)
     if not canCast then
         if spellName == S.ArcaneShot then
             HunterDebugThrottled("ArcaneReject", 1.0, "Arcane Shot blocked: " .. tostring(reason))
+        elseif spellName == S.MultiShot then
+            HunterDebugThrottled("MultiShotReject", 1.0, "Multi-Shot blocked: " .. tostring(reason))
         end
         return false
     end
 
     unit = unit or "target"
-    CastSpellByName(spellName, unit)
+    local beforeSpellCooldown = self:GetSpellCooldown(spellName)
+    local beforeGlobalCooldown = self:GetSpellCooldown(61304)
+    local beforeCast = UnitCastingInfo("player")
+    local beforeChannel = UnitChannelInfo("player")
+    local castByRank = opts and opts.rank and self:GetHunterSpellIndexForRank(spellName, opts.rank)
+    local hadTarget = UnitExists("target")
+    local shouldChangeTarget = unit ~= "player" and unit ~= "target" and
+                               not (UnitExists("target") and UnitIsUnit("target", unit))
+    local changedTarget = false
+    local castAccepted = pcall(function()
+        if unit == "player" then
+            -- The second CastSpellByName argument is a self-cast boolean on
+            -- the 3.3.5 client; it is not a unit token.
+            if castByRank then
+                CastSpell(castByRank, BOOKTYPE_SPELL)
+            else
+                CastSpellByName(spellName, true)
+            end
+        elseif unit == "target" then
+            if castByRank then
+                CastSpell(castByRank, BOOKTYPE_SPELL)
+            else
+                CastSpellByName(spellName)
+            end
+        else
+            TargetUnit(unit)
+            if not UnitExists("target") or not UnitIsUnit("target", unit) then
+                error("unable to target " .. tostring(unit))
+            end
+            changedTarget = shouldChangeTarget
+
+            if castByRank then
+                CastSpell(castByRank, BOOKTYPE_SPELL)
+            else
+                CastSpellByName(spellName)
+            end
+        end
+    end)
+
+    if changedTarget then
+        if hadTarget then TargetLastTarget() else ClearTarget() end
+    end
+
+    if not castAccepted then
+        HunterDebugThrottled("CastTargetRejected_" .. spellName, 1.0, "Unable to target unit for: " .. spellName)
+        return false
+    end
 
     if SpellIsTargeting and SpellIsTargeting() then
         SpellStopTargeting()
         return false
     end
 
+    local afterSpellCooldown = self:GetSpellCooldown(spellName)
+    local afterGlobalCooldown = self:GetSpellCooldown(61304)
+    local started = (not beforeCast and UnitCastingInfo("player")) or
+                   (not beforeChannel and UnitChannelInfo("player"))
+    local queued = IsCurrentSpell(spellName) or
+                   (castByRank and IsCurrentSpell(castByRank))
+    if not started and afterSpellCooldown <= beforeSpellCooldown + 0.05 and
+       afterGlobalCooldown <= beforeGlobalCooldown + 0.05 and
+       not queued then
+        HunterDebugThrottled("CastRejected_" .. spellName, 1.0, "Cast rejected by client: " .. spellName)
+        return false
+    end
+
     local state = self:InitializeHunterState()
     if spellName == S.ExplosiveShot then
         state.lastExplosiveShotCast = GetTime()
+        if opts and opts.rank and state.lockAndLoadActive then
+            state.lockAndLoadShots = (state.lockAndLoadShots or 0) + 1
+        end
     elseif spellName == S.KillCommand then
         state.lastKillCommandCast = GetTime()
-        state.killCommandUntil = 0
     end
 
     return true
@@ -1557,33 +1833,14 @@ end
 
 function AC:InitializeHunterState()
     self.hunterState = self.hunterState or {
-        killCommandUntil = 0,
         lastKillCommandCast = 0,
         lastExplosiveShotCast = 0,
         lockAndLoadActive = false,
+        lockAndLoadShots = 0,
         petDeadPending = false,
     }
+    self.hunterState.lockAndLoadShots = self.hunterState.lockAndLoadShots or 0
     return self.hunterState
-end
-
-function AC:HunterCombatLogLooksCritical(subevent, ...)
-    local args = { ... }
-
-    if subevent == "SWING_DAMAGE" then
-        for i = 9, #args do
-            if type(args[i]) == "boolean" and args[i] then
-                return true
-            end
-        end
-    elseif subevent == "SPELL_DAMAGE" or subevent == "RANGE_DAMAGE" then
-        for i = 12, #args do
-            if type(args[i]) == "boolean" and args[i] then
-                return true
-            end
-        end
-    end
-
-    return false
 end
 
 function AC:HandleClassCombatLog(...)
@@ -1595,47 +1852,42 @@ function AC:HandleClassCombatLog(...)
     local petGUID = UnitGUID("pet")
     local playerGUID = UnitGUID("player")
 
-    if petGUID and sourceGUID == petGUID then
-        if subevent == "SWING_DAMAGE" or subevent == "SPELL_DAMAGE" or subevent == "RANGE_DAMAGE" then
-            if self:HunterCombatLogLooksCritical(subevent, ...) then
-                state.killCommandUntil = GetTime() + 5.0
-                if AC.debugMode and Throttle("HunterKillCommandProcDebug", 1.0) then
-                    HunterDebug("Kill Command proc window opened")
-                end
-            end
-        end
-    end
-
     if playerGUID and sourceGUID == playerGUID and subevent == "SPELL_CAST_SUCCESS" then
         local spellName = select(10, ...)
         if spellName == S.KillCommand then
             state.lastKillCommandCast = GetTime()
-            state.killCommandUntil = 0
         end
     end
 
     if subevent == "UNIT_DIED" and destGUID and petGUID and destGUID == petGUID then
-        state.killCommandUntil = 0
         state.petDeadPending = true
     end
-end
-
-function AC:HunterHasKillCommandProc()
-    local state = self:InitializeHunterState()
-    return state.killCommandUntil and state.killCommandUntil > GetTime()
 end
 
 function AC:HunterCanUseKillCommand()
     local state = self:InitializeHunterState()
     if self:GetPetStatus() ~= "alive" then return false end
     if not UnitExists("pettarget") or not UnitIsUnit("pettarget", "target") then return false end
-    if not self:HunterHasKillCommandProc() then return false end
     if (GetTime() - (state.lastKillCommandCast or 0)) < 1.0 then return false end
-    return self:HunterCanCast(S.KillCommand, "target", { requirePet = true, noMelee = true, noDeadzone = true })
+    return self:HunterCanCast(S.KillCommand, "target", { requirePet = true })
 end
 
-function AC:HunterCanFireExplosiveShot()
-    if not self:HunterCanCast(S.ExplosiveShot, "target", { noMelee = true, noDeadzone = true }) then
+function AC:HunterLockAndLoadRank()
+    local state = self:InitializeHunterState()
+    if not state.lockAndLoadActive then return nil end
+
+    if state.lockAndLoadShots == 0 or state.lockAndLoadShots == 2 then
+        return 4
+    elseif state.lockAndLoadShots == 1 then
+        return 3
+    end
+
+    return nil
+end
+
+function AC:HunterCanFireExplosiveShot(castOpts)
+    castOpts = castOpts or { noMelee = true, noDeadzone = true }
+    if not self:HunterCanCast(S.ExplosiveShot, "target", castOpts) then
         return false
     end
 
@@ -1646,7 +1898,9 @@ function AC:HunterCanFireExplosiveShot()
     local esRemaining = self:DebuffTimeRemaining("target", S.ExplosiveShot)
 
     if hasLockAndLoad then
-        return sinceLastES >= 1.0 and (not esRemaining or esRemaining <= 0.25)
+        -- WotLK's 4-3-4 sequence intentionally uses separate ranks so the
+        -- middle shot does not overwrite the first rank's damage-over-time.
+        return self:HunterLockAndLoadRank() ~= nil and sinceLastES >= 1.0
     end
 
     if esRemaining and esRemaining > 0.35 then
@@ -1662,13 +1916,40 @@ function AC:UpdateSurvivalProcState()
 
     if hasLockAndLoad and not state.lockAndLoadActive then
         state.lockAndLoadActive = true
+        state.lockAndLoadShots = 0
         HunterDebug("SV: Lock and Load active")
     elseif not hasLockAndLoad and state.lockAndLoadActive then
         state.lockAndLoadActive = false
+        state.lockAndLoadShots = 0
         HunterDebug("SV: Lock and Load faded")
     end
 
     return hasLockAndLoad
+end
+
+function AC:IsHunterAutoShotActive()
+    if IsAutoRepeatSpell then
+        local ok, active = pcall(IsAutoRepeatSpell, S.AutoShot)
+        if ok and active ~= nil then
+            return active and true or false
+        end
+    end
+
+    -- IsCurrentSpell is a fallback on clients that do not expose the
+    -- auto-repeat helper. It may return a name, a spell ID, or nil.
+    if IsCurrentSpell then
+        local ok, current = pcall(IsCurrentSpell, S.AutoShot)
+        if ok and current then
+            if current == S.AutoShot or current == true then
+                return true
+            end
+            if type(current) == "number" and current > 0 then
+                return GetSpellInfo(current) == S.AutoShot
+            end
+        end
+    end
+
+    return false
 end
 
 function AC:HandleAutoAttack()
@@ -1677,19 +1958,50 @@ function AC:HandleAutoAttack()
     end
 
     local rangeState = self:GetHunterRangeState("target")
-    local autoShotActive = false
-    if IsAutoRepeatSpell then
-        autoShotActive = IsAutoRepeatSpell("Auto Shot") and true or false
-    end
+    local autoShotActive = self:IsHunterAutoShotActive()
 
     if rangeState == "ranged" then
-        if not autoShotActive and self:HunterKnowsSpell("Auto Shot") then
-            CastSpellByName("Auto Shot")
+        if autoShotActive then
+            return false
+        end
+
+        -- Auto Shot is an auto-repeat attack, not a normal GCD spell. Do not
+        -- send it through HunterCanCast/IsUsableSpell, which can report false
+        -- while the weapon swing timer or another spell is active.
+        if not self:HunterSpellAvailable(S.AutoShot) then
+            HunterDebugThrottled("AutoShotUnavailable", 2.0, "Auto Shot skipped: spell is not known")
+            return false
+        end
+
+        if UnitCastingInfo("player") or UnitChannelInfo("player") then
+            HunterDebugThrottled("AutoShotCasting", 2.0, "Auto Shot waiting: player is casting/channeling")
+            return false
+        end
+
+        CastSpellByName(S.AutoShot)
+        if self:IsHunterAutoShotActive() then
             StartAttack()
+            HunterDebugThrottled("AutoShotStarted", 2.0, "Auto Shot started")
             return true
         end
+
+        -- If this client exposes neither repeat-state API, the cast request
+        -- itself is the only confirmation available. Treat it as consumed so
+        -- successive ticks do not repeatedly toggle Auto Shot.
+        if not IsAutoRepeatSpell and not IsCurrentSpell then
+            StartAttack()
+            HunterDebugThrottled("AutoShotRequested", 2.0, "Auto Shot requested (no client repeat-state API)")
+            return true
+        end
+
+        HunterDebugThrottled("AutoShotRejected", 2.0, "Auto Shot request was not accepted by the client")
     elseif autoShotActive then
-        CastSpellByName("Auto Shot")
+        -- Stop the ranged repeat when the target enters close range so the
+        -- melee branch is clean.
+        CastSpellByName(S.AutoShot)
+        HunterDebugThrottled("AutoShotStopped", 2.0, "Auto Shot stopped outside ranged distance")
+    else
+        HunterDebugThrottled("AutoShotRange", 2.0, "Auto Shot waiting: range state=" .. tostring(rangeState))
     end
 
     return false
@@ -1729,7 +2041,9 @@ function AC:ManageAspects(spec, inCombat, manaPercent)
     end
 
     if bestDpsAspect then
-        if self:HasBuff("player", S.AspectViper) and manaPercent > 70 then
+        -- Stay in Viper while out of combat so it can refill the bar fully.
+        -- Once combat is established, leave Viper above the 70% threshold.
+        if inCombat and self:HasBuff("player", S.AspectViper) and manaPercent > 70 then
             if self:HunterTryCast(bestDpsAspect, "player") then
                 HunterDebug("Aspect: " .. bestDpsAspect .. " (leave viper)")
                 return true
@@ -1739,6 +2053,35 @@ function AC:ManageAspects(spec, inCombat, manaPercent)
                 HunterDebug("Aspect: " .. bestDpsAspect)
                 return true
             end
+        end
+    end
+
+    return false
+end
+
+function AC:HunterHasMovementImpairingDebuff()
+    local knownEffects = {
+        ["frost nova"] = true,
+        ["entangling roots"] = true,
+        ["hamstring"] = true,
+        ["wing clip"] = true,
+        ["crippling poison"] = true,
+        ["chains of ice"] = true,
+        ["curse of exhaustion"] = true,
+        ["piercing howl"] = true,
+        ["earthbind"] = true,
+        ["freeze"] = true,
+        ["web"] = true,
+        ["net"] = true,
+    }
+
+    for i = 1, 40 do
+        local name = UnitDebuff("player", i)
+        if not name then break end
+        local lowerName = name:lower()
+        if knownEffects[lowerName] or lowerName:find("slow", 1, true) or
+           lowerName:find("snare", 1, true) or lowerName:find("root", 1, true) then
+            return true
         end
     end
 
@@ -1756,11 +2099,6 @@ function AC:UseDefensiveCooldowns(healthPercent)
         return true
     end
 
-    if healthPercent < 50 and self:HunterTryCast(S.MasterCall, "player", { requirePet = true }) then
-        HunterDebug("Master's Call")
-        return true
-    end
-
     if self:UseRacials(false, true) then
         return true
     end
@@ -1768,13 +2106,15 @@ function AC:UseDefensiveCooldowns(healthPercent)
     return false
 end
 
-function AC:HunterShouldMark(unit, targetHP, targetIsTough)
+function AC:HunterShouldMark(unit)
     unit = unit or "target"
     return self:ShouldUseHuntersMark(unit)
 end
 
-function AC:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies)
-    if spec == "Beast Mastery" and targetIsTough and self:HunterTryCast(S.BestialWrath, "player", { requirePet = true }) then
+function AC:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies, inCombat)
+    if not inCombat then return false end
+
+    if spec == "Beast Mastery" and (targetIsTough or targetHP > 40) and self:HunterTryCast(S.BestialWrath, "player", { requirePet = true }) then
         HunterDebug("BM: Bestial Wrath")
         return true
     end
@@ -1784,8 +2124,12 @@ function AC:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies)
         return true
     end
 
-    if self:UseTrinkets() then
+    if (targetIsTough or enemies >= 3) and self:UseTrinkets() then
         HunterDebug("Used Trinkets")
+    end
+
+    if targetIsTough and self.UseOffensivePotion and self:UseOffensivePotion(true) then
+        HunterDebug("Used offensive potion")
     end
 
     if self:UseRacials(true, false) then
@@ -1796,7 +2140,13 @@ function AC:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies)
 end
 
 function AC:HunterHandleUtility(spec, petStatus)
-    if self:HunterKnowsSpell(S.Misdirection) and IsInGroup() and self:ActionThrottle("HunterMisdirection", 30) then
+    -- Break crowd control as soon as it exists; this is not limited to the
+    -- low-health defensive branch.
+    if self:UseRacials(false, true) then
+        return true
+    end
+
+    if self:HunterKnowsSpell(S.Misdirection) and self:ActionThrottle("HunterMisdirection", 30) then
         local target = nil
         for i = 1, (GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()) do
             local unit = GetNumRaidMembers() > 0 and "raid"..i or "party"..i
@@ -1806,7 +2156,7 @@ function AC:HunterHandleUtility(spec, petStatus)
             end
         end
 
-        if not target and petStatus == "alive" and not self:IsInGroupWithTank() then
+        if not target and petStatus == "alive" then
             target = "pet"
         end
 
@@ -1816,7 +2166,17 @@ function AC:HunterHandleUtility(spec, petStatus)
         end
     end
 
-    if UnitCastingInfo("target") then
+    if UnitCastingInfo("target") or UnitChannelInfo("target") then
+        if self:HunterIsInMeleeRange("target") and self:HunterTryCast(R.ArcaneTorrent, "player") then
+            HunterDebug("Arcane Torrent")
+            return true
+        end
+
+        if self:HunterIsInMeleeRange("target") and self:HunterTryCast(R.WarStomp, "player") then
+            HunterDebug("War Stomp")
+            return true
+        end
+
         if spec == "Marksmanship" and self:HunterTryCast(S.SilencingShot, "target", { noMelee = true, noDeadzone = true }) then
             HunterDebug("Silencing Shot")
             return true
@@ -1836,15 +2196,39 @@ function AC:HunterHandleUtility(spec, petStatus)
     return false
 end
 
-function AC:HunterHandleCloseRange(targetHP, isFastDying, rangeState)
+function AC:HunterHandleCloseRange(spec, targetHP, isFastDying, rangeState)
     rangeState = rangeState or self:GetHunterRangeState("target")
 
     if rangeState == "deadzone" then
-        if not isFastDying and self:HunterTryCast(S.Disengage, "player") then
-            HunterDebug("Disengage")
+        -- Do not automatically use the hunter escape. It is a player-
+        -- controlled action, not a rotation action, and firing it merely
+        -- because the target is close can create a worse position or waste
+        -- an important cooldown.
+        return false
+    end
+
+    -- Revalidate before entering the melee-only section.  This protects
+    -- against a stale range state while the target is moving or changing
+    -- distance between rotation ticks.
+    if not self:HunterIsInMeleeRange("target") then
+        return false
+    end
+
+    -- Execute and Survival's primary shot remain valuable inside melee range.
+    if targetHP < 20 and self:HunterTryCast(S.KillShot, "target") then
+        HunterDebug("Close range: Kill Shot")
+        return true
+    end
+
+    if spec == "Survival" then
+        local hasLockAndLoad = self:UpdateSurvivalProcState()
+        local explosiveOptions = {}
+        local lockAndLoadRank = hasLockAndLoad and self:HunterLockAndLoadRank() or nil
+        if lockAndLoadRank then explosiveOptions.rank = lockAndLoadRank end
+        if self:HunterCanFireExplosiveShot({ noDeadzone = true }) and self:HunterTryCast(S.ExplosiveShot, "target", explosiveOptions) then
+            HunterDebug(hasLockAndLoad and "Close range: Explosive Shot (LnL)" or "Close range: Explosive Shot")
             return true
         end
-        return false
     end
 
     if self:IsTargetFleeing("target") and self:HunterTryCast(S.WingClip, "target") then
@@ -1852,8 +2236,7 @@ function AC:HunterHandleCloseRange(targetHP, isFastDying, rangeState)
         return true
     end
 
-    if self:HunterIsInMeleeRange("target") and self:HunterTryCast(S.ExplosiveTrap, "player") then
-        HunterDebug("Explosive Trap")
+    if not isFastDying and self:HunterTryLaunchTrap(S.LaunchExplosiveTrap, "Close range: Launch Explosive Trap") then
         return true
     end
 
@@ -1864,11 +2247,6 @@ function AC:HunterHandleCloseRange(targetHP, isFastDying, rangeState)
 
     if self:HunterTryCast(S.RaptorStrike, "target") then
         HunterDebug("Raptor Strike")
-        return true
-    end
-
-    if not isFastDying and self:HunterTryCast(S.Disengage, "player") then
-        HunterDebug("Disengage")
         return true
     end
 
@@ -1884,7 +2262,16 @@ function AC:HunterTryLaunchTrap(spellName, debugLabel)
         return false
     end
 
+    local cooldownBefore = self:GetSpellCooldown(spellName)
     if self:SafeCastGroundAOE(spellName) then
+        HunterDebug(debugLabel or spellName)
+        return true
+    end
+
+    -- SafeCastGroundAOE can perform the cast but return false for its group
+    -- size safety result. Treat a started cooldown or active cursor targeting
+    -- state as a successful action so the rotation does not double-cast.
+    if self:GetSpellCooldown(spellName) > cooldownBefore or (SpellIsTargeting and SpellIsTargeting()) then
         HunterDebug(debugLabel or spellName)
         return true
     end
@@ -1893,26 +2280,36 @@ function AC:HunterTryLaunchTrap(spellName, debugLabel)
 end
 
 function AC:HunterHandleAOE(enemies, manaPercent)
-    if self:ShouldUseMultiTarget(2, enemies) and self:HunterManaGate(manaPercent, 30) then
+    local useTwoTarget = self:ShouldUseMultiTarget(2, enemies)
+    local useThreeTarget = self:ShouldUseMultiTarget(3, enemies)
+    local manaForThirty = self:HunterManaGate(manaPercent, 30)
+    local manaForTwenty = self:HunterManaGate(manaPercent, 20)
+    local knowsVolley = self:HunterKnowsSpell(S.Volley)
+    local canLaunchExplosive = self:HunterSpellAvailable(S.LaunchExplosiveTrap)
+    local knowsMultiShot = self:HunterSpellAvailable(S.MultiShot)
+
+    if enemies >= 2 then
+        HunterDebugThrottled("HunterAOEDecision", 1.5, string.format(
+            "AoE: enemies=%d 2+:%s 3+:%s mana30:%s mana20:%s ExplosiveTrap:%s Volley:%s Multi-Shot:%s",
+            enemies, tostring(useTwoTarget), tostring(useThreeTarget), tostring(manaForThirty),
+            tostring(manaForTwenty), tostring(canLaunchExplosive), tostring(knowsVolley), tostring(knowsMultiShot)))
+    end
+
+    if useTwoTarget and manaForThirty and canLaunchExplosive then
         if self:HunterTryLaunchTrap(S.LaunchExplosiveTrap, "Launch Explosive Trap") then
             return true
         end
     end
 
-    if self:ShouldUseMultiTarget(3, enemies) and self:HunterManaGate(manaPercent, 30) and self:HunterKnowsSpell(S.Volley) and not self:IsPlayerMoving() and not self:IsChanneling() then
+    if useThreeTarget and manaForThirty and knowsVolley and not self:IsPlayerMoving() and not self:IsChanneling() then
         if self.SafeCastGroundAOE and self:SafeCastGroundAOE(S.Volley) then
             HunterDebug("Volley")
             return true
         end
+        HunterDebugThrottled("HunterVolleyRejected", 1.5, "Volley selected but ground cast was not accepted")
     end
 
-    if self:ShouldUseMultiTarget(3, enemies) and self:HunterManaGate(manaPercent, 30) and not self:HunterKnowsSpell(S.Volley) and self:HunterSpellAvailable(S.LaunchImmolationTrap) and not self:IsPlayerMoving() and not self:IsChanneling() then
-        if self:HunterTryLaunchTrap(S.LaunchImmolationTrap, "Launch Immolation Trap") then
-            return true
-        end
-    end
-
-    if self:ShouldUseMultiTarget(2, enemies) and self:HunterManaGate(manaPercent, 20) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+    if useTwoTarget and manaForTwenty and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("Multi-Shot")
         return true
     end
@@ -1922,7 +2319,7 @@ end
 
 function AC:HunterBeastMasteryRotation(targetHP, targetIsTough, isFastDying, manaPercent, enemies, petStatus)
     if self:HunterCanUseKillCommand() then
-        if self:HunterTryCast(S.KillCommand, "target", { requirePet = true, noMelee = true, noDeadzone = true }) then
+        if self:HunterTryCast(S.KillCommand, "target", { requirePet = true }) then
             HunterDebug("BM: Kill Command")
         end
     end
@@ -1932,28 +2329,17 @@ function AC:HunterBeastMasteryRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    if self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+    if enemies >= 2 and self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("BM: Multi-Shot")
         return true
     end
 
     local serpentUp = self:HasDebuff("target", S.SerpentSting)
-    local serpentRemaining = self:DebuffTimeRemaining("target", S.SerpentSting)
-    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and (not serpentUp or serpentRemaining < 1.5) then
+    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not serpentUp then
         if self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
             HunterDebug("BM: Serpent Sting")
             return true
         end
-    end
-
-    if targetIsTough and self:HunterTryCast(S.BestialWrath, "player", { requirePet = true }) then
-        HunterDebug("BM: Bestial Wrath")
-        return true
-    end
-
-    if targetIsTough and self:HunterTryCast(S.RapidFire, "player") then
-        HunterDebug("Rapid Fire")
-        return true
     end
 
     if self:HunterManaGate(manaPercent, 24) and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
@@ -1969,13 +2355,13 @@ function AC:HunterBeastMasteryRotation(targetHP, targetIsTough, isFastDying, man
     return false
 end
 
-function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, manaPercent)
+function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, manaPercent, enemies)
     if self:HunterTryCast(S.SilencingShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Silencing Shot (off-GCD)")
     end
 
     if self:HunterCanUseKillCommand() then
-        if self:HunterTryCast(S.KillCommand, "target", { requirePet = true, noMelee = true, noDeadzone = true }) then
+        if self:HunterTryCast(S.KillCommand, "target", { requirePet = true }) then
             HunterDebug("MM: Kill Command (off-GCD)")
         end
     end
@@ -2006,7 +2392,7 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         HunterDebugThrottled("MMHoldISSChimera", 1.0, "MM: Holding ISS for Chimera")
     end
 
-    if self:HunterTryCast(S.AimedShot, "target", { stationary = true, noMelee = true, noDeadzone = true, noPlayerCast = true }) then
+    if self:HunterTryCast(S.AimedShot, "target", { noMelee = true, noDeadzone = true, noPlayerCast = true }) then
         HunterDebug(hasImprovedSteady and "MM: Aimed Shot (ISS)" or "MM: Aimed Shot")
         return true
     end
@@ -2015,13 +2401,23 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         HunterDebugThrottled("MMHoldISSAimed", 1.0, "MM: Holding ISS for Aimed")
     end
 
+    if not isFastDying and (targetIsTough or targetHP > 40) then
+        if self:HunterTryLaunchTrap(S.LaunchExplosiveTrap, "MM: Launch Explosive Trap") then
+            return true
+        end
+    end
+
+    if targetIsTough and self:HunterTryCast(S.ReadinessSpell, "player") then
+        HunterDebug("MM: Readiness")
+        return true
+    end
+
     if hasImprovedSteady and shouldUseArcane and self:HunterManaGate(manaPercent, 25) and chimeraCD > 1.0 and aimedCD > 1.0 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Arcane Shot (ISS)")
         return true
     end
 
-    -- Multi-Shot is high value in WotLK MM even on single target when mana allows.
-    if self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+    if enemies >= 2 and self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Multi-Shot")
         return true
     end
@@ -2041,7 +2437,7 @@ end
 
 function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPercent)
     if self:HunterCanUseKillCommand() then
-        if self:HunterTryCast(S.KillCommand, "target", { requirePet = true, noMelee = true, noDeadzone = true }) then
+        if self:HunterTryCast(S.KillCommand, "target", { requirePet = true }) then
             HunterDebug("SV: Kill Command (off-GCD)")
         end
     end
@@ -2052,11 +2448,13 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
     end
 
     local serpentUp = self:HasDebuff("target", S.SerpentSting)
-    local serpentRemaining = self:DebuffTimeRemaining("target", S.SerpentSting)
     local hasLockAndLoad = self:UpdateSurvivalProcState()
 
+    local lockAndLoadRank = hasLockAndLoad and self:HunterLockAndLoadRank() or nil
     if self:HunterCanFireExplosiveShot() then
-        if self:HunterTryCast(S.ExplosiveShot, "target", { noMelee = true, noDeadzone = true }) then
+        local explosiveOptions = { noMelee = true, noDeadzone = true }
+        if lockAndLoadRank then explosiveOptions.rank = lockAndLoadRank end
+        if self:HunterTryCast(S.ExplosiveShot, "target", explosiveOptions) then
             HunterDebug(hasLockAndLoad and "SV: Explosive Shot (LnL)" or "SV: Explosive Shot")
             return true
         end
@@ -2079,12 +2477,12 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
         return true
     end
 
-    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and (not serpentUp or serpentRemaining < 1.0) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not serpentUp and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("SV: Serpent Sting")
         return true
     end
 
-    if self:HunterTryCast(S.AimedShot, "target", { stationary = true, noMelee = true, noDeadzone = true, noPlayerCast = true }) then
+    if self:HunterTryCast(S.AimedShot, "target", { noMelee = true, noDeadzone = true, noPlayerCast = true }) then
         HunterDebug("SV: Aimed Shot")
         return true
     end
@@ -2103,6 +2501,17 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
 end
 
 function AC:HunterLevelingRotation(level, targetHP, targetIsTough, isFastDying, manaPercent, enemies)
+    if self:HunterCanUseKillCommand() then
+        if self:HunterTryCast(S.KillCommand, "target", { requirePet = true }) then
+            HunterDebug("Lvl: Kill Command")
+        end
+    end
+
+    if targetHP > 40 and self:HunterTryCast(S.BestialWrath, "player", { requirePet = true }) then
+        HunterDebug("Lvl: Bestial Wrath")
+        return true
+    end
+
     if targetHP < 20 and level >= 71 and self:HunterTryCast(S.KillShot, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("Lvl: Kill Shot")
         return true
@@ -2123,7 +2532,7 @@ function AC:HunterLevelingRotation(level, targetHP, targetIsTough, isFastDying, 
         return true
     end
 
-    if self:HunterTryCast(S.AimedShot, "target", { stationary = true, noMelee = true, noDeadzone = true, noPlayerCast = true }) then
+    if self:HunterTryCast(S.AimedShot, "target", { noMelee = true, noDeadzone = true, noPlayerCast = true }) then
         HunterDebug("Lvl: Aimed Shot")
         return true
     end
@@ -2153,8 +2562,12 @@ function AC:HunterRotation()
         end
     end
 
-    if hasTarget and petStatus == "alive" then
-        self:EnsurePetAttackingCurrentTarget()
+    -- Improved Tracking is a direct Hunter damage multiplier. Establish one
+    -- qualifying creature tracker before spending normal combat actions, but
+    -- only in combat and only when talented. Out of combat, preserve gathering
+    -- choices such as Find Minerals, Find Herbs, and Find Fish.
+    if inCombat and not IsMounted() and self:ManageHunterImprovedTracking() then
+        return true
     end
 
     if Throttle("HunterRewriteDebugTick", 1.0) then
@@ -2179,6 +2592,12 @@ function AC:HunterRotation()
     end
 
     if self:ManageAspects(spec, inCombat, manaPercent) then
+        return true
+    end
+
+    if inCombat and self:HunterHasMovementImpairingDebuff() and
+       self:HunterTryCast(S.MasterCall, "player", { requirePet = true }) then
+        HunterDebug("Master's Call")
         return true
     end
 
@@ -2208,6 +2627,7 @@ function AC:HunterRotation()
     local rangeState = self:GetHunterRangeState("target")
     local inMelee = rangeState == "melee"
     local inDeadzone = rangeState == "deadzone"
+    local closeBranchAttempted = inMelee or inDeadzone
 
     if self:IsChanneling() then
         local channelSpell = UnitChannelInfo("player")
@@ -2217,11 +2637,17 @@ function AC:HunterRotation()
         end
     end
 
-    if self:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies) then
+    -- Kill Command is off the global cooldown and must remain available even
+    -- when the AoE branch consumes the normal shot decision.
+    if self:HunterCanUseKillCommand() and self:HunterTryCast(S.KillCommand, "target", { requirePet = true }) then
+        HunterDebug("Kill Command")
+    end
+
+    if self:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies, inCombat) then
         return true
     end
 
-    if self:HunterShouldMark("target", targetHP, targetIsTough) and self:HunterTryCast(S.HuntersMark, "target") then
+    if self:HunterShouldMark("target") and self:HunterTryCast(S.HuntersMark, "target") then
         HunterDebug("Hunter's Mark")
         return true
     end
@@ -2230,16 +2656,29 @@ function AC:HunterRotation()
         return true
     end
 
-    if inMelee or inDeadzone then
-        HunterDebugThrottled("HunterCloseRangeState", 2.0, "Range state: " .. rangeState)
-        if self:HunterHandleCloseRange(targetHP, isFastDying, rangeState) then
-            return true
-        end
-        return false
-    end
-
+    -- Custom Launch spells are valid from any range. Let them fire before the
+    -- close-range branch instead of suppressing trap/AoE decisions in melee.
     if self:HunterHandleAOE(enemies, manaPercent) then
         return true
+    end
+
+    if closeBranchAttempted then
+        HunterDebugThrottled("HunterCloseRangeState", 2.0, "Range state: " .. rangeState)
+        if self:HunterHandleCloseRange(spec, targetHP, isFastDying, rangeState) then
+            return true
+        end
+
+        -- The target may have crossed the range boundary while the close
+        -- branch was being evaluated. Re-read
+        -- the state before selecting the ranged rotation so the handoff is
+        -- immediate instead of waiting for another decision cycle.
+        rangeState = self:GetHunterRangeState("target")
+        inMelee = rangeState == "melee"
+        inDeadzone = rangeState == "deadzone"
+
+        -- Never strand the rotation in the close-range branch.  Range APIs
+        -- can briefly disagree while the target is moving, and ranged spells
+        -- are still the safe fallback whenever no close-range action started.
     end
 
     if spec == "Beast Mastery" then
@@ -2247,7 +2686,7 @@ function AC:HunterRotation()
             return true
         end
     elseif spec == "Marksmanship" then
-        if self:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, manaPercent) then
+        if self:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, manaPercent, enemies) then
             return true
         end
     elseif spec == "Survival" then
@@ -2257,6 +2696,19 @@ function AC:HunterRotation()
     else
         if self:HunterLevelingRotation(level, targetHP, targetIsTough, isFastDying, manaPercent, enemies) then
             return true
+        end
+    end
+
+    -- Symmetric handoff: if the target entered melee/deadzone while the
+    -- ranged priority list was being evaluated and no ranged cast started,
+    -- give the close-range handler one immediate opportunity this cycle.
+    if not closeBranchAttempted then
+        local postRangeState = self:GetHunterRangeState("target")
+        if postRangeState == "melee" or postRangeState == "deadzone" then
+            HunterDebugThrottled("HunterRangeToCloseHandoff", 2.0, "Target entered " .. postRangeState .. " range")
+            if self:HunterHandleCloseRange(spec, targetHP, isFastDying, postRangeState) then
+                return true
+            end
         end
     end
 
@@ -2270,6 +2722,11 @@ function AC:CheckHunterBuffs(spec)
     if IsMounted() or UnitAffectingCombat("player") then return false end 
     
     if self:ManagePet(false) then return true end
+
+    if self:HunterKnowsSpell(S.TrueshotAura) and not self:HasBuff("player", S.TrueshotAura) and self:HunterTryCast(S.TrueshotAura, "player") then
+        HunterDebug("Trueshot Aura")
+        return true
+    end
     
     local manaPercent = (UnitPowerMax("player", 0) > 0) and (UnitPower("player", 0) / UnitPowerMax("player", 0) * 100) or 100
     if self:ManageAspects(spec, false, manaPercent) then return true end

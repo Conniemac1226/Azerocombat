@@ -19,28 +19,22 @@ local S = {
     CurseOfTongues = "Curse of Tongues",
     CurseOfWeakness = "Curse of Weakness",
     DrainLife = "Drain Life",
-    DrainMana = "Drain Mana",
     DrainSoul = "Drain Soul",
     Haunt = "Haunt",
-    HowlOfTerror = "Howl of Terror",
     SeedOfCorruption = "Seed of Corruption",
     ShadowBolt = "Shadow Bolt",
     SiphonLife = "Siphon Life",
     UnstableAffliction = "Unstable Affliction",
     
     -- ========== DEMONOLOGY SPELLS ==========
-    BanishExile = "Banish",
     DemonArmor = "Demon Armor",
     DemonSkin = "Demon Skin",
     DemonicEmpowerment = "Demonic Empowerment",
-    EnslaveDemon = "Enslave Demon",
     FelArmor = "Fel Armor",
-    FelDomination = "Fel Domination",
     ImmolationAura = "Immolation Aura",
     Metamorphosis = "Metamorphosis",
     ShadowCleave = "Shadow Cleave", -- Metamorphosis ability
     SoulLink = "Soul Link",
-    SoulShatter = "Soulshatter",
     SummonFelguard = "Summon Felguard",
     SummonFelhunter = "Summon Felhunter",
     SummonImp = "Summon Imp",
@@ -50,7 +44,6 @@ local S = {
     -- ========== DESTRUCTION SPELLS ==========
     ChaosBolt = "Chaos Bolt",
     Conflagrate = "Conflagrate",
-    Hellfire = "Hellfire",
     Immolate = "Immolate",
     Incinerate = "Incinerate",
     RainOfFire = "Rain of Fire",
@@ -61,11 +54,7 @@ local S = {
     
     -- ========== UNIVERSAL SPELLS ==========
     DarkPact = "Dark Pact",
-    DeathCoil = "Death Coil",
-    Fear = "Fear",
     LifeTap = "Life Tap",
-    RitualOfSouls = "Ritual of Souls",
-    RitualOfSummoning = "Ritual of Summoning",
     ShadowWard = "Shadow Ward",
     UnendingBreath = "Unending Breath",
     
@@ -82,30 +71,24 @@ local S = {
     ShadowEmbrace = "Shadow Embrace",
     MetamorphosisForm = "Metamorphosis",
     ShadowTrance = "Shadow Trance",
-    DevicousMinds = "Devious Minds",
-    Eradication = "Eradication",
     
     -- ========== PET ABILITIES ==========
     -- Imp
     FireBolt = "Firebolt",
-    PhaseShift = "Phase Shift",
-    
-    -- Voidwalker
-    Torment = "Torment",
-    Sacrifice = "Sacrifice",
-    Consume = "Consume Shadows",
+    FireShield = "Fire Shield",
     
     -- Succubus
     LashOfPain = "Lash of Pain",
     Seduction = "Seduction",
     
     -- Felhunter
+    ShadowBite = "Shadow Bite",
     SpellLock = "Spell Lock",
     DevourMagic = "Devour Magic",
     
     -- Felguard
     Cleave = "Cleave",
-    Intercept = "Intercept",
+    Felstorm = "Felstorm",
     Anguish = "Anguish"
 }
 
@@ -126,8 +109,10 @@ local R = {
 local WARLOCK_WEAPON_STONE_IDS = {
     [22049] = true, [22047] = true, [22048] = true, -- Spellstones
     [5522] = true, [5521] = true, [5520] = true,
-    [41191] = true, [41190] = true, [41189] = true,
+    [41191] = true, [41192] = true, [41193] = true, [41194] = true, [41195] = true, [41196] = true,
+    [41190] = true, [41189] = true,
     [22046] = true, [22045] = true, [22044] = true, -- Firestones
+    [41169] = true, [41170] = true, [41171] = true, [41172] = true, [41173] = true, [41174] = true,
     [1254] = true, [13699] = true, [13700] = true
 }
 
@@ -138,11 +123,16 @@ local WARLOCK_WEAPON_STONE_NAMES = {
     ["greater spellstone"] = true,
     ["major spellstone"] = true,
     ["grand spellstone"] = true,
+    ["master spellstone"] = true,
+    ["demonic spellstone"] = true,
     ["firestone"] = true,
     ["minor firestone"] = true,
     ["lesser firestone"] = true,
     ["greater firestone"] = true,
-    ["major firestone"] = true
+    ["major firestone"] = true,
+    ["master firestone"] = true,
+    ["demonic firestone"] = true,
+    ["grand firestone"] = true
 }
 
 local function IsWarlockWeaponStoneIdentifier(itemIdentifier)
@@ -174,21 +164,14 @@ end
 function AC:IsSpellKnown(spellName)
     if not spellName then return false end
 
-    -- If native usability reports usable or insufficient mana, the spell is
-    -- known and present in the current context.
-    local usable, noMana = IsUsableSpell(spellName)
-    if usable or noMana then
-        return true
-    end
-
-    -- Primary lookup by spellID when available.
+    -- Native usability is not a learned-spell check on every private-server
+    -- client.  Prove ownership from the spellbook first.
     local spellID = select(7, GetSpellInfo(spellName))
-    if spellID and spellID > 0 and IsSpellKnown(spellID) then
+    if spellID and spellID > 0 and IsSpellKnown and IsSpellKnown(spellID) then
         return true
     end
 
-    -- Core spellbook helper can be wrong on some private-server edge cases;
-    -- only accept positive results and keep fallback scan for negatives.
+    -- Core's helper handles rank/name differences in the 3.3.5a spellbook.
     if self.KnowsSpell then
         local ok, known = pcall(self.KnowsSpell, self, spellName)
         if ok and known then
@@ -224,6 +207,10 @@ function AC:CanCast(spellName)
 
     local spellInfo = GetSpellInfo(spellName)
     if not spellInfo then
+        return false
+    end
+
+    if not self:IsSpellKnown(spellName) then
         return false
     end
 
@@ -269,28 +256,28 @@ function AC:ApplyWarlockStoneToWeapon(itemIdentifier, weaponSlot)
     
     WarlockDebug("Attempting to apply " .. itemName .. " to weapon slot " .. weaponSlot)
     
-    -- Method 1: Use container item directly on weapon slot (like Rogue)
-    local success1 = pcall(function()
-        UseContainerItem(bag, slot)
-        PickupInventoryItem(weaponSlot)
-    end)
-    
-    if success1 then
-        WarlockDebug("Successfully applied " .. itemName .. " (Method 1)")
-        return true
-    end
-    
-    -- Method 2: Clear cursor and try again (like Rogue)
-    local success2 = pcall(function()
+    -- pcall only tells us that the API call did not throw a Lua error.  It
+    -- does not mean that the enchant was applied, so verify the temporary
+    -- enchant after each cursor-placement attempt before reporting success.
+    local function tryApplyStone()
         ClearCursor()
         UseContainerItem(bag, slot)
         if CursorHasItem() then
             PickupInventoryItem(weaponSlot)
-            ClearCursor()
         end
-    end)
-    
-    if success2 then
+        ClearCursor()
+    end
+
+    local success1 = pcall(tryApplyStone)
+    if success1 and self:WeaponHasEnchant(weaponSlot) then
+        WarlockDebug("Successfully applied " .. itemName .. " (Method 1)")
+        return true
+    end
+
+    -- Retry once for clients that need the bag item to be placed on the
+    -- cursor before the inventory slot is picked up.
+    local success2 = pcall(tryApplyStone)
+    if success2 and self:WeaponHasEnchant(weaponSlot) then
         WarlockDebug("Successfully applied " .. itemName .. " (Method 2)")
         return true
     end
@@ -385,6 +372,23 @@ local function WarlockHasBuff(unit, spellName)
     return false
 end
 
+local function WarlockHasControlOrUtilityDebuff(unit, wantedTypes)
+    unit = unit or "player"
+    if not UnitExists(unit) then return false end
+
+    for i = 1, 40 do
+        local name, _, _, debuffType = UnitDebuff(unit, i)
+        if not name then break end
+        local lowerName = string.lower(name)
+        if (debuffType and wantedTypes[debuffType]) or
+           (wantedTypes.Bleed and lowerName:find("bleed")) then
+            return true
+        end
+    end
+
+    return false
+end
+
 function AC:RememberWarlockTargetCast(spellName, unit)
     if type(spellName) ~= "string" or spellName == "" then
         return
@@ -452,20 +456,6 @@ function AC:HandleClassCombatLog(...)
     end
 end
 
--- Debug function to show all debuffs on target
-function AC:ShowTargetDebuffs()
-    if not UnitExists("target") then return end
-    
-    WarlockDebug("=== TARGET DEBUFFS ===")
-    for i = 1, 40 do
-        local name, icon, count, debuffType, duration, expires = UnitDebuff("target", i)
-        if not name then break end
-        local timeLeft = expires and (expires - GetTime()) or 0
-        WarlockDebug("Slot " .. i .. ": " .. name .. " (Type: " .. (debuffType or "None") .. ", Time: " .. string.format("%.1f", timeLeft) .. "s)")
-    end
-    WarlockDebug("=== END DEBUFFS ===")
-end
-
 function AC:CanUseItem(itemID)
     return GetItemCooldown(itemID) == 0
 end
@@ -495,9 +485,18 @@ function AC:IsFastDyingMob(unit)
     local healthPercent = (UnitHealth(unit) / UnitHealthMax(unit)) * 100
     local level = UnitLevel(unit)
     local playerLevel = UnitLevel("player")
+    local classification = UnitClassification(unit)
+
+    -- Do not abandon important boss DoTs merely because the target crossed
+    -- the generic 25% execute threshold. Execute rotations still need Haunt,
+    -- Unstable Affliction, and other debuffs maintained.
+    if classification == "worldboss" or classification == "elite" or classification == "rareelite" or level == -1 then
+        return healthPercent <= 8
+    end
     
-    -- Don't waste DoTs on low health targets
-    if healthPercent <= 25 then
+    -- Normal mobs below this point are usually dead before a fresh DoT pays
+    -- back its cast time.
+    if healthPercent <= 15 then
         return true
     end
     
@@ -512,6 +511,7 @@ end
 -- ================================================================
 -- ADVANCED PROC TRACKING SYSTEM (WotLK 3.3.5a Meta-Optimized)
 -- ================================================================
+AC.WarlockIsFastDyingMob = AC.IsFastDyingMob
 AC.WarlockProcs = AC.WarlockProcs or {}
 AC.DemonologyProcs = AC.DemonologyProcs or {}
 
@@ -528,7 +528,7 @@ function AC:InitializeDemonologyProcs()
             wastedCharges = 0
         },
         
-        -- CRITICAL: Decimation (<35% health, 10 seconds, instant Soul Fire)
+        -- CRITICAL: Decimation (<35% health, 10 seconds, faster Soul Fire)
         decimation = {
             active = false,
             expires = 0,
@@ -672,6 +672,18 @@ function AC:UpdateWarlockProcs()
     local playerHealthPercent = (UnitHealth("player") / UnitHealthMax("player")) * 100
     local inCombat = UnitAffectingCombat("player")
     local combatTime = inCombat and (currentTime - (self.combatStartTime or currentTime)) or 0
+
+    -- Count actual combat sessions for /ac performance.  This is kept here
+    -- rather than in the rotation so it also works while moving, crowd-
+    -- controlled, or temporarily without a valid target.
+    if self.WarlockAnalytics then
+        if inCombat and not self.warlockAnalyticsInCombat then
+            self.WarlockAnalytics.combatSessions = (self.WarlockAnalytics.combatSessions or 0) + 1
+            self.warlockAnalyticsInCombat = true
+        elseif not inCombat then
+            self.warlockAnalyticsInCombat = false
+        end
+    end
     
     -- Store combat start time
     if inCombat and not self.combatStartTime then
@@ -728,10 +740,6 @@ function AC:UpdateWarlockProcs()
     procs.metamorphosis = demoProcs.metamorphosis.active
     procs.metamorphosisTimeRemaining = math.max(0, demoProcs.metamorphosis.expires - currentTime)
     
-    -- Affliction procs
-    procs.deviciousMinds = self:HasBuff("player", S.DevicousMinds)
-    procs.eradication = self:HasBuff("player", S.Eradication)
-    
     -- Shadow Embrace tracking
     local _, _, _, shadowEmbraceStacks = UnitDebuff("target", S.ShadowEmbrace)
     procs.shadowEmbraceStacks = shadowEmbraceStacks or 0
@@ -782,7 +790,7 @@ function AC:ShouldConsumeMoltenCore()
     end
     
     -- STANDARD: Use if available and no higher priority spells
-    if mc.charges > 0 and self:IsSpellKnown(S.Incinerate) then
+    if mc.charges > 0 and (self:IsSpellKnown(S.Incinerate) or self:IsSpellKnown(S.SoulFire)) then
         return true
     end
     
@@ -795,17 +803,24 @@ function AC:GetMoltenCoreSpell()
     if not demoProcs or not demoProcs.moltenCore.active then return nil end
     
     local playerLevel = UnitLevel("player")
+    local targetMaxHealth = UnitHealthMax("target") or 0
+    local targetHealthPercent = targetMaxHealth > 0 and (UnitHealth("target") / targetMaxHealth) * 100 or 100
     
     -- WotLK Meta: Molten Core benefits both Incinerate and Soul Fire
     -- Priority: Incinerate (faster cast, more casts per proc) > Soul Fire (higher damage)
     
-    if playerLevel >= 64 and self:IsSpellKnown(S.Incinerate) then
-        -- Incinerate with Molten Core: 30% faster cast + 18% damage
-        WarlockDebug("Using Molten Core for Incinerate (30% faster, +18% damage)")
+    if targetHealthPercent <= 35 and playerLevel >= 48 and self:IsSpellKnown(S.SoulFire) then
+        -- Under 35%, Soul Fire is the Demo execute spell even when Molten
+        -- Core is active; do not spend those charges on Incinerate.
+        WarlockDebug("Using Molten Core for execute Soul Fire")
+        return S.SoulFire
+    elseif playerLevel >= 64 and self:IsSpellKnown(S.Incinerate) then
+        -- WotLK Molten Core: 20% faster cast and 12% damage for Incinerate.
+        WarlockDebug("Using Molten Core for Incinerate (20% faster, +12% damage)")
         return S.Incinerate
     elseif playerLevel >= 48 and self:IsSpellKnown(S.SoulFire) then
-        -- Soul Fire with Molten Core: +18% damage + 15% crit
-        WarlockDebug("Using Molten Core for Soul Fire (+18% damage, +15% crit)")
+        -- WotLK Molten Core: +12% damage and +10% crit for Soul Fire.
+        WarlockDebug("Using Molten Core for Soul Fire (+12% damage, +10% crit)")
         return S.SoulFire
     end
     
@@ -840,8 +855,8 @@ function AC:ShouldUseDecimation()
     local currentTime = GetTime()
     local timeRemaining = demoProcs.decimation.expires - currentTime
     
-    -- ALWAYS use Decimation immediately - it's a massive DPS gain
-    -- 40% faster Soul Fire cast + no Soul Shard cost + 15% crit
+    -- ALWAYS use Decimation immediately - it is a major DPS gain:
+    -- 40% faster Soul Fire cast with no Soul Shard cost.
     if timeRemaining > 0 then
         WarlockDebug("DECIMATION ACTIVE: Instant Soul Fire available (40% faster, no shard cost)")
         return true
@@ -886,14 +901,6 @@ function AC:ShouldRefreshShadowBoltDebuff()
     
     -- Don't refresh if debuff is still strong
     return false
-end
-
--- Track Shadow Bolt debuff applications
-function AC:ApplyShadowBoltDebuff()
-    local demoProcs = self.DemonologyProcs
-    if not demoProcs or not demoProcs.improvedShadowBolt then return end
-    
-    WarlockDebug("Applied Improved Shadow Bolt debuff (+5% shadow damage to target)")
 end
 
 -- ================================================================
@@ -960,32 +967,6 @@ function AC:UseMetamorphosis()
     
     demoProcs.metamorphosis.optimalUseWindows = demoProcs.metamorphosis.optimalUseWindows + 1
     WarlockDebug("Metamorphosis activated - Total optimal uses: " .. demoProcs.metamorphosis.optimalUseWindows)
-end
-
--- Enhanced function to check if we should consume procs immediately or save them
-function AC:ShouldConsumeProcImmediately(procName, procTimeRemaining)
-    local urgency = "normal"
-    
-    -- Time-sensitive procs should be consumed quickly
-    if procTimeRemaining <= 3 then
-        urgency = "urgent"
-    elseif procTimeRemaining <= 6 then
-        urgency = "soon"
-    end
-    
-    -- Special cases for specific procs
-    if procName == "backdraft" then
-        -- Backdraft should be consumed with Incinerate/Shadow Bolt, but save 1 stack for Chaos Bolt if available
-        return urgency ~= "normal" or self:GetSpellCooldown(S.ChaosBolt) > 5
-    elseif procName == "decimation" then
-        -- Decimation should always be consumed immediately for Soul Fire
-        return true
-    elseif procName == "moltenCore" then
-        -- Use new Molten Core management system
-        return self:ShouldConsumeMoltenCore()
-    end
-    
-    return urgency == "urgent"
 end
 
 -- ================================================================
@@ -1084,20 +1065,37 @@ function AC:IsLevelingWarlock()
     return UnitLevel("player") <= 10
 end
 
+function AC:HasLifeTapGlyph()
+    if not GetGlyphSocketInfo then
+        return nil
+    end
+
+    for glyphSlot = 1, 6 do
+        local enabled, _, _, glyphName = GetGlyphSocketInfo(glyphSlot)
+        if enabled and glyphName and string.find(string.lower(glyphName), "life tap", 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
 function AC:GetLifeTapGlyphState()
     if self:IsLevelingWarlock() then
-        return false, 0, nil
+        return false, 0, nil, false
     end
+
+    local glyphEquipped = self:HasLifeTapGlyph()
 
     for _, buffName in ipairs(LIFE_TAP_GLYPH_BUFF_NAMES) do
         local hasBuff, _, _, expires = WarlockHasBuff("player", buffName)
         if hasBuff then
             local remaining = expires and (expires - GetTime()) or 0
-            return true, remaining, buffName
+            return true, remaining, buffName, true
         end
     end
 
-    return false, 0, nil
+    return false, 0, nil, glyphEquipped
 end
 
 -- Smart Life Tap usage based on combat phase and procs
@@ -1142,23 +1140,23 @@ function AC:GetOptimalLifeTapTiming(spec, inCombat, procs, demoProcs)
         healthThreshold = healthThreshold - 10 -- More aggressive out of combat
     end
 
-    local glyphActive, glyphRemaining, glyphName = self:GetLifeTapGlyphState()
+    local glyphActive, glyphRemaining, glyphName, glyphEquipped = self:GetLifeTapGlyphState()
     local glyphHealthThreshold = math.max(healthThreshold, LIFE_TAP_GLYPH_HEALTH_THRESHOLD)
     local recentLifeTap = self:WasRecentlyCastOnTarget(S.LifeTap, "player", 2.5)
 
     -- Keep the Glyph of Life Tap buff rolling if it is missing or about to expire.
-    if recentLifeTap and not glyphActive then
+    if glyphEquipped ~= false and recentLifeTap and not glyphActive then
         WarlockDebug("LIFE TAP GLYPH: Waiting for aura sync after recent Life Tap")
         return false
     end
 
-    if glyphActive then
+    if glyphEquipped ~= false and glyphActive then
         if glyphRemaining <= LIFE_TAP_GLYPH_REFRESH_WINDOW and healthPercent > glyphHealthThreshold then
             WarlockDebug("LIFE TAP GLYPH: Refreshing " .. tostring(glyphName) ..
                 " (" .. string.format("%.1f", glyphRemaining) .. "s remaining)")
             return true
         end
-    elseif healthPercent > glyphHealthThreshold then
+    elseif glyphEquipped == true and healthPercent > glyphHealthThreshold then
         WarlockDebug("LIFE TAP GLYPH: Missing buff - refreshing")
         return true
     end
@@ -1364,26 +1362,30 @@ function AC:ManageWarlockPetAbilities()
         WarlockDebug("Voidwalker taunting: " .. tostring(shouldTaunt))
         
     elseif petType == "Felhunter" then
-        -- Always enable Spell Lock for interrupts
-        self:ToggleWarlockPetSpell("Spell Lock", true)
-        -- Enable Devour Magic for dispelling
-        self:ToggleWarlockPetSpell("Devour Magic", true)
+        -- Shadow Bite is the Felhunter's primary damage ability and should
+        -- remain enabled for Affliction's DoT-amplified pet damage.
+        self:ToggleWarlockPetSpell(S.ShadowBite, true)
+        -- Always enable Spell Lock for interrupts.
+        self:ToggleWarlockPetSpell(S.SpellLock, true)
+        -- Enable Devour Magic for dispelling.
+        self:ToggleWarlockPetSpell(S.DevourMagic, true)
         
     elseif petType == "Succubus" then
-        -- Enable Lash of Pain for DPS
-        self:ToggleWarlockPetSpell("Lash of Pain", true)
-        -- Disable Seduction in groups (avoid unwanted CC)
-        self:ToggleWarlockPetSpell("Seduction", not isInGroup)
+        -- Enable Lash of Pain for DPS.
+        self:ToggleWarlockPetSpell(S.LashOfPain, true)
+        -- Disable Seduction in groups (avoid unwanted CC).
+        self:ToggleWarlockPetSpell(S.Seduction, not isInGroup)
         
     elseif petType == "Felguard" then
         -- Keep Cleave enabled for consistent DPS.
-        self:ToggleWarlockPetSpell("Cleave", true)
-        -- Manage Anguish taunt like Voidwalker
-        self:ToggleWarlockPetSpell("Anguish", not isInGroup)
+        self:ToggleWarlockPetSpell(S.Cleave, true)
+        -- Manage Anguish taunt like Voidwalker.
+        self:ToggleWarlockPetSpell(S.Anguish, not isInGroup)
         
     elseif petType == "Imp" then
-        -- Enable Fire Shield on master for protection
-        self:ToggleWarlockPetSpell("Fire Shield", true)
+        self:ToggleWarlockPetSpell(S.FireBolt, true)
+        -- Enable Fire Shield on master for protection.
+        self:ToggleWarlockPetSpell(S.FireShield, true)
     end
     
     return false
@@ -1394,7 +1396,9 @@ function AC:ToggleWarlockPetSpell(spellName, enable)
     if not spellName then return false end
 
     for i = 1, 12 do
-        local name, _, _, _, _, currentIsAutocast = GetPetActionInfo(i)
+        -- WotLK's seventh return is autoCastEnabled. The sixth return is
+        -- only autoCastAllowed and is true even when autocast is off.
+        local name, _, _, _, _, _, currentIsAutocast = GetPetActionInfo(i)
 
         if name and name == spellName then
             if enable and not currentIsAutocast then
@@ -1410,6 +1414,42 @@ function AC:ToggleWarlockPetSpell(spellName, enable)
         end
     end
     return false
+end
+
+-- Use a non-autocast pet ability such as Felstorm when it is actually useful.
+function AC:UseWarlockPetAction(spellName, targetUnit)
+    if not spellName or not UnitExists("pet") or UnitIsDeadOrGhost("pet") then
+        return false
+    end
+
+    for i = 1, 12 do
+        local name = GetPetActionInfo(i)
+        if name == spellName then
+            local start, duration = GetPetActionCooldown(i)
+            if start and duration and duration > 0 and (start + duration - GetTime()) > 0.1 then
+                return false
+            end
+
+            CastPetAction(i, targetUnit)
+            local afterStart, afterDuration = GetPetActionCooldown(i)
+            local started = afterStart and afterDuration and afterDuration > 0 and
+                            (afterStart + afterDuration - GetTime()) > 0.05
+            if not started and not UnitCastingInfo("pet") and not UnitChannelInfo("pet") then
+                WarlockDebug("Pet action did not start: " .. spellName)
+                return false
+            end
+            WarlockDebug("Pet cast: " .. spellName)
+            return true
+        end
+    end
+
+    return false
+end
+
+function AC:UseWarlockPetCombatAction()
+    if self:GetWarlockPetType() ~= "Felguard" then return false end
+    if self:GetEffectiveEnemyCount(self:GetEnemyCount()) < 2 then return false end
+    return self:UseWarlockPetAction(S.Felstorm, "target")
 end
 
 -- Pet health monitoring and emergency healing
@@ -1510,10 +1550,8 @@ function AC:ManageWarlockPetAdvanced()
         -- Pet attack targeting (establish aggro while warlock casts)
         self:ManageWarlockPetTargeting()
         
-        -- Demonic Empowerment for Demonology (macro integration)
-        if spec == "Demonology" and UnitExists("pet") then
-            self:HandleDemonicEmpowerment()
-        end
+        -- Demonic Empowerment is cast by the combat macro integration only;
+        -- do not consume its throttle while still out of combat.
     end
     
     return nil
@@ -1526,12 +1564,19 @@ function AC:GetOptimalWarlockPet(spec, playerLevel, inCombat)
         return S.SummonFelguard
     end
     
-    -- Affliction prefers Felhunter for Shadow Bite scaling with DoTs
+    -- During solo leveling, a Voidwalker is safer and avoids pet pathing
+    -- delays while the player is still gear-constrained. In groups, use the
+    -- DPS/utility pet for the active spec.
+    if playerLevel < 60 and not IsInGroup() and self:IsSpellKnown(S.SummonVoidwalker) then
+        return S.SummonVoidwalker
+    end
+
+    -- Affliction prefers Felhunter for Shadow Bite scaling with DoTs.
     if spec == "Affliction" and playerLevel >= 30 and self:IsSpellKnown(S.SummonFelhunter) then
         return S.SummonFelhunter
     end
-    
-    -- Destruction prefers Imp for ranged safety and buffs
+
+    -- Destruction prefers Imp for ranged damage and raid utility.
     if spec == "Destruction" and self:IsSpellKnown(S.SummonImp) then
         return S.SummonImp
     end
@@ -1781,6 +1826,22 @@ function AC:GetWarlockSpec()
     return "None"
 end
 
+function AC:IsWarlockTalentKnown(talentName, minimumRank)
+    if not talentName or not GetTalentInfo then return false end
+    minimumRank = minimumRank or 1
+
+    for tab = 1, GetNumTalentTabs() do
+        for index = 1, GetNumTalents(tab) do
+            local name, _, _, _, rank = GetTalentInfo(tab, index)
+            if name == talentName then
+                return (rank or 0) >= minimumRank
+            end
+        end
+    end
+
+    return false
+end
+
 -- ================================================================
 -- BUFF MANAGEMENT
 -- ================================================================
@@ -1850,12 +1911,42 @@ function AC:ManageWarlockConsumables(procs)
     local spec = self:GetWarlockSpec()
     local inCombat = UnitAffectingCombat("player")
     procs = procs or self.WarlockProcs or self:UpdateWarlockProcs()
+
+    local targetMaxHealth = UnitHealthMax("target") or 0
+    local targetHealthPercent = targetMaxHealth > 0 and (UnitHealth("target") / targetMaxHealth) * 100 or 100
+    local targetClassification = UnitClassification("target")
+    local targetIsTough = targetClassification == "elite" or targetClassification == "rareelite" or
+                          targetClassification == "worldboss" or UnitLevel("target") == -1
+    local combatTime = self:GetCombatTime()
     
     -- Emergency mana potions (use before Life Tap when critically low)
     if manaPercent < 20 then
         if self.UseManaPotion and self:UseManaPotion(20) then
             WarlockDebug("Used mana potion at " .. string.format("%.0f", manaPercent) .. "% mana")
-            return nil -- Let potion take effect
+            return true
+        end
+    end
+
+    -- Use offensive trinkets and potions only on durable targets. Demo waits
+    -- for Metamorphosis when it has the talent; Affliction/Destruction use
+    -- the opening window directly.
+    local demoBurstReady = spec == "Demonology" and
+        (procs.metamorphosis or not self:IsSpellKnown(S.Metamorphosis))
+    local offensiveWindow = inCombat and targetIsTough and
+        ((spec == "Demonology" and demoBurstReady) or
+         (spec ~= "Demonology" and combatTime <= 8) or
+         targetHealthPercent <= 35)
+    if offensiveWindow then
+        if self.UseTrinkets and self:UseTrinkets() then
+            WarlockDebug("Used offensive trinket window")
+            return true
+        end
+        if self.UseOffensivePotion then
+            local usedPotion = self:UseOffensivePotion(true)
+            if usedPotion then
+                WarlockDebug("Used offensive potion window")
+                return true
+            end
         end
     end
     
@@ -1898,61 +1989,6 @@ function AC:ManageWarlockConsumables(procs)
     return nil
 end
 
--- Calculate optimal Life Tap thresholds based on spec and combat state
-function AC:GetOptimalLifeTapThreshold(spec, inCombat, procs)
-    local threshold = {mana = 70, health = 60}
-    
-    -- Spec-specific adjustments
-    if spec == "Affliction" then
-        -- Affliction needs more mana for DoT maintenance
-        threshold.mana = 75
-        threshold.health = 65
-        
-        -- During DoT application phase, be more aggressive
-        if procs.shadowEmbraceStacks < 3 or procs.hauntTimeRemaining < 5 then
-            threshold.mana = 80
-            threshold.health = 70
-        end
-    elseif spec == "Destruction" then
-        -- Destruction has burst windows, save health for those
-        threshold.mana = 65
-        threshold.health = 55
-        
-        -- During proc windows, prioritize mana
-        if procs.backdraftStacks > 0 or procs.moltenCore then
-            threshold.mana = 75
-            threshold.health = 70
-        end
-    elseif spec == "Demonology" then
-        -- Demonology can be more conservative due to pet tanking
-        threshold.mana = 70
-        threshold.health = 50
-        
-        -- During Metamorphosis, prioritize mana
-        if procs.metamorphosis then
-            threshold.mana = 80
-            threshold.health = 65
-        end
-    end
-    
-    -- Combat adjustments
-    if inCombat then
-        -- Be more conservative with health in combat
-        threshold.health = threshold.health + 10
-    else
-        -- Out of combat, can be more aggressive
-        threshold.health = threshold.health - 10
-    end
-    
-    -- Execute phase adjustments
-    if procs.executePhase then
-        threshold.mana = 60 -- Less mana needed for execute spells
-        threshold.health = threshold.health + 15 -- Preserve health for survival
-    end
-    
-    return threshold
-end
-
 -- Calculate optimal Healthstone usage threshold
 function AC:GetOptimalHealthstoneThreshold(inCombat)
     local baseThreshold = 35
@@ -1960,12 +1996,6 @@ function AC:GetOptimalHealthstoneThreshold(inCombat)
     if inCombat then
         -- Use earlier in combat for safety
         baseThreshold = 45
-        
-        -- Check if taking heavy damage
-        local recentDamage = self:GetRecentDamageTaken(3) -- Last 3 seconds
-        if recentDamage and recentDamage > (UnitHealthMax("player") * 0.3) then
-            baseThreshold = 55 -- Very aggressive if taking heavy damage
-        end
     end
     
     -- Group play adjustments
@@ -2048,13 +2078,6 @@ function AC:IsCurrentPetMatchingSummonSpell(summonSpell)
     return current == expected
 end
 
--- Helper function to estimate recent damage taken (placeholder)
-function AC:GetRecentDamageTaken(seconds)
-    -- This would need combat log tracking to be fully implemented
-    -- For now, return nil (no recent damage tracking)
-    return nil
-end
-
 -- Check if target already has the 13% magic damage taken debuff from any source.
 function AC:TargetHasMagicVulnerabilityDebuff(unit)
     unit = unit or "target"
@@ -2101,7 +2124,6 @@ end
 function AC:ManageWarlockWeaponEnchants()
     if InCombatLockdown() then return nil end -- Don't manage enchants in combat
     
-    local playerLevel = UnitLevel("player")
     local spec = self:GetWarlockSpec()
     
     -- Check if main hand weapon needs enchant
@@ -2114,36 +2136,18 @@ function AC:ManageWarlockWeaponEnchants()
     local hasEnchant = self:WeaponHasEnchant(mainHandSlot)
     
     if not hasEnchant then
-        -- Choose appropriate enchant based on spec and level
-        local enchantSpell = nil
-        
-        -- Spellstone for casters (preferred for most warlock specs)
-        if playerLevel >= 36 and self:IsSpellKnown(S.CreateSpellstone) then
-            local spellstone = self:GetSpellstone()
-            if spellstone then
-                WarlockDebug("Applying Spellstone enchant to weapon")
-                -- Only prepend "item:" if it's a numeric itemID
-                if type(spellstone) == "number" then
-                    return "item:" .. spellstone
-                else
-                    return "item:" .. spellstone -- Item name, will be handled differently
-                end
-            elseif self:CanCast(S.CreateSpellstone) then
-                WarlockDebug("Creating Spellstone")
-                return S.CreateSpellstone
-            end
-        end
-        
-        -- Firestone for melee enhancement (lower priority)
-        if playerLevel >= 28 and self:IsSpellKnown(S.CreateFirestone) then
-            local firestone = self:GetFirestone()
-            if firestone then
-                WarlockDebug("Applying Firestone enchant to weapon")
-                return "item:" .. firestone
-            elseif self:CanCast(S.CreateFirestone) then
-                WarlockDebug("Creating Firestone")
-                return S.CreateFirestone
-            end
+        -- In WotLK, Spellstone is the periodic/Affliction stone while
+        -- Firestone is the direct-damage Demo/Destruction stone.
+        local useSpellstone = spec == "Affliction"
+        local createSpell = useSpellstone and S.CreateSpellstone or S.CreateFirestone
+        local stone = useSpellstone and self:GetSpellstone() or self:GetFirestone()
+
+        if stone then
+            WarlockDebug("Applying " .. (useSpellstone and "Spellstone" or "Firestone") .. " enchant to weapon")
+            return "item:" .. stone
+        elseif self:IsSpellKnown(createSpell) and self:CanCast(createSpell) then
+            WarlockDebug("Creating " .. (useSpellstone and "Spellstone" or "Firestone"))
+            return createSpell
         end
     end
     
@@ -2164,7 +2168,8 @@ function AC:GetSpellstone()
     local spellstones = {
         22049, 22047, 22048, -- WotLK/TBC versions
         5522, 5521, 5520,    -- Classic versions
-        41191, 41190, 41189  -- Additional variants
+        41191, 41192, 41193, 41194, 41195, 41196, -- WotLK ranks
+        41190, 41189  -- Additional variants
     }
     
     -- Method 1: Try item ID matching
@@ -2178,8 +2183,9 @@ function AC:GetSpellstone()
     
     -- Method 2: Try by item name (fallback)
     local spellstoneNames = {
-        "Grand Spellstone", "Major Spellstone", "Spellstone", 
-        "Greater Spellstone", "Lesser Spellstone", "Minor Spellstone"
+        "Grand Spellstone", "Demonic Spellstone", "Master Spellstone",
+        "Major Spellstone", "Spellstone", "Greater Spellstone",
+        "Lesser Spellstone", "Minor Spellstone"
     }
     
     for _, name in ipairs(spellstoneNames) do
@@ -2196,7 +2202,8 @@ end
 
 function AC:GetFirestone()
     -- Firestone item IDs (various ranks)
-    local firestones = {22046, 22045, 22044, 1254, 13699, 13700}
+    local firestones = {41169, 41170, 41171, 41172, 41173, 41174,
+                        22046, 22045, 22044, 1254, 13699, 13700}
     
     for _, itemID in ipairs(firestones) do
         for bag = 0, 4 do
@@ -2330,7 +2337,8 @@ end
 -- ================================================================
 -- Enhanced racial usage with spec-specific timing
 function AC:UseWarlockRacials(spec, procs, targetHealthPercent)
-    local race = select(2, UnitRace("player"))
+    local localizedRace, englishRace = UnitRace("player")
+    local race = string.upper((englishRace or localizedRace or ""):gsub("%s+", ""))
     local playerHealthPercent = (UnitHealth("player") / UnitHealthMax("player")) * 100
     
     -- Emergency health potions
@@ -2343,18 +2351,21 @@ function AC:UseWarlockRacials(spec, procs, targetHealthPercent)
     
     -- Emergency defensive racials
     if playerHealthPercent < 30 then
-        if race == "Undead" and self:CanCast(R.WillOfForsaken) then
+        if (race == "UNDEAD" or race == "SCOURGE") and WarlockHasControlOrUtilityDebuff("player", { Fear = true, Charm = true }) and self:CanCast(R.WillOfForsaken) then
             WarlockDebug("Emergency Will of the Forsaken")
             return R.WillOfForsaken
-        elseif race == "Human" and self:CanCast(R.EveryMan) then
+        elseif race == "HUMAN" and WarlockHasControlOrUtilityDebuff("player", { Fear = true, Stun = true, Charm = true }) and self:CanCast(R.EveryMan) then
             WarlockDebug("Emergency Every Man for Himself")
             return R.EveryMan
-        elseif race == "Dwarf" and self:CanCast(R.Stoneform) then
+        elseif race == "DWARF" and WarlockHasControlOrUtilityDebuff("player", { Poison = true, Disease = true, Bleed = true }) and self:CanCast(R.Stoneform) then
             WarlockDebug("Emergency Stoneform")
             return R.Stoneform
-        elseif race == "Gnome" and self:CanCast(R.EscapeArtist) then
+        elseif race == "GNOME" and WarlockHasControlOrUtilityDebuff("player", { Root = true }) and self:CanCast(R.EscapeArtist) then
             WarlockDebug("Emergency Escape Artist")
             return R.EscapeArtist
+        elseif race == "DRAENEI" and self:CanCast(R.GiftOfNaaru) then
+            WarlockDebug("Emergency Gift of the Naaru")
+            return R.GiftOfNaaru
         end
     end
     
@@ -2370,22 +2381,20 @@ function AC:UseWarlockRacials(spec, procs, targetHealthPercent)
         shouldUseBurst = (procs.backdraftStacks > 0) or (self:GetSpellCooldown(S.ChaosBolt) == 0)
     elseif spec == "Demonology" then
         -- Use with Metamorphosis or Decimation procs
-        shouldUseBurst = procs.metamorphosis or procs.decimation or (targetHealthPercent > 80)
+        shouldUseBurst = procs.metamorphosis or procs.decimation or
+                         (targetHealthPercent > 80 and not self:IsSpellKnown(S.Metamorphosis))
     end
     
     if shouldUseBurst then
-        if race == "Orc" and self:CanCast(R.BloodFury) then
+        if race == "ORC" and self:CanCast(R.BloodFury) then
             WarlockDebug("Using Blood Fury (" .. spec .. " burst window)")
             return R.BloodFury
-        elseif race == "Troll" and self:CanCast(R.Berserking) then
+        elseif race == "TROLL" and self:CanCast(R.Berserking) then
             WarlockDebug("Using Berserking (" .. spec .. " burst window)")
             return R.Berserking
-        elseif race == "Draenei" and self:CanCast(R.GiftOfNaaru) and playerHealthPercent < 70 then
-            WarlockDebug("Using Gift of the Naaru (healing)")
-            return R.GiftOfNaaru
-        elseif race == "BloodElf" and self:CanCast(R.ArcaneTorrent) then
+        elseif race == "BLOODELF" and self:CanCast(R.ArcaneTorrent) then
             local manaPercent = (UnitPower("player", 0) / UnitPowerMax("player", 0)) * 100
-            if manaPercent < 80 then
+            if manaPercent < 50 then
                 WarlockDebug("Using Arcane Torrent (mana restore)")
                 return R.ArcaneTorrent
             end
@@ -2531,41 +2540,6 @@ function AC:ShouldUseAOEWarlock()
     return nearbyEnemies >= threshold
 end
 
--- Enhanced AoE spell selection based on situation
-function AC:GetBestAoESpell(spec, enemies, procs)
-    local playerLevel = UnitLevel("player")
-    
-    if spec == "Affliction" then
-        -- Seed of Corruption is king for Affliction AoE
-        if self:IsSpellKnown(S.SeedOfCorruption) and enemies >= 3 then
-            return S.SeedOfCorruption
-        end
-    elseif spec == "Destruction" then
-        -- Rain of Fire for stationary AoE, Seed for mobile
-        if self:IsSpellKnown(S.RainOfFire) and not self:IsPlayerMoving() and enemies >= 4 then
-            return S.RainOfFire
-        elseif self:IsSpellKnown(S.SeedOfCorruption) and enemies >= 3 then
-            return S.SeedOfCorruption
-        end
-    elseif spec == "Demonology" then
-        -- Metamorphosis form has different AoE priorities
-        if procs.metamorphosis then
-            if self:IsSpellKnown(S.ImmolationAura) and enemies >= 3 then
-                return S.ImmolationAura
-            elseif self:IsSpellKnown(S.ShadowCleave) and enemies >= 2 then
-                return S.ShadowCleave
-            end
-        else
-            -- Regular form - prefer Seed
-            if self:IsSpellKnown(S.SeedOfCorruption) and enemies >= 3 then
-                return S.SeedOfCorruption
-            end
-        end
-    end
-    
-    return nil
-end
-
 -- ================================================================
 -- AFFLICTION ROTATION (DoT Management Focus)
 -- ================================================================
@@ -2591,29 +2565,31 @@ function AC:AfflictionRotation(procs)
         -- Skip ground targeting as per user request - server handles Rain of Fire
     end
     
-    -- ENHANCED DOT MANAGEMENT WITH PANDEMIC TIMING
+    -- WotLK has no modern pandemic refresh window. Refresh periodic effects
+    -- close to expiry so their remaining ticks are not clipped.
     local function shouldRefreshDot(debuffName, baseDuration)
         if not self:HasDebuff("target", debuffName) then
             return true -- Missing DoT
         end
-        
-        -- Only use pandemic for advanced rotations
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            local timeRemaining = self:DebuffTimeRemaining("target", debuffName)
-            local pandemicThreshold = baseDuration * 0.3 -- 30% rule
-            return timeRemaining <= pandemicThreshold
-        end
-        
-        -- Basic mode still needs uptime; use a simple safe clip window.
+
         local timeRemaining = self:DebuffTimeRemaining("target", debuffName) or 0
-        return timeRemaining <= 2.5
+        local refreshWindow = math.min(1.0, (baseDuration or 15) * 0.08)
+        return timeRemaining <= refreshWindow
     end
     
     -- Single Target Priority
     
     -- RESEARCH-BASED: Optimal Affliction DoT Priority with Pandemic Timing
     
-    -- 1. ENHANCED: Haunt - Highest priority for Shadow Embrace stacks and debuff
+    -- 1. Open with Shadow Bolt to establish Shadow Embrace/raid debuffs when
+    -- the target is fresh. This replaces the old Haunt-first opener.
+    if targetHealthPercent > 90 and procs.shadowEmbraceStacks <= 0 and
+       self:IsSpellKnown(S.ShadowBolt) and not self:IsPlayerMoving() and self:CanCast(S.ShadowBolt) then
+        WarlockDebug("Affliction opener: Shadow Bolt")
+        return S.ShadowBolt
+    end
+
+    -- 2. Haunt - highest priority for Shadow Embrace stacks and debuff.
     if self:IsSpellKnown(S.Haunt) and not self:IsFastDyingMob("target") then
         -- CRITICAL: Shadow Embrace stack maintenance (WotLK 3.3.5a meta)
         local needsHaunt = false
@@ -2642,40 +2618,45 @@ function AC:AfflictionRotation(procs)
         end
     end
     
-    -- 2. Corruption - keep up, but avoid unnecessary recasts when Everlasting Affliction is active.
+    -- 3. Unstable Affliction - maintain it without clipping its final ticks.
+    if self:IsSpellKnown(S.UnstableAffliction) and not self:IsFastDyingMob("target") then
+        if shouldRefreshDot(S.UnstableAffliction, 15) and self:CanCast(S.UnstableAffliction) then
+            WarlockDebug("Casting Unstable Affliction (no-clipping refresh)")
+            return S.UnstableAffliction
+        end
+    end
+
+    -- 4. Corruption. At endgame, Everlasting Affliction refreshes it through
+    -- Haunt/Shadow Bolt/Drain Soul, so manual reapplication would destroy the
+    -- original snapshot. Without that talent, refresh it normally.
     local hasCorruption = self:HasDebuff("target", S.Corruption)
-    if not hasCorruption and self:CanCast(S.Corruption) then
+    local hasEverlastingAffliction = self:IsWarlockTalentKnown("Everlasting Affliction", 1)
+    local unstableReady = not self:IsSpellKnown(S.UnstableAffliction) or self:HasDebuff("target", S.UnstableAffliction)
+    if not hasCorruption and unstableReady and self:CanCast(S.Corruption) then
         WarlockDebug("Applying Corruption")
         return S.Corruption
     end
-    if not self:IsSpellKnown(S.Haunt) and shouldRefreshDot(S.Corruption, 18) then
+    if not hasEverlastingAffliction and unstableReady and shouldRefreshDot(S.Corruption, 18) then
         if self:CanCast(S.Corruption) then
-            WarlockDebug("Refreshing Corruption (no Haunt/Everlasting support)")
+            WarlockDebug("Refreshing Corruption (Everlasting Affliction unavailable)")
             return S.Corruption
         end
     end
-    
-    -- 3. Unstable Affliction - High damage DoT with silence protection
-    if self:IsSpellKnown(S.UnstableAffliction) and not self:IsFastDyingMob("target") then
-        if shouldRefreshDot(S.UnstableAffliction, 15) then -- 15 second base duration
-            if self:CanCast(S.UnstableAffliction) then
-                WarlockDebug("Casting Unstable Affliction (pandemic-aware)")
-                return S.UnstableAffliction
-            end
-        end
-    end
-    
-    -- 4. Curse selection
+
+    -- 5. Curse selection
     local curse = self:SelectOptimalCurse()
     if curse and self:CanCast(curse) then
         WarlockDebug("Applying curse: " .. curse)
         return curse
     end
     
-    -- 5. Siphon Life if available (older talent)
-    if self:IsSpellKnown(S.SiphonLife) and not self:HasDebuff("target", S.SiphonLife) and not self:IsFastDyingMob("target") then
-        if self:CanCast(S.SiphonLife) then
-            WarlockDebug("Casting Siphon Life")
+    -- 6. Siphon Life maintenance (it is not refreshed by Everlasting
+    -- Affliction, so keep uptime without waiting for a long gap).
+    if self:IsSpellKnown(S.SiphonLife) and not self:IsFastDyingMob("target") then
+        local siphonMissing = not self:HasDebuff("target", S.SiphonLife)
+        local siphonExpiring = self:DebuffTimeRemaining("target", S.SiphonLife) <= 1.0
+        if (siphonMissing or siphonExpiring) and self:CanCast(S.SiphonLife) then
+            WarlockDebug("Maintaining Siphon Life")
             return S.SiphonLife
         end
     end
@@ -2771,7 +2752,7 @@ function AC:HandleDemonologyProcs(demoProcs, playerLevel)
     if self:ShouldConsumeMoltenCore() then
         local moltenSpell = self:GetMoltenCoreSpell()
         if moltenSpell and self:CanCast(moltenSpell) then
-            WarlockDebug("MOLTEN CORE: Using " .. moltenSpell .. " (30% faster, +18% damage)")
+            WarlockDebug("MOLTEN CORE: Using " .. moltenSpell .. " (WotLK proc bonus)")
             return moltenSpell
         end
     end
@@ -2870,8 +2851,6 @@ end
 
 -- AoE rotation for Demonology
 function AC:DemonologyAoERotation(procs, demoProcs)
-    local playerLevel = UnitLevel("player")
-    
     WarlockDebug("AOE ROTATION: Multiple enemies detected")
     
     -- PRIORITY 1: Metamorphosis AoE abilities
@@ -2883,6 +2862,11 @@ function AC:DemonologyAoERotation(procs, demoProcs)
         if self:IsSpellKnown(S.ShadowCleave) and self:CanCast(S.ShadowCleave) then
             WarlockDebug("META AOE: Shadow Cleave")
             return S.ShadowCleave
+        end
+        if self.IsInMeleeRange and self:IsInMeleeRange("target", true) and
+           self:IsSpellKnown(S.Shadowflame) and self:CanCast(S.Shadowflame) then
+            WarlockDebug("META AOE: Shadowflame")
+            return S.Shadowflame
         end
     end
     
@@ -2903,10 +2887,11 @@ function AC:DemonologyAoERotation(procs, demoProcs)
                 return self:SafeCastGroundAOE(S.RainOfFire)
             else
                 -- Fallback to manual targeting
-                CastSpellByName(S.RainOfFire)
-                CameraOrSelectOrMoveStart()
-                CameraOrSelectOrMoveStop()
-                return true
+                if self:CastSpell(S.RainOfFire, "player") then
+                    CameraOrSelectOrMoveStart()
+                    CameraOrSelectOrMoveStop()
+                    return true
+                end
             end
         end
     end
@@ -3047,6 +3032,18 @@ function AC:DestructionRotation(procs)
         return S.Immolate
     end
     
+    -- Apply the required curse before the first destructive cooldowns on a
+    -- fresh durable target so Conflagrate/Chaos Bolt benefit from the full
+    -- encounter debuff window. Immolate was deliberately allowed first so
+    -- the next GCD can establish curse coverage before the direct nukes.
+    if targetHealthPercent > 80 then
+        local openerCurse = self:SelectOptimalCurse()
+        if openerCurse and self:CanCast(openerCurse) then
+            WarlockDebug("Destruction opener curse: " .. openerCurse)
+            return openerCurse
+        end
+    end
+
     -- 2. Conflagrate - highest direct nuke when Immolate is active
     if self:IsSpellKnown(S.Conflagrate) and self:HasDebuff("target", S.Immolate) then
         if self:CanCast(S.Conflagrate) then
@@ -3059,6 +3056,14 @@ function AC:DestructionRotation(procs)
     if self:IsSpellKnown(S.ChaosBolt) and self:CanCast(S.ChaosBolt) then
         WarlockDebug("Casting Chaos Bolt")
         return S.ChaosBolt
+    end
+
+    -- Shadowflame is worthwhile when already in melee range; do not force
+    -- movement just to use it.
+    if self.IsInMeleeRange and self:IsInMeleeRange("target", true) and
+       self:IsSpellKnown(S.Shadowflame) and self:CanCast(S.Shadowflame) then
+        WarlockDebug("Casting Shadowflame in melee range")
+        return S.Shadowflame
     end
     
     -- 4. Curse selection
@@ -3135,11 +3140,16 @@ function AC:Warlock()
     -- PRIORITY: Send pet to attack player's target (establish aggro while warlock casts)
     if UnitExists("pet") and not UnitIsDeadOrGhost("pet") then
         self:WarlockPetCombatAssistance()
+        if self:UseWarlockPetCombatAction() then
+            return true
+        end
     end
     
     -- Emergency consumables
     local consumable = self:ManageWarlockConsumables(procs)
-    if consumable then 
+    if consumable == true then
+        return true
+    elseif consumable then
         if self:CastWarlockSpell(consumable, "player") then
             return true
         end
@@ -3319,9 +3329,6 @@ AC.WarlockAnalytics = AC.WarlockAnalytics or {
         metamorphosisUses = 0
     },
     spellBreakdown = {},
-    dpsEstimate = 0,
-    lastCombatDPS = 0,
-    averageCombatLength = 0,
     rotationEfficiency = 0
 }
 
@@ -3331,13 +3338,19 @@ function AC:InitWarlockAnalytics()
     
     -- Initialize spell breakdown tracking
     analytics.spellBreakdown = {
-        [S.ShadowBolt] = {casts = 0, damage = 0},
-        [S.Incinerate] = {casts = 0, damage = 0},
-        [S.SoulFire] = {casts = 0, damage = 0},
-        [S.Corruption] = {casts = 0, damage = 0},
-        [S.Immolate] = {casts = 0, damage = 0},
-        [S.Metamorphosis] = {casts = 0, damage = 0},
-        [S.DemonicEmpowerment] = {casts = 0, damage = 0}
+        [S.ShadowBolt] = {casts = 0},
+        [S.Incinerate] = {casts = 0},
+        [S.SoulFire] = {casts = 0},
+        [S.Corruption] = {casts = 0},
+        [S.Immolate] = {casts = 0},
+        [S.Metamorphosis] = {casts = 0},
+        [S.DemonicEmpowerment] = {casts = 0},
+        [S.Haunt] = {casts = 0},
+        [S.UnstableAffliction] = {casts = 0},
+        [S.ChaosBolt] = {casts = 0},
+        [S.Conflagrate] = {casts = 0},
+        [S.Shadowflame] = {casts = 0},
+        [S.ShadowBurn] = {casts = 0}
     }
     
     WarlockDebug("Analytics system initialized")
@@ -3345,7 +3358,8 @@ end
 
 -- Track spell casts for performance analysis
 function AC:TrackWarlockSpellCast(spellName)
-    if not self.WarlockAnalytics then
+    if not self.WarlockAnalytics or not self.WarlockAnalytics.spellBreakdown or
+       not self.WarlockAnalytics.spellBreakdown[S.ShadowBolt] then
         self:InitWarlockAnalytics()
     end
     
@@ -3358,9 +3372,14 @@ function AC:TrackWarlockSpellCast(spellName)
         metamorphosisUses = 0
     }
     analytics.totalSpellsCast = analytics.totalSpellsCast + 1
+
+    if spellName == S.Metamorphosis then
+        self:UseMetamorphosis()
+    end
     
     -- Track individual spell usage
-    if analytics.spellBreakdown[spellName] then
+    if spellName and not spellName:find("item:", 1, true) then
+        analytics.spellBreakdown[spellName] = analytics.spellBreakdown[spellName] or {casts = 0}
         analytics.spellBreakdown[spellName].casts = analytics.spellBreakdown[spellName].casts + 1
     end
     
@@ -3374,7 +3393,9 @@ function AC:TrackWarlockSpellCast(spellName)
 
         -- Update proc utilization stats
         analytics.procUtilization.moltenCoreProcs = demoProcs.moltenCore.totalProcs
+        analytics.procUtilization.moltenCoreUsed = demoProcs.moltenCore.totalUsed or 0
         analytics.procUtilization.decimationProcs = demoProcs.decimation.totalProcs
+        analytics.procUtilization.decimationUsed = demoProcs.decimation.totalUsed or 0
         analytics.procUtilization.metamorphosisUses = demoProcs.metamorphosis.optimalUseWindows
     end
 end
@@ -3444,14 +3465,6 @@ function AC:GetWarlockPerformanceReport()
     return report
 end
 
--- Debug command to show performance
-function AC:ShowWarlockPerformanceDebug()
-    if AC.debugMode then
-        local report = self:GetWarlockPerformanceReport()
-        print(report)
-    end
-end
-
 -- Enhanced spell casting with analytics tracking
 -- REMOVED: CastWarlockSpellWithTracking - redundant as main function now includes tracking
 
@@ -3516,6 +3529,12 @@ function AC:CastWarlockSpell(spellName, unit)
         self:TrackWarlockSpellCast(spellName) -- Track successful cast
         self:RememberWarlockTargetCast(spellName, spellName == S.LifeTap and "player" or unit)
         return true
+    end
+
+    -- The core path rejects an existing ground-target cursor.  Do not bypass
+    -- that safety check in the private-server fallback.
+    if SpellIsTargeting and SpellIsTargeting() then
+        return false
     end
 
     -- 3.3.5a safety fallback: some private-server clients reject through the

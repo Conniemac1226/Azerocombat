@@ -120,6 +120,15 @@ end
 -- UTILITY FUNCTIONS
 
 function AC:IsFastDyingMob(unit)
+    local _, playerClass = UnitClass("player")
+    if playerClass == "DRUID" and self.DruidIsFastDyingMob then
+        return self:DruidIsFastDyingMob(unit)
+    elseif playerClass == "HUNTER" and self.HunterIsFastDyingMob then
+        return self:HunterIsFastDyingMob(unit)
+    elseif playerClass == "WARLOCK" and self.WarlockIsFastDyingMob then
+        return self:WarlockIsFastDyingMob(unit)
+    end
+
     if not unit or not UnitExists(unit) then return false end
     local hp = UnitHealth(unit)
     local maxHp = UnitHealthMax(unit)
@@ -127,7 +136,59 @@ function AC:IsFastDyingMob(unit)
     return hpPercent < 20 or hp < 10000
 end
 
+function AC:EmergencyTriage()
+    local _, playerClass = UnitClass("player")
+    if playerClass == "PALADIN" and self.PaladinEmergencyTriage then
+        return self:PaladinEmergencyTriage()
+    end
+    if playerClass ~= "PRIEST" then return false end
+
+    local target, health = self:FindPriestHealingTarget("emergency")
+    if not target or health >= 0.30 then return false end
+    if not self:HasDebuff(target, S.WeakenedSoulDebuff) and
+       self:IsUsableSpell(S.PowerWordShield) and
+       self:CastSpell(S.PowerWordShield, target) then
+        return true
+    end
+    if health < 0.25 and self:IsUsableSpell(S.Penance) and
+       self:CastSpell(S.Penance, target) then
+        return true
+    end
+    return self:IsUsableSpell(S.FlashHeal) and self:CastSpell(S.FlashHeal, target)
+end
+
+function AC:SmartHeal()
+    local _, playerClass = UnitClass("player")
+    if playerClass == "PALADIN" and self.PaladinSmartHeal then
+        return self:PaladinSmartHeal()
+    end
+    if playerClass ~= "PRIEST" then return false end
+
+    local target, health = self:FindPriestHealingTarget("normal")
+    if not target or health >= 0.95 then return false end
+    if health < 0.65 and self:IsUsableSpell(S.FlashHeal) and
+       self:CastSpell(S.FlashHeal, target) then
+        return true
+    end
+    if health < 0.85 and self:IsUsableSpell(S.Renew) and
+       not self:HasBuff(target, S.Renew) and self:CastSpell(S.Renew, target) then
+        return true
+    end
+    return self:IsUsableSpell(S.GreaterHeal) and self:CastSpell(S.GreaterHeal, target)
+end
+
+function AC:CheckPriestCombatBuffs()
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "PRIEST" then return false end
+    -- Combat buff maintenance is intentionally conservative.  The normal
+    -- defensive and healing priorities handle shields and emergency globals.
+    return false
+end
+
 function AC:ActionThrottle(action, interval)
+    if self.CoreActionThrottle then
+        return self:CoreActionThrottle(action, interval)
+    end
     return Throttle(action, interval)
 end
 
@@ -351,7 +412,7 @@ function AC:AnalyzeDispelNeeds(unit)
     }
     
     local i = 1
-    while true do
+    while i <= 40 do
         local name, icon, count, debuffType, duration, expirationTime, source, isStealable, nameplateShowPersonal, spellId = UnitDebuff(unit, i)
         if not name then break end
         
@@ -426,55 +487,39 @@ function AC:UsePriestRacials(offensive, defensive)
     race = string.upper(race)
     local health = self:GetPlayerHealthPercent()
     local inCombat = UnitAffectingCombat("player")
+
+    local function castRacial(spellName, message)
+        if self:CastSpell(spellName, "player") then
+            PriestDebug(message)
+            return true
+        end
+        return false
+    end
     
     -- Offensive racials
     if offensive and inCombat then
-        if race == "TROLL" and self:IsUsableSpell(S.Berserking) then
-            CastSpellByName(S.Berserking)
-            PriestDebug("Racial: Berserking")
-            return true
-        end
+        if race == "TROLL" and castRacial(S.Berserking, "Racial: Berserking") then return true end
         if race == "BLOODELF" and self:IsUsableSpell(S.ArcaneTorrent) then
             local mana = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
             if mana < 80 then
-                CastSpellByName(S.ArcaneTorrent)
-                PriestDebug("Racial: Arcane Torrent")
-                return true
+                if castRacial(S.ArcaneTorrent, "Racial: Arcane Torrent") then return true end
             end
         end
     end
     
     -- Defensive racials
     if defensive or health < 50 then
-        if race == "UNDEAD" and self:IsUsableSpell(S.WillOfTheForsaken) then
-            CastSpellByName(S.WillOfTheForsaken)
-            PriestDebug("Racial: Will of the Forsaken")
-            return true
-        end
-        if race == "DWARF" and self:IsUsableSpell(S.Stoneform) then
-            CastSpellByName(S.Stoneform)
-            PriestDebug("Racial: Stoneform")
-            return true
-        end
-        if race == "HUMAN" and self:IsUsableSpell(S.EveryManForHimself) then
-            CastSpellByName(S.EveryManForHimself)
-            PriestDebug("Racial: Every Man for Himself")
-            return true
-        end
-        if race == "NIGHTELF" and self:IsUsableSpell(S.Shadowmeld) then
-            CastSpellByName(S.Shadowmeld)
-            PriestDebug("Racial: Shadowmeld")
-            return true
-        end
+        if race == "UNDEAD" and castRacial(S.WillOfTheForsaken, "Racial: Will of the Forsaken") then return true end
+        if race == "DWARF" and castRacial(S.Stoneform, "Racial: Stoneform") then return true end
+        if race == "HUMAN" and castRacial(S.EveryManForHimself, "Racial: Every Man for Himself") then return true end
+        if race == "NIGHTELF" and castRacial(S.Shadowmeld, "Racial: Shadowmeld") then return true end
     end
     
     -- Mana racials
     if race == "DRAENEI" and self:IsUsableSpell(S.SymbolOfHope) then
         local mana = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
         if mana < 50 then
-            CastSpellByName(S.SymbolOfHope)
-            PriestDebug("Racial: Symbol of Hope")
-            return true
+            if castRacial(S.SymbolOfHope, "Racial: Symbol of Hope") then return true end
         end
     end
     
@@ -497,35 +542,35 @@ function AC:UsePriestDefensives()
     -- Power Word: Shield
     if health < 70 and self:IsUsableSpell(S.PowerWordShield) and 
        not self:HasDebuff("player", "Weakened Soul") then
-        CastSpellByName(S.PowerWordShield, "player")
+        if not self:CastSpell(S.PowerWordShield, "player") then return false end
         PriestDebug("Power Word: Shield (self)")
         return true
     end
     
     -- Desperate Prayer
     if health < 40 and self:IsUsableSpell(S.DesperatePrayer) then
-        CastSpellByName(S.DesperatePrayer)
+        if not self:CastSpell(S.DesperatePrayer) then return false end
         PriestDebug("Desperate Prayer")
         return true
     end
     
     -- Fade
     if health < 60 and self:GetEnemyCount() > 1 and self:IsUsableSpell(S.Fade) then
-        CastSpellByName(S.Fade)
+        if not self:CastSpell(S.Fade) then return false end
         PriestDebug("Fade")
         return true
     end
     
     -- Psychic Scream
     if health < 30 and self:GetEnemyCount() >= 2 and self:IsUsableSpell(S.PsychicScream) then
-        CastSpellByName(S.PsychicScream)
+        if not self:CastSpell(S.PsychicScream) then return false end
         PriestDebug("Psychic Scream")
         return true
     end
     
     -- Dispersion (Shadow)
     if health < 25 and self:IsUsableSpell(S.Dispersion) then
-        CastSpellByName(S.Dispersion)
+        if not self:CastSpell(S.Dispersion) then return false end
         PriestDebug("Dispersion")
         return true
     end
@@ -560,7 +605,7 @@ function AC:UsePriestOffensives(spec)
     if spec == "Shadow" then
         -- Shadowfiend
         if self:IsUsableSpell(S.Shadowfiend) and self:GetSpellCooldown(S.Shadowfiend) == 0 and Throttle("Shadowfiend", 300) then
-            CastSpellByName(S.Shadowfiend, "target")
+            if not self:CastSpell(S.Shadowfiend, "target") then return false end
             PriestDebug("Shadowfiend")
             if self.UseTrinkets then self:UseTrinkets() end
             if self.UseOffensivePotion then self:UseOffensivePotion(true) end
@@ -569,7 +614,7 @@ function AC:UsePriestOffensives(spec)
         
         -- Power Infusion
         if self:IsUsableSpell(S.PowerInfusion) and self:GetSpellCooldown(S.PowerInfusion) == 0 and Throttle("PowerInfusion", 120) then
-            CastSpellByName(S.PowerInfusion, "player")
+            if not self:CastSpell(S.PowerInfusion, "player") then return false end
             PriestDebug("Power Infusion")
             return true
         end
@@ -578,7 +623,7 @@ function AC:UsePriestOffensives(spec)
     -- Discipline offensive PI
     if spec == "Discipline" and self:IsUsableSpell(S.PowerInfusion) and 
        Throttle("PowerInfusionDisc", 120) then
-        CastSpellByName(S.PowerInfusion, "player")
+        if not self:CastSpell(S.PowerInfusion, "player") then return false end
         PriestDebug("Power Infusion (Disc)")
         return true
     end
@@ -593,7 +638,7 @@ function AC:CheckPriestBuffs()
     
     -- Inner Fire
     if self:IsUsableSpell(S.InnerFire) and not self:HasBuff("player", S.InnerFire) then
-        CastSpellByName(S.InnerFire)
+        if not self:CastSpell(S.InnerFire) then return false end
         PriestDebug("Buffing: Inner Fire")
         return true
     end
@@ -603,7 +648,7 @@ function AC:CheckPriestBuffs()
     if self:IsUsableSpell(fortSpell) then
         if not self:HasBuff("player", S.PowerWordFortitude) and 
            not self:HasBuff("player", S.PrayerOfFortitude) then
-            CastSpellByName(fortSpell, "player")
+            if not self:CastSpell(fortSpell, "player") then return false end
             PriestDebug("Buffing: " .. fortSpell)
             return true
         end
@@ -614,7 +659,7 @@ function AC:CheckPriestBuffs()
     if self:IsUsableSpell(spiritSpell) then
         if not self:HasBuff("player", S.DivineSpirit) and 
            not self:HasBuff("player", S.PrayerOfSpirit) then
-            CastSpellByName(spiritSpell, "player")
+            if not self:CastSpell(spiritSpell, "player") then return false end
             PriestDebug("Buffing: " .. spiritSpell)
             return true
         end
@@ -626,7 +671,7 @@ function AC:CheckPriestBuffs()
     if self:IsUsableSpell(shadowSpell) and IsInInstance() then
         if not self:HasBuff("player", S.ShadowProtection) and 
            not self:HasBuff("player", S.PrayerOfShadowProtection) then
-            CastSpellByName(shadowSpell, "player")
+            if not self:CastSpell(shadowSpell, "player") then return false end
             PriestDebug("Buffing: " .. shadowSpell)
             return true
         end
@@ -647,14 +692,14 @@ function AC:ShadowPriestRotation()
     
     -- Shadowform check (required for Shadow)
     if not self:HasBuff("player", S.Shadowform) and self:IsUsableSpell(S.Shadowform) then
-        CastSpellByName(S.Shadowform)
+        if not self:CastSpell(S.Shadowform) then return false end
         PriestDebug("Shadow: Entering Shadowform")
         return true
     end
 
     -- Maintain Vampiric Embrace for passive self/group healing.
     if self:IsUsableSpell(S.VampiricEmbrace) and not self:HasBuff("player", S.VampiricEmbrace) then
-        CastSpellByName(S.VampiricEmbrace, "player")
+        if not self:CastSpell(S.VampiricEmbrace, "player") then return false end
         PriestDebug("Shadow: Vampiric Embrace")
         return true
     end
@@ -679,7 +724,7 @@ function AC:ShadowPriestRotation()
     end
     
     if manaPercent < 20 and self:IsUsableSpell(S.Dispersion) then
-        CastSpellByName(S.Dispersion)
+        if not self:CastSpell(S.Dispersion) then return false end
         PriestDebug("Shadow: Dispersion for mana")
         return true
     end
@@ -703,7 +748,7 @@ function AC:ShadowPriestRotation()
     if UnitCastingInfo("target") and self:IsUsableSpell(S.PsychicHorror) and 
        self:GetSpellCooldown(S.PsychicHorror) == 0 and self:GetSpellCooldown(S.Silence) > 0 and
        targetClassification ~= "worldboss" then
-        CastSpellByName(S.PsychicHorror, "target")
+        if not self:CastSpell(S.PsychicHorror, "target") then return false end
         PriestDebug("Shadow: Psychic Horror control")
         return true
     end
@@ -711,13 +756,14 @@ function AC:ShadowPriestRotation()
     -- While moving, skip casted filler and only spend globals on instant or execute tools.
     if isMoving then
         if targetHP < 25 and self:IsUsableSpell(S.ShadowWordDeath) and self:GetSpellCooldown(S.ShadowWordDeath) == 0 then
-            CastSpellByName(S.ShadowWordDeath, "target")
+            if not self:CastSpell(S.ShadowWordDeath, "target") then return false end
             PriestDebug("Shadow: Shadow Word: Death (moving)")
             return true
         end
 
-        if manaPercent < 5 and not IsAutoRepeatSpell(S.Shoot) then
-            CastSpellByName(S.Shoot, "target")
+        if manaPercent < 5 and self:KnowsSpell(S.Shoot) and self:IsUsableSpell(S.Shoot) and
+           not IsAutoRepeatSpell(S.Shoot) then
+            if not self:CastSpell(S.Shoot, "target") then return false end
             PriestDebug("Shadow: Wanding (moving)")
             return true
         end
@@ -727,7 +773,7 @@ function AC:ShadowPriestRotation()
 
     -- Shadow Word: Death execute
     if targetHP < 25 and self:IsUsableSpell(S.ShadowWordDeath) and self:GetSpellCooldown(S.ShadowWordDeath) == 0 then
-        CastSpellByName(S.ShadowWordDeath, "target")
+        if not self:CastSpell(S.ShadowWordDeath, "target") then return false end
         PriestDebug("Shadow: Shadow Word: Death")
         return true
     end
@@ -736,7 +782,7 @@ function AC:ShadowPriestRotation()
     if enemies >= 4 and manaPercent > 30 then
         -- Mind Sear spam
         if self:IsUsableSpell(S.MindSear) and not UnitChannelInfo("player") then
-            CastSpellByName(S.MindSear, "target")
+            if not self:CastSpell(S.MindSear, "target") then return false end
             PriestDebug("Shadow: Mind Sear (AoE)")
             return true
         end
@@ -768,21 +814,21 @@ function AC:ShadowPriestRotation()
     if not isFastDying then
         -- Priority 1: Vampiric Touch (15s base, provides healing and shadow embrace)
         if shouldRefreshShadowDot(S.VampiricTouch, 15) and self:IsUsableSpell(S.VampiricTouch) then
-            CastSpellByName(S.VampiricTouch, "target")
+            if not self:CastSpell(S.VampiricTouch, "target") then return false end
             PriestDebug("Shadow: Vampiric Touch (pandemic-aware)")
             return true
         end
         
         -- Priority 2: Shadow Word: Pain (18s base, core DoT)
         if shouldRefreshShadowDot(S.ShadowWordPain, 18) and self:IsUsableSpell(S.ShadowWordPain) then
-            CastSpellByName(S.ShadowWordPain, "target")
+            if not self:CastSpell(S.ShadowWordPain, "target") then return false end
             PriestDebug("Shadow: Shadow Word: Pain (pandemic-aware)")
             return true
         end
         
         -- Priority 3: Devouring Plague (24s base, high damage)
         if shouldRefreshShadowDot(S.DevouringPlague, 24) and self:IsUsableSpell(S.DevouringPlague) then
-            CastSpellByName(S.DevouringPlague, "target")
+            if not self:CastSpell(S.DevouringPlague, "target") then return false end
             PriestDebug("Shadow: Devouring Plague (pandemic-aware)")
             return true
         end
@@ -790,7 +836,7 @@ function AC:ShadowPriestRotation()
     
     -- Mind Blast on cooldown
     if self:IsUsableSpell(S.MindBlast) and self:GetSpellCooldown(S.MindBlast) == 0 and manaPercent > 10 then
-        CastSpellByName(S.MindBlast, "target")
+        if not self:CastSpell(S.MindBlast, "target") then return false end
         PriestDebug("Shadow: Mind Blast")
         return true
     end
@@ -798,15 +844,16 @@ function AC:ShadowPriestRotation()
     -- Mind Flay filler
     if self:IsUsableSpell(S.MindFlay) and manaPercent > 5 then
         if not UnitChannelInfo("player") then
-            CastSpellByName(S.MindFlay, "target")
+            if not self:CastSpell(S.MindFlay, "target") then return false end
             PriestDebug("Shadow: Mind Flay")
             return true
         end
     end
     
     -- Wand if OOM
-    if manaPercent < 5 and not IsAutoRepeatSpell(S.Shoot) then
-        CastSpellByName(S.Shoot, "target")
+    if manaPercent < 5 and self:KnowsSpell(S.Shoot) and self:IsUsableSpell(S.Shoot) and
+       not IsAutoRepeatSpell(S.Shoot) then
+        if not self:CastSpell(S.Shoot, "target") then return false end
         PriestDebug("Shadow: Wanding")
         return true
     end
@@ -866,7 +913,7 @@ function AC:DisciplinePriestRotation()
         
         -- Use Mass Dispel if 2+ people need urgent dispelling
         if dispelCount >= 2 then
-            CastSpellByName(S.MassDispel)
+            if not self:CastSpell(S.MassDispel) then return false end
             PriestDebug("DISC: Mass Dispel (" .. dispelCount .. " targets)")
             return true
         end
@@ -902,11 +949,11 @@ function AC:DisciplinePriestRotation()
                 local hasDispellable, topDebuff, urgentDispel, priority = self:AnalyzeDispelNeeds(unit)
                 if hasDispellable and (urgentDispel or priority >= 70 or UnitIsUnit(unit, "player")) then
                     if topDebuff.type == "Magic" and self:IsUsableSpell(S.DispelMagic) then
-                        CastSpellByName(S.DispelMagic, unit)
+                        if not self:CastSpell(S.DispelMagic, unit) then return false end
                         PriestDebug("DISC: Dispel Magic on " .. UnitName(unit) .. " (" .. topDebuff.name .. ")")
                         return true
                     elseif topDebuff.type == "Disease" and self:IsUsableSpell(S.CureDisease) then
-                        CastSpellByName(S.CureDisease, unit)
+                        if not self:CastSpell(S.CureDisease, unit) then return false end
                         PriestDebug("DISC: Cure Disease on " .. UnitName(unit) .. " (" .. topDebuff.name .. ")")
                         return true
                     end
@@ -920,28 +967,28 @@ function AC:DisciplinePriestRotation()
     if emergencyTarget and emergencyHealth < 0.25 then
         -- Pain Suppression (ULTIMATE emergency cooldown)
         if self:IsUsableSpell(S.PainSuppression) and Throttle("PainSuppression", 180) then
-            CastSpellByName(S.PainSuppression, emergencyTarget)
+            if not self:CastSpell(S.PainSuppression, emergencyTarget) then return false end
             PriestDebug("DISC EMERGENCY: Pain Suppression on " .. UnitName(emergencyTarget))
             return true
         end
         
         -- Power Word: Shield (instant protection)
         if not self:HasDebuff(emergencyTarget, S.WeakenedSoulDebuff) and self:IsUsableSpell(S.PowerWordShield) then
-            CastSpellByName(S.PowerWordShield, emergencyTarget)
+            if not self:CastSpell(S.PowerWordShield, emergencyTarget) then return false end
             PriestDebug("DISC EMERGENCY: PW:Shield on " .. UnitName(emergencyTarget))
             return true
         end
         
         -- Penance (fast, powerful heal)
         if self:IsUsableSpell(S.Penance) then
-            CastSpellByName(S.Penance, emergencyTarget)
+            if not self:CastSpell(S.Penance, emergencyTarget) then return false end
             PriestDebug("DISC EMERGENCY: Penance heal on " .. UnitName(emergencyTarget))
             return true
         end
         
         -- Flash Heal (backup emergency)
         if self:IsUsableSpell(S.FlashHeal) then
-            CastSpellByName(S.FlashHeal, emergencyTarget)
+            if not self:CastSpell(S.FlashHeal, emergencyTarget) then return false end
             PriestDebug("DISC EMERGENCY: Flash Heal on " .. UnitName(emergencyTarget))
             return true
         end
@@ -951,7 +998,7 @@ function AC:DisciplinePriestRotation()
     local tankTarget, tankHealth, tankInfo = self:FindPriestHealingTarget("tank")
     if tankTarget and not self:HasDebuff(tankTarget, S.WeakenedSoulDebuff) and 
        self:IsUsableSpell(S.PowerWordShield) and Throttle("ProactiveTankShield", 8) then
-        CastSpellByName(S.PowerWordShield, tankTarget)
+        if not self:CastSpell(S.PowerWordShield, tankTarget) then return false end
         PriestDebug("DISC PROACTIVE: PW:Shield on tank " .. UnitName(tankTarget))
         return true
     end
@@ -959,19 +1006,22 @@ function AC:DisciplinePriestRotation()
     -- PRIORITY 7: GROUP EMERGENCY HEALING
     if groupHealth.needsEmergencyAOE then
         -- Power Word: Barrier (Disc AOE damage reduction)
-        if self:IsUsableSpell(S.PowerWordBarrier) and Throttle("PowerWordBarrier", 180) then
+        if self:IsUsableSpell(S.PowerWordBarrier) then
             if self.SafeCastGroundAOE then
-                self:SafeCastGroundAOE(S.PowerWordBarrier)
-            else
-                CastSpellByName(S.PowerWordBarrier)
+                if self:SafeCastGroundAOE(S.PowerWordBarrier) then
+                    PriestDebug("DISC EMERGENCY: Power Word: Barrier")
+                    return true
+                end
+            elseif Throttle("PowerWordBarrier", 180) then
+                if not self:CastSpell(S.PowerWordBarrier) then return false end
+                PriestDebug("DISC EMERGENCY: Power Word: Barrier")
+                return true
             end
-            PriestDebug("DISC EMERGENCY: Power Word: Barrier")
-            return true
         end
         
         -- Prayer of Healing (group heal)
         if self:IsUsableSpell(S.PrayerOfHealing) and manaPercent > 30 then
-            CastSpellByName(S.PrayerOfHealing)
+            if not self:CastSpell(S.PrayerOfHealing) then return false end
             PriestDebug("DISC EMERGENCY: Prayer of Healing")
             return true
         end
@@ -988,14 +1038,14 @@ function AC:DisciplinePriestRotation()
         -- Prayer of Mending (efficient bouncing heal)
         if healTargetHealth < 0.80 and self:IsUsableSpell(S.PrayerOfMending) and 
            Throttle("PrayerOfMending", 8) then
-            CastSpellByName(S.PrayerOfMending, healTarget)
+            if not self:CastSpell(S.PrayerOfMending, healTarget) then return false end
             PriestDebug("DISC: Prayer of Mending on " .. UnitName(healTarget))
             return true
         end
         
         -- Penance (main healing spell)
         if healTargetHealth < 0.70 and self:IsUsableSpell(S.Penance) then
-            CastSpellByName(S.Penance, healTarget)
+            if not self:CastSpell(S.Penance, healTarget) then return false end
             PriestDebug("DISC: Penance heal on " .. UnitName(healTarget))
             return true
         end
@@ -1003,14 +1053,14 @@ function AC:DisciplinePriestRotation()
         -- Power Word: Shield for damage prevention
         if healTargetHealth < 0.85 and not self:HasDebuff(healTarget, S.WeakenedSoulDebuff) and 
            self:IsUsableSpell(S.PowerWordShield) then
-            CastSpellByName(S.PowerWordShield, healTarget)
+            if not self:CastSpell(S.PowerWordShield, healTarget) then return false end
             PriestDebug("DISC: PW:Shield on " .. UnitName(healTarget))
             return true
         end
         
         -- Flash Heal for quick healing
         if healTargetHealth < 0.60 and self:IsUsableSpell(S.FlashHeal) then
-            CastSpellByName(S.FlashHeal, healTarget)
+            if not self:CastSpell(S.FlashHeal, healTarget) then return false end
             PriestDebug("DISC: Flash Heal on " .. UnitName(healTarget))
             return true
         end
@@ -1018,7 +1068,7 @@ function AC:DisciplinePriestRotation()
         -- Greater Heal for efficient big heals
         if healTargetHealth < 0.70 and manaPercent > 40 and self:IsUsableSpell(S.GreaterHeal) then
             if not UnitCastingInfo("player") then
-                CastSpellByName(S.GreaterHeal, healTarget)
+                if not self:CastSpell(S.GreaterHeal, healTarget) then return false end
                 PriestDebug("DISC: Greater Heal on " .. UnitName(healTarget))
                 return true
             end
@@ -1028,7 +1078,7 @@ function AC:DisciplinePriestRotation()
     -- PRIORITY 9: GROUP HEALING
     if groupHealth.needsAOE and manaPercent > 35 then
         if self:IsUsableSpell(S.PrayerOfHealing) then
-            CastSpellByName(S.PrayerOfHealing)
+            if not self:CastSpell(S.PrayerOfHealing) then return false end
             PriestDebug("DISC: Prayer of Healing (group damage)")
             return true
         end
@@ -1042,14 +1092,14 @@ function AC:DisciplinePriestRotation()
         
         -- Offensive Penance (excellent damage)
         if self:IsUsableSpell(S.Penance) then
-            CastSpellByName(S.Penance, "target")
+            if not self:CastSpell(S.Penance, "target") then return false end
             PriestDebug("DISC: Offensive Penance")
             return true
         end
         
         -- Holy Fire (DoT + direct damage)
         if not self:HasDebuff("target", S.HolyFire) and self:IsUsableSpell(S.HolyFire) then
-            CastSpellByName(S.HolyFire, "target")
+            if not self:CastSpell(S.HolyFire, "target") then return false end
             PriestDebug("DISC: Holy Fire")
             return true
         end
@@ -1057,14 +1107,14 @@ function AC:DisciplinePriestRotation()
         -- Shadow Word: Pain (DoT)
         if self:DebuffTimeRemaining("target", S.ShadowWordPain) < 3 and 
            self:IsUsableSpell(S.ShadowWordPain) and not self:IsFastDyingMob("target") then
-            CastSpellByName(S.ShadowWordPain, "target")
+            if not self:CastSpell(S.ShadowWordPain, "target") then return false end
             PriestDebug("DISC: Shadow Word: Pain")
             return true
         end
         
         -- Smite (main damage filler)
         if self:IsUsableSpell(S.Smite) and not UnitCastingInfo("player") then
-            CastSpellByName(S.Smite, "target")
+            if not self:CastSpell(S.Smite, "target") then return false end
             PriestDebug("DISC: Smite")
             return true
         end
@@ -1104,7 +1154,7 @@ function AC:HolyPriestRotation()
     -- Hymn of Hope for group mana (Holy specialty)
     if manaPercent < 20 and self:IsUsableSpell(S.HymnOfHope) and Throttle("HymnOfHope", 360) then
         if not UnitChannelInfo("player") then
-            CastSpellByName(S.HymnOfHope)
+            if not self:CastSpell(S.HymnOfHope) then return false end
             PriestDebug("HOLY: Hymn of Hope (group mana)")
             return true
         end
@@ -1128,11 +1178,11 @@ function AC:HolyPriestRotation()
                 
                 if hasDispellable and (urgentDispel or priority >= 75 or unitHP < 0.70) then
                     if topDebuff.type == "Magic" and self:IsUsableSpell(S.DispelMagic) then
-                        CastSpellByName(S.DispelMagic, unit)
+                        if not self:CastSpell(S.DispelMagic, unit) then return false end
                         PriestDebug("HOLY: Dispel Magic on " .. UnitName(unit) .. " (" .. topDebuff.name .. ")")
                         return true
                     elseif topDebuff.type == "Disease" and self:IsUsableSpell(S.AbolishDisease) then
-                        CastSpellByName(S.AbolishDisease, unit)
+                        if not self:CastSpell(S.AbolishDisease, unit) then return false end
                         PriestDebug("HOLY: Abolish Disease on " .. UnitName(unit) .. " (" .. topDebuff.name .. ")")
                         return true
                     end
@@ -1146,21 +1196,21 @@ function AC:HolyPriestRotation()
     if emergencyTarget and emergencyHealth < 0.20 then
         -- Guardian Spirit (ULTIMATE emergency - prevents death)
         if self:IsUsableSpell(S.GuardianSpirit) and Throttle("GuardianSpirit", 180) then
-            CastSpellByName(S.GuardianSpirit, emergencyTarget)
+            if not self:CastSpell(S.GuardianSpirit, emergencyTarget) then return false end
             PriestDebug("HOLY ULTIMATE: Guardian Spirit on " .. UnitName(emergencyTarget) .. " (DEATH PREVENTION!)")
             return true
         end
         
         -- Surge of Light proc (instant Flash Heal)
         if self:HasBuff("player", S.SurgeOfLightBuff) and self:IsUsableSpell(S.FlashHeal) then
-            CastSpellByName(S.FlashHeal, emergencyTarget)
+            if not self:CastSpell(S.FlashHeal, emergencyTarget) then return false end
             PriestDebug("HOLY EMERGENCY: Flash Heal with Surge of Light on " .. UnitName(emergencyTarget))
             return true
         end
         
         -- Flash Heal (fast emergency heal)
         if self:IsUsableSpell(S.FlashHeal) then
-            CastSpellByName(S.FlashHeal, emergencyTarget)
+            if not self:CastSpell(S.FlashHeal, emergencyTarget) then return false end
             PriestDebug("HOLY EMERGENCY: Flash Heal on " .. UnitName(emergencyTarget))
             return true
         end
@@ -1171,7 +1221,7 @@ function AC:HolyPriestRotation()
         -- Divine Hymn (ULTIMATE group heal)
         if self:IsUsableSpell(S.DivineHymn) and Throttle("DivineHymn", 480) then
             if not UnitChannelInfo("player") then
-                CastSpellByName(S.DivineHymn)
+                if not self:CastSpell(S.DivineHymn) then return false end
                 PriestDebug("HOLY ULTIMATE: Divine Hymn (GROUP EMERGENCY!)")
                 return true
             end
@@ -1180,14 +1230,14 @@ function AC:HolyPriestRotation()
         -- Circle of Healing (instant group heal)
         if self:IsUsableSpell(S.CircleOfHealing) then
             local target = emergencyTarget or "player"
-            CastSpellByName(S.CircleOfHealing, target)
+            if not self:CastSpell(S.CircleOfHealing, target) then return false end
             PriestDebug("HOLY EMERGENCY: Circle of Healing (group emergency)")
             return true
         end
         
         -- Prayer of Healing (group heal)
         if self:IsUsableSpell(S.PrayerOfHealing) and manaPercent > 25 then
-            CastSpellByName(S.PrayerOfHealing)
+            if not self:CastSpell(S.PrayerOfHealing) then return false end
             PriestDebug("HOLY EMERGENCY: Prayer of Healing")
             return true
         end
@@ -1221,7 +1271,7 @@ function AC:HolyPriestRotation()
         -- Apply Renew to lowest health target without it
         if #renewTargets > 0 and self:IsUsableSpell(S.Renew) then
             local target = renewTargets[1]
-            CastSpellByName(S.Renew, target.unit)
+            if not self:CastSpell(S.Renew, target.unit) then return false end
             PriestDebug("HOLY: Renew blanket on " .. UnitName(target.unit) .. " (" .. math.floor(target.health * 100) .. "% HP)")
             return true
         end
@@ -1237,7 +1287,7 @@ function AC:HolyPriestRotation()
         
         -- Circle of Healing (instant, powerful)
         if healTargetHealth < 0.75 and self:IsUsableSpell(S.CircleOfHealing) then
-            CastSpellByName(S.CircleOfHealing, healTarget)
+            if not self:CastSpell(S.CircleOfHealing, healTarget) then return false end
             PriestDebug("HOLY: Circle of Healing on " .. UnitName(healTarget))
             return true
         end
@@ -1245,14 +1295,14 @@ function AC:HolyPriestRotation()
         -- Prayer of Mending (efficient bouncing heal)
         if healTargetHealth < 0.80 and self:IsUsableSpell(S.PrayerOfMending) and 
            Throttle("PrayerOfMendingHoly", 8) then
-            CastSpellByName(S.PrayerOfMending, healTarget)
+            if not self:CastSpell(S.PrayerOfMending, healTarget) then return false end
             PriestDebug("HOLY: Prayer of Mending on " .. UnitName(healTarget))
             return true
         end
         
         -- Flash Heal for quick response
         if healTargetHealth < 0.60 and self:IsUsableSpell(S.FlashHeal) then
-            CastSpellByName(S.FlashHeal, healTarget)
+            if not self:CastSpell(S.FlashHeal, healTarget) then return false end
             PriestDebug("HOLY: Flash Heal on " .. UnitName(healTarget))
             return true
         end
@@ -1262,13 +1312,13 @@ function AC:HolyPriestRotation()
             local _, _, _, serendipityStacks = self:HasBuff("player", S.SerendipityBuff)
             if serendipityStacks and serendipityStacks >= 2 then
                 if not UnitCastingInfo("player") then
-                    CastSpellByName(S.GreaterHeal, healTarget)
+                    if not self:CastSpell(S.GreaterHeal, healTarget) then return false end
                     PriestDebug("HOLY: Greater Heal with Serendipity (" .. serendipityStacks .. " stacks) on " .. UnitName(healTarget))
                     return true
                 end
             elseif healTargetHealth < 0.55 then
                 if not UnitCastingInfo("player") then
-                    CastSpellByName(S.GreaterHeal, healTarget)
+                    if not self:CastSpell(S.GreaterHeal, healTarget) then return false end
                     PriestDebug("HOLY: Greater Heal on " .. UnitName(healTarget))
                     return true
                 end
@@ -1278,7 +1328,7 @@ function AC:HolyPriestRotation()
         -- Binding Heal (heal self + target)
         if healTargetHealth < 0.75 and self:GetPlayerHealthPercent() < 80 and 
            self:IsUsableSpell(S.BindingHeal) then
-            CastSpellByName(S.BindingHeal, healTarget)
+            if not self:CastSpell(S.BindingHeal, healTarget) then return false end
             PriestDebug("HOLY: Binding Heal (self + " .. UnitName(healTarget) .. ")")
             return true
         end
@@ -1289,21 +1339,21 @@ function AC:HolyPriestRotation()
         -- Circle of Healing first (instant)
         if self:IsUsableSpell(S.CircleOfHealing) then
             local target = healTarget or "player"
-            CastSpellByName(S.CircleOfHealing, target)
+            if not self:CastSpell(S.CircleOfHealing, target) then return false end
             PriestDebug("HOLY: Circle of Healing (group damage)")
             return true
         end
         
         -- Prayer of Healing (powerful group heal)
         if self:IsUsableSpell(S.PrayerOfHealing) and manaPercent > 35 then
-            CastSpellByName(S.PrayerOfHealing)
+            if not self:CastSpell(S.PrayerOfHealing) then return false end
             PriestDebug("HOLY: Prayer of Healing (group damage)")
             return true
         end
         
         -- Holy Nova (if enemies nearby)
         if self:GetEnemyCount() > 0 and self:IsUsableSpell(S.HolyNova) then
-            CastSpellByName(S.HolyNova)
+            if not self:CastSpell(S.HolyNova) then return false end
             PriestDebug("HOLY: Holy Nova (heal + damage)")
             return true
         end
@@ -1312,7 +1362,7 @@ function AC:HolyPriestRotation()
     -- PRIORITY 9: LIGHTWELL MAINTENANCE
     if self:IsUsableSpell(S.Lightwell) and Throttle("LightwellCheck", 30) and IsInGroup() then
         -- Place Lightwell if in group and don't have one
-        CastSpellByName(S.Lightwell)
+        if not self:CastSpell(S.Lightwell) then return false end
         PriestDebug("HOLY: Lightwell placed")
         return true
     end
@@ -1325,7 +1375,7 @@ function AC:HolyPriestRotation()
         
         -- Holy Fire (main damage + DoT)
         if not self:HasDebuff("target", S.HolyFire) and self:IsUsableSpell(S.HolyFire) then
-            CastSpellByName(S.HolyFire, "target")
+            if not self:CastSpell(S.HolyFire, "target") then return false end
             PriestDebug("HOLY: Holy Fire")
             return true
         end
@@ -1333,14 +1383,14 @@ function AC:HolyPriestRotation()
         -- Shadow Word: Pain (DoT)
         if self:DebuffTimeRemaining("target", S.ShadowWordPain) < 3 and 
            self:IsUsableSpell(S.ShadowWordPain) and not self:IsFastDyingMob("target") then
-            CastSpellByName(S.ShadowWordPain, "target")
+            if not self:CastSpell(S.ShadowWordPain, "target") then return false end
             PriestDebug("HOLY: Shadow Word: Pain")
             return true
         end
         
         -- Smite (damage filler)
         if self:IsUsableSpell(S.Smite) and not UnitCastingInfo("player") then
-            CastSpellByName(S.Smite, "target")
+            if not self:CastSpell(S.Smite, "target") then return false end
             PriestDebug("HOLY: Smite")
             return true
         end
@@ -1372,20 +1422,20 @@ function AC:PriestRotation()
             -- Shadow pulls with SW:P
             if spec == "Shadow" then
                 if not self:HasBuff("player", S.Shadowform) and self:IsUsableSpell(S.Shadowform) then
-                    CastSpellByName(S.Shadowform)
+                    if not self:CastSpell(S.Shadowform) then return false end
                     return true
                 end
                 if self:IsUsableSpell(S.ShadowWordPain) then
-                    CastSpellByName(S.ShadowWordPain, "target")
+                    if not self:CastSpell(S.ShadowWordPain, "target") then return false end
                     return true
                 end
             else
                 -- Holy/Disc pull with Holy Fire or Smite
                 if self:IsUsableSpell(S.HolyFire) then
-                    CastSpellByName(S.HolyFire, "target")
+                    if not self:CastSpell(S.HolyFire, "target") then return false end
                     return true
                 elseif self:IsUsableSpell(S.Smite) then
-                    CastSpellByName(S.Smite, "target")
+                    if not self:CastSpell(S.Smite, "target") then return false end
                     return true
                 end
             end
@@ -1413,13 +1463,13 @@ function AC:PriestRotation()
         -- Basic self preservation
         if self:GetPlayerHealthPercent() < 70 and self:IsUsableSpell(S.PowerWordShield) and
            not self:HasDebuff("player", "Weakened Soul") then
-            CastSpellByName(S.PowerWordShield, "player")
+            if not self:CastSpell(S.PowerWordShield, "player") then return false end
             PriestDebug("Leveling: PW:Shield")
             return true
         end
         
         if self:GetPlayerHealthPercent() < 50 and self:IsUsableSpell(S.FlashHeal) then
-            CastSpellByName(S.FlashHeal, "player")
+            if not self:CastSpell(S.FlashHeal, "player") then return false end
             PriestDebug("Leveling: Flash Heal")
             return true
         end
@@ -1428,20 +1478,20 @@ function AC:PriestRotation()
         if hasTarget then
             if self:DebuffTimeRemaining("target", S.ShadowWordPain) < 3 and 
                self:IsUsableSpell(S.ShadowWordPain) and not self:IsFastDyingMob("target") then
-                CastSpellByName(S.ShadowWordPain, "target")
+                if not self:CastSpell(S.ShadowWordPain, "target") then return false end
                 PriestDebug("Leveling: SW:Pain")
                 return true
             end
             
             if self:IsUsableSpell(S.MindBlast) and manaPercent > 20 then
-                CastSpellByName(S.MindBlast, "target")
+                if not self:CastSpell(S.MindBlast, "target") then return false end
                 PriestDebug("Leveling: Mind Blast")
                 return true
             end
             
             if level >= 20 and self:IsUsableSpell(S.MindFlay) and manaPercent > 15 then
                 if not UnitChannelInfo("player") then
-                    CastSpellByName(S.MindFlay, "target")
+                    if not self:CastSpell(S.MindFlay, "target") then return false end
                     PriestDebug("Leveling: Mind Flay")
                     return true
                 end
@@ -1449,15 +1499,16 @@ function AC:PriestRotation()
             
             if self:IsUsableSpell(S.Smite) and manaPercent > 10 then
                 if not UnitCastingInfo("player") then
-                    CastSpellByName(S.Smite, "target")
+                    if not self:CastSpell(S.Smite, "target") then return false end
                     PriestDebug("Leveling: Smite")
                     return true
                 end
             end
             
             -- Wand if low mana
-            if manaPercent < 20 and not IsAutoRepeatSpell(S.Shoot) then
-                CastSpellByName(S.Shoot, "target")
+            if manaPercent < 20 and self:KnowsSpell(S.Shoot) and self:IsUsableSpell(S.Shoot) and
+               not IsAutoRepeatSpell(S.Shoot) then
+                if not self:CastSpell(S.Shoot, "target") then return false end
                 PriestDebug("Leveling: Wand")
                 return true
             end

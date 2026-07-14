@@ -91,6 +91,11 @@ end
 
 -- Class-specific throttle intervals
 AC.ClassThrottles = {
+    MAGE = {
+        combo_point = 0.2,      -- Reduce cast gaps for fast spell-queue decisions
+        cooldown_check = 0.2,   -- Recheck cooldowns without long drift
+        defensive = 0.3,        -- Responsive emergency handling
+    },
     ROGUE = {
         poison_check = 2.0,     -- Faster poison checking
         stealth_check = 1.0,    -- Quick stealth decisions
@@ -319,11 +324,21 @@ function AC:SafeCastGroundAOE(spellName)
     if self:IsPlayerMoving() then
         return false
     end
+
+    -- A previous ground spell can leave the client in targeting mode.  Do
+    -- not treat that stale state as proof that this spell was launched.
+    if SpellIsTargeting and SpellIsTargeting() then
+        return false
+    end
     
     self:Debug("Casting " .. spellName .. " (Ground AoE)")
     
-    -- Cast the spell
-    CastSpellByName(spellName)
+    -- Cast the spell through the verified shared path.  Ground-targeted
+    -- spells are still clicked by the frame below; the external AzerothCore
+    -- module remains responsible for choosing the final location.
+    if not self:CastSpell(spellName, "player") then
+        return false
+    end
     
     -- Handle targeting - optimized for server modules that auto-place
     local frame = CreateFrame("Frame")
@@ -352,7 +367,10 @@ function AC:SafeCastGroundAOE(spellName)
         end
     end)
     
-    return self:GetGroupSize() <= 5
+    -- A successful launch is handled even in a raid. The external AzerothCore
+    -- placement module owns the final ground position; the addon only needs
+    -- to cast and click the spell without using group size as a failure gate.
+    return true
 end
 
 -- SIMPLIFIED: Remove the aggressive blocking
@@ -824,7 +842,7 @@ AC.TankAbilities = {
     PALADIN = {
         taunt = "Hand of Reckoning",
         alt_taunt = "Righteous Defense", -- Multi-target taunt
-        aoe_taunt = "Consecration", -- Not a taunt but AoE threat
+        aoe_threat = "Consecration", -- Player-centered AoE threat, not a taunt
         threat_abilities = {"Hammer of the Righteous", "Shield of Righteousness", "Consecration"},
         tank_stance = function() 
             -- Paladins don't have stance requirements
@@ -1060,6 +1078,9 @@ function AC:IsInMeleeRange(unit, strict)
         PALADIN = {"Hammer of the Righteous", "Shield of Righteousness", "Crusader Strike"},
         DRUID = {"Maul", "Mangle (Bear)", "Swipe (Bear)", "Lacerate"},
         DEATHKNIGHT = {"Heart Strike", "Blood Strike", "Plague Strike", "Rune Strike"},
+        ROGUE = {"Mutilate", "Sinister Strike", "Hemorrhage", "Backstab"},
+        SHAMAN = {"Stormstrike", "Lava Lash"},
+        WARLOCK = {"Shadowflame"},
     }
 
     local spells = classMeleeSpells[class]
@@ -1089,6 +1110,8 @@ function AC:IsInMeleeRange(unit, strict)
     local success, result = pcall(CheckInteractDistance, unit, 3)
     return success and result or false
 end
+
+AC.CoreIsInMeleeRange = AC.IsInMeleeRange
 
 function AC:GetTankMovementAbility(unit)
     unit = unit or "target"
@@ -1655,8 +1678,7 @@ function AC:HandleTauntedLooseMobGapClosing()
                 return false
             end
 
-            CastSpellByName(spellName, unit)
-            return true
+            return self:CastSpell(spellName, unit)
         end
 
         moved = castMovementAttempt(movementAbility, "target")
@@ -1837,7 +1859,7 @@ function AC:CalculateUniversalLooseMobPriority(attackerUnit, targetUnit)
 end
 
 -- Universal taunt capability check (WotLK 3.3.5a compatible)
-function AC:CanTauntTarget(unit, abilities)
+function AC:CanTauntTarget(unit, abilities, victimUnit)
     if not UnitExists(unit) or not abilities then return false end
     
     -- Check primary taunt
@@ -1851,8 +1873,9 @@ function AC:CanTauntTarget(unit, abilities)
     end
     
     -- Check alternative taunt (Paladin Righteous Defense)
-    if abilities.alt_taunt and self:IsUsableSpell(abilities.alt_taunt) then
-        local ok, rangeResult = pcall(IsSpellInRange, abilities.alt_taunt, unit)
+    if abilities.alt_taunt and victimUnit and UnitExists(victimUnit) and
+       self:IsUsableSpell(abilities.alt_taunt) then
+        local ok, rangeResult = pcall(IsSpellInRange, abilities.alt_taunt, victimUnit)
         local inRange = ok and rangeResult == 1
         local notOnCooldown = self:GetSpellCooldown(abilities.alt_taunt) == 0
         if inRange and notOnCooldown then
@@ -1881,7 +1904,7 @@ function AC:TryImmediateTankTaunt(unit, victimUnit)
     local abilities = self:GetTankAbilitiesForPlayer()
     if not abilities then return false end
 
-    local tauntAbility = self:CanTauntTarget(unit, abilities)
+    local tauntAbility = self:CanTauntTarget(unit, abilities, victimUnit)
     if not tauntAbility then return false end
 
     local mobGUID = UnitGUID(unit)
@@ -1897,7 +1920,16 @@ function AC:TryImmediateTankTaunt(unit, victimUnit)
         castUnit = victimUnit
     end
 
-    CastSpellByName(tauntAbility, castUnit)
+    local castSucceeded
+    local _, playerClass = UnitClass("player")
+    if playerClass == "PALADIN" and self.CastPaladinSpell then
+        castSucceeded = self:CastPaladinSpell(tauntAbility, castUnit)
+    else
+        castSucceeded = self:CastSpell(tauntAbility, castUnit)
+    end
+    if not castSucceeded then
+        return false
+    end
 
     if mobGUID then
         self.lastTauntTime = GetTime()
@@ -1924,9 +1956,9 @@ function AC:GetUniversalLooseMobs()
     local looseMobs = {}
     local _, class = UnitClass("player")
     local abilities = self.TankAbilities[class]
-    local aoeTauntReady = abilities and abilities.aoe_taunt and
-                          self:IsUsableSpell(abilities.aoe_taunt) and
-                          self:GetSpellCooldown(abilities.aoe_taunt) == 0
+    local aoeResponse = abilities and (abilities.aoe_taunt or abilities.aoe_threat)
+    local aoeResponseReady = aoeResponse and self:IsUsableSpell(aoeResponse) and
+                             self:GetSpellCooldown(aoeResponse) == 0
     
     -- Method 1: Group member threat scan (WotLK 3.3.5a compatible)
     local numMembers = GetNumPartyMembers() + GetNumRaidMembers()
@@ -1945,8 +1977,8 @@ function AC:GetUniversalLooseMobs()
                         if self:IsRaidTauntSafeVictim(unit) then
                             local priority = self:CalculateUniversalLooseMobPriority(attacker, unit)
                             if priority > 100 then -- Lowered threshold for better loose mob detection
-                                local tauntAbility = self:CanTauntTarget(attacker, abilities)
-                                if tauntAbility or aoeTauntReady then
+                                local tauntAbility = self:CanTauntTarget(attacker, abilities, unit)
+                                if tauntAbility or aoeResponseReady then
                                     table.insert(looseMobs, {
                                         unit = attacker,
                                         priority = priority,
@@ -1976,8 +2008,8 @@ function AC:GetUniversalLooseMobs()
                 if self:IsRaidTauntSafeVictim(target) then
                     local priority = self:CalculateUniversalLooseMobPriority(unit, target)
                     if priority > 75 then
-                        local tauntAbility = self:CanTauntTarget(unit, abilities)
-                        if tauntAbility or aoeTauntReady then
+                        local tauntAbility = self:CanTauntTarget(unit, abilities, target)
+                        if tauntAbility or aoeResponseReady then
                             -- Check if not already in list
                             local exists = false
                             for _, existing in ipairs(looseMobs) do
@@ -2199,8 +2231,11 @@ function AC:HandleUniversalLooseMobs()
                 return false
             end
 
-            CastSpellByName(spellName, unit)
-            return true
+            local _, playerClass = UnitClass("player")
+            if playerClass == "PALADIN" and self.CastPaladinSpell then
+                return self:CastPaladinSpell(spellName, unit)
+            end
+            return self:CastSpell(spellName, unit)
         end
 
         if looseMob.tauntAbility == "Righteous Defense" then
@@ -2236,8 +2271,10 @@ function AC:HandleUniversalLooseMobs()
     
     -- Strategic AoE taunt usage - less restrictive but smart conditions
     if #looseMobs >= 2 then
-        -- Check for AoE taunt ability
-        if abilities.aoe_taunt and self:IsUsableSpell(abilities.aoe_taunt) and self:GetSpellCooldown(abilities.aoe_taunt) == 0 then
+        -- True AoE taunts and class-specific AoE threat use the same proximity
+        -- evaluation, but retain distinct labels and behavior in the mapping.
+        local aoeResponse = abilities.aoe_taunt or abilities.aoe_threat
+        if aoeResponse and self:IsUsableSpell(aoeResponse) and self:GetSpellCooldown(aoeResponse) == 0 then
             local canUseAoE = false
             local reason = ""
             
@@ -2315,10 +2352,19 @@ function AC:HandleUniversalLooseMobs()
             end
             
             if canUseAoE then
-                CastSpellByName(abilities.aoe_taunt)
-                startAttackOnCurrentTarget()
-                self:Debug("Universal AoE taunt: " .. abilities.aoe_taunt .. " - " .. reason .. " (" .. #looseMobs .. " loose mobs)")
-                return true
+                local _, playerClass = UnitClass("player")
+                local castSucceeded
+                if playerClass == "PALADIN" and self.CastPaladinSpell then
+                    castSucceeded = self:CastPaladinSpell(aoeResponse, "player")
+                else
+                    castSucceeded = self:CastSpell(aoeResponse, "player")
+                end
+                if castSucceeded then
+                    startAttackOnCurrentTarget()
+                    local responseType = abilities.aoe_taunt and "AoE taunt" or "AoE threat"
+                    self:Debug("Universal " .. responseType .. ": " .. aoeResponse .. " - " .. reason .. " (" .. #looseMobs .. " loose mobs)")
+                    return true
+                end
             end
         end
     end
@@ -2611,8 +2657,8 @@ function AC:TryInterrupt(interruptSpell, unit)
     if not self:ShouldInterruptSpell(spellName) then return false end
     
     -- Try to interrupt
-    if self:GetSpellCooldown(interruptSpell) == 0 then
-        self:CastSpell(interruptSpell, unit)
+    if self:GetSpellCooldown(interruptSpell) == 0 and self:IsUsableSpell(interruptSpell) and
+       self:CastSpell(interruptSpell, unit) then
         self:Debug("Interrupted " .. spellName .. " with " .. interruptSpell)
         return true
     end
@@ -2911,14 +2957,24 @@ end
 
 -- IMPROVED: Better enemy count detection for WotLK
 function AC:GetEnemyCount(range, silent)
+    range = range or 30
+
     -- Don't run this function too often
-    if not self:Throttle("EnemyCountMain", 0.5) then 
+    if not self:Throttle("EnemyCountMain", 0.5) and self.lastEnemyCountRange == range then
         return self.lastEnemyCount or 1
     end
     
     local count = 0
     local processedGUIDs = {}
-    range = range or 30
+
+    local function isUnitWithinRequestedRange(unit)
+        if range >= 30 then return true end
+        if not UnitExists(unit) then return false end
+        if range <= 10 then
+            return CheckInteractDistance(unit, 3) == true
+        end
+        return CheckInteractDistance(unit, 2) == true
+    end
     
     local detailedDebug = self.debugMode and not silent and self:Throttle("EnemyCountDebug", 3.0)
     if detailedDebug then
@@ -2926,7 +2982,7 @@ function AC:GetEnemyCount(range, silent)
     end
     
     -- METHOD 1: Check current target
-    if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target") then
+    if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target") and isUnitWithinRequestedRange("target") then
         local targetGUID = UnitGUID("target")
         if targetGUID then
             count = count + 1
@@ -2938,7 +2994,7 @@ function AC:GetEnemyCount(range, silent)
     end
     
     -- METHOD 2: Check focus target (WotLK has focus)
-    if UnitExists("focus") and UnitCanAttack("player", "focus") and not UnitIsDead("focus") then
+    if UnitExists("focus") and UnitCanAttack("player", "focus") and not UnitIsDead("focus") and isUnitWithinRequestedRange("focus") then
         local focusGUID = UnitGUID("focus")
         if focusGUID and not processedGUIDs[focusGUID] then
             count = count + 1
@@ -2950,7 +3006,7 @@ function AC:GetEnemyCount(range, silent)
     end
     
     -- METHOD 3: Check targettarget
-    if UnitExists("targettarget") and UnitCanAttack("player", "targettarget") and not UnitIsDead("targettarget") then
+    if UnitExists("targettarget") and UnitCanAttack("player", "targettarget") and not UnitIsDead("targettarget") and isUnitWithinRequestedRange("targettarget") then
         local ttGUID = UnitGUID("targettarget")
         if ttGUID and not processedGUIDs[ttGUID] then
             count = count + 1
@@ -2962,7 +3018,7 @@ function AC:GetEnemyCount(range, silent)
     end
     
     -- METHOD 4: Check mouseover (important for WotLK)
-    if UnitExists("mouseover") and UnitCanAttack("player", "mouseover") and not UnitIsDead("mouseover") then
+    if UnitExists("mouseover") and UnitCanAttack("player", "mouseover") and not UnitIsDead("mouseover") and isUnitWithinRequestedRange("mouseover") then
         local mouseGUID = UnitGUID("mouseover")
         if mouseGUID and not processedGUIDs[mouseGUID] then
             count = count + 1
@@ -2980,7 +3036,7 @@ function AC:GetEnemyCount(range, silent)
     if numRaid > 0 then
         for i = 1, numRaid do
             local unit = "raid"..i.."target"
-            if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) then
+            if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) and isUnitWithinRequestedRange(unit) then
                 local guid = UnitGUID(unit)
                 if guid and not processedGUIDs[guid] then
                     count = count + 1
@@ -2994,7 +3050,7 @@ function AC:GetEnemyCount(range, silent)
     elseif numParty > 0 then
         for i = 1, numParty do
             local unit = "party"..i.."target"
-            if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) then
+            if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) and isUnitWithinRequestedRange(unit) then
                 local guid = UnitGUID(unit)
                 if guid and not processedGUIDs[guid] then
                     count = count + 1
@@ -3010,7 +3066,7 @@ function AC:GetEnemyCount(range, silent)
     -- METHOD 6: Check pet targets
     if UnitExists("pet") then
         local petTarget = "pettarget"
-        if UnitExists(petTarget) and UnitCanAttack("player", petTarget) and not UnitIsDead(petTarget) then
+        if UnitExists(petTarget) and UnitCanAttack("player", petTarget) and not UnitIsDead(petTarget) and isUnitWithinRequestedRange(petTarget) then
             local guid = UnitGUID(petTarget)
             if guid and not processedGUIDs[guid] then
                 count = count + 1
@@ -3026,7 +3082,7 @@ function AC:GetEnemyCount(range, silent)
     local combatLogCount = 0
     local now = GetTime()
     for guid, data in pairs(self.combatEnemies) do
-        if not processedGUIDs[guid] and (now - data.lastSeen) <= 3 then
+        if range >= 30 and not processedGUIDs[guid] and (now - data.lastSeen) <= 3 then
             count = count + 1
             combatLogCount = combatLogCount + 1
             processedGUIDs[guid] = true
@@ -3041,6 +3097,7 @@ function AC:GetEnemyCount(range, silent)
     
     -- Store the count
     self.lastEnemyCount = count
+    self.lastEnemyCountRange = range
     
     -- Debug output
     if detailedDebug then
@@ -3165,21 +3222,39 @@ function AC:IsUsableSpell(spellName)
         return false  -- Spell doesn't exist
     end
 
-    -- Trust the native usability API first (WotLK-safe). This avoids false
-    -- negatives from rank/spellID mismatches in IsSpellKnown checks.
+    -- A database entry is not proof that this character learned the spell.
+    -- Check that before trusting native usability so an unlearned spell can
+    -- never enter a rotation branch just because the client knows its name.
+    local spellID = select(7, GetSpellInfo(spellName))
+    local customAvailable = self.IsCustomSpellAvailable and self:IsCustomSpellAvailable(spellName)
+    if not customAvailable then
+        local known = false
+        if spellID and spellID > 0 and IsSpellKnown then
+            known = IsSpellKnown(spellID) and true or false
+        end
+        -- Spell IDs can refer to a rank/database entry that differs from the
+        -- rank in the 3.3.5a spellbook. Confirm with the spellbook helper
+        -- before rejecting the action.
+        if not known then
+            known = self:KnowsSpell(spellName)
+        end
+        if not known then
+            return false
+        end
+    end
+
     local usable, noMana = IsUsableSpell(spellName)
+    if customAvailable then
+        -- AzerothCore launch spells may not be represented by the client
+        -- spellbook/usability API.  GetSpellInfo plus the class-specific
+        -- custom hook is the authoritative availability check for these two
+        -- server spells.
+        return not noMana
+    end
     if usable and not noMana then
         return true
     end
-    
-    -- Check if spell is known/learned
-    local spellID = select(7, GetSpellInfo(spellName))
-    if spellID and spellID > 0 and not IsSpellKnown(spellID) then
-        return false  -- Spell not learned
-    elseif spellID == nil and not self:KnowsSpell(spellName) then
-        return false
-    end
-    
+
     -- Only check if spell is usable (resources/stance/etc) - let caller handle cooldown
     if not usable or noMana then
         return false
@@ -3189,37 +3264,147 @@ function AC:IsUsableSpell(spellName)
     return true  -- Usable (caller checks cooldown separately)
 end
 
+-- Shared learned-spell/level gate for optional max-level features.  This is
+-- deliberately separate from IsUsableSpell: a spell can be known while on
+-- cooldown, out of range, or temporarily resource-starved.
+function AC:IsSpellAvailableAndKnown(spellName, requiredLevel)
+    if not spellName then return false end
+    if requiredLevel and UnitLevel("player") < requiredLevel then
+        return false
+    end
+    return self:KnowsSpell(spellName)
+end
+
+function AC:ShouldUseAdvancedFeatures()
+    -- The addon has no separate opt-in profile flag; optional features still
+    -- remain individually gated by level, learned spell, and cooldown.
+    return true
+end
+
+function AC:TrackProc(procName, duration)
+    if not procName or not duration then return false end
+    self.azeroProcTracker = self.azeroProcTracker or {}
+    self.azeroProcTracker[procName] = GetTime() + duration
+    return true
+end
+
+function AC:HasTrackedProc(procName)
+    if not self.azeroProcTracker or not procName then return false end
+    local expires = self.azeroProcTracker[procName]
+    if not expires then return false end
+    if expires <= GetTime() then
+        self.azeroProcTracker[procName] = nil
+        return false
+    end
+    return true
+end
+
+function AC:GetProcTimeRemaining(procName)
+    if not self:HasTrackedProc(procName) then return 0 end
+    return math.max(0, self.azeroProcTracker[procName] - GetTime())
+end
+
 function AC:CastSpell(spellName, unit)
     unit = unit or "target"
+    local customAvailable = self.IsCustomSpellAvailable and
+                            self:IsCustomSpellAvailable(spellName)
     
     -- Skip if the spell doesn't exist or has no valid target
     if not spellName or (unit ~= "player" and not UnitExists(unit)) then
         return false
     end
     
-    -- Only cast if the spell is usable and not on cooldown
+    -- Only cast if the spell is usable and not on cooldown.  Do not interrupt
+    -- an unrelated cast/channel; callers must be able to fall through when
+    -- the client rejects an action instead of treating the API call as a
+    -- successful rotation step.
     if self:IsUsableSpell(spellName) then
         if self:GetSpellCooldown(spellName) > 0 then
             return false
         end
 
+        if UnitCastingInfo("player") or UnitChannelInfo("player") then
+            return false
+        end
+
+        -- Never inherit a previous ground-targeting cursor.  Otherwise a
+        -- failed spell can look successful merely because the client is still
+        -- waiting for a click from an earlier action.
+        if SpellIsTargeting and SpellIsTargeting() then
+            return false
+        end
+
         -- Use stopspelltarget to prevent error sounds (WoW API)
         if not IsCurrentSpell(spellName) then
-            CastSpellByName(spellName, unit)
-            return true
+            local beforeSpellCooldown = self:GetSpellCooldown(spellName)
+            local beforeGlobalCooldown = self:GetSpellCooldown(61304)
+            local beforeCast = UnitCastingInfo("player")
+            local beforeChannel = UnitChannelInfo("player")
+            local hadTarget = UnitExists("target")
+            local targetChanged = unit ~= "player" and unit ~= "target"
+            local castAccepted = pcall(function()
+                if unit == "player" then
+                    -- The second WotLK argument is a self-cast boolean, not a unit token.
+                    CastSpellByName(spellName, true)
+                elseif unit == "target" then
+                    CastSpellByName(spellName)
+                else
+                    TargetUnit(unit)
+                    if UnitExists("target") and UnitIsUnit("target", unit) then
+                        CastSpellByName(spellName)
+                    else
+                        error("unable to target " .. tostring(unit))
+                    end
+                end
+            end)
+
+            if targetChanged then
+                if hadTarget then TargetLastTarget() else ClearTarget() end
+            end
+
+            if not castAccepted then
+                return false
+            end
+
+            local afterSpellCooldown = self:GetSpellCooldown(spellName)
+            local afterGlobalCooldown = self:GetSpellCooldown(61304)
+            local afterCast = UnitCastingInfo("player")
+            local afterChannel = UnitChannelInfo("player")
+            local started = (not beforeCast and afterCast) or
+                            (not beforeChannel and afterChannel)
+            local queued = IsCurrentSpell(spellName) and
+                           (afterSpellCooldown > 0.05 or afterGlobalCooldown > beforeGlobalCooldown + 0.05)
+            local cooldownStarted = afterSpellCooldown > beforeSpellCooldown + 0.05 or
+                                    afterGlobalCooldown > beforeGlobalCooldown + 0.05
+
+            if customAvailable then
+                return true
+            end
+            if started or queued or cooldownStarted or (SpellIsTargeting and SpellIsTargeting()) then
+                return true
+            end
         end
     end
     
     return false
 end
 
+-- Preserve the shared throttle implementation for class modules that define
+-- a same-named helper later in the load order.
+AC.CoreActionThrottle = AC.ActionThrottle
+
+-- Class modules are all loaded into the same AC table. Preserve the core cast
+-- implementation so the Rogue-specific wrapper cannot accidentally become
+-- the global cast path for every other class.
+AC.CoreCastSpell = AC.CastSpell
+
 -- Check if a spell is known
 function AC:KnowsSpell(spellName)
     if not spellName then return false end
 
     local _, rank, _, _, _, _, spellID = GetSpellInfo(spellName)
-    if spellID and spellID > 0 then
-        return IsSpellKnown(spellID) and true or false
+    if spellID and spellID > 0 and IsSpellKnown and IsSpellKnown(spellID) then
+        return true
     end
 
     for tab = 1, GetNumSpellTabs() do
@@ -3227,9 +3412,7 @@ function AC:KnowsSpell(spellName)
         for i = offset + 1, offset + numSpells do
             local name, bookRank = GetSpellName(i, BOOKTYPE_SPELL)
             if name == spellName then
-                if not rank or rank == "" or bookRank == rank then
-                    return true
-                end
+                return true
             end
         end
     end
@@ -4529,7 +4712,11 @@ function AC:OnEnable()
         elseif msg == "spec" then
             self:ForceSpecDetection()
         elseif msg == "performance" or msg == "perf" then
-            self:Print(self:GetPerformanceReport())
+            if self:GetPlayerClass() == "WARLOCK" and self.GetWarlockPerformanceReport then
+                self:Print(self:GetWarlockPerformanceReport())
+            else
+                self:Print(self:GetPerformanceReport())
+            end
         elseif msg == "phase" then
             local phase = self:GetCombatPhase()
             self:Print("Current combat phase: " .. phase)

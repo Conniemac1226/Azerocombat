@@ -86,8 +86,8 @@ end
 -- Interrupt enemy cast if possible
 function AC:TryInterrupt(interruptSpell, unit)
     unit = unit or "target"
-    if self:IsCasting(unit) and self:GetSpellCooldown(interruptSpell) == 0 then
-        self:CastSpell(interruptSpell, unit)
+    if self:IsCasting(unit) and self:GetSpellCooldown(interruptSpell) == 0 and
+       self:IsUsableSpell(interruptSpell) and self:CastSpell(interruptSpell, unit) then
         return true
     end
     return false
@@ -98,7 +98,7 @@ function AC:KnowsSpell(spellName)
     if not spellName then return false end
 
     local _, rank, _, _, _, _, spellID = GetSpellInfo(spellName)
-    if spellID and spellID > 0 then
+    if spellID and spellID > 0 and IsSpellKnown then
         return IsSpellKnown(spellID) and true or false
     end
 
@@ -220,7 +220,7 @@ end
 function AC:CanDispel(unit, dispelType)
     unit = unit or "player"
     local i = 1
-    while true do
+    while i <= 40 do
         local name, _, _, debuffType = UnitDebuff(unit, i)
         if not name then break end
         
@@ -236,7 +236,7 @@ end
 function UnitIsFeared(unit)
     unit = unit or "player"
     local i = 1
-    while true do
+    while i <= 40 do
         local name, _, _, debuffType = UnitDebuff(unit, i)
         if not name then break end
         
@@ -252,7 +252,7 @@ end
 function UnitIsCharmed(unit)
     unit = unit or "player"
     local i = 1
-    while true do
+    while i <= 40 do
         local name, _, _, debuffType = UnitDebuff(unit, i)
         if not name then break end
         
@@ -1128,6 +1128,12 @@ function AC:GetOptimalGuardianElixir()
     end
 end
 
+function AC:IsHealingSpec()
+    local spec = self:GetPlayerSpec()
+    return spec == "Holy" or spec == "Discipline" or
+           spec == "Restoration" or spec == "Resto"
+end
+
 -- Use battle elixir (improved with buff checking, class optimization, and throttling)
 function AC:UseBattleElixir(preferredElixir)
     -- Check if we already have a battle elixir buff
@@ -1625,13 +1631,15 @@ function AC:UseLifeblood(threshold)
     
     if self:GetPlayerHealthPercent() < threshold then
         -- Check if player has herbalism and the Lifeblood ability
-        if self:KnowsSpell("Lifeblood") and self:GetSpellCooldown("Lifeblood") == 0 then
+        if self:KnowsSpell("Lifeblood") and self:IsUsableSpell("Lifeblood") and
+           self:GetSpellCooldown("Lifeblood") == 0 then
             if self:ActionThrottle("Lifeblood", 2) then
-                self:CastSpell("Lifeblood", "player")
-                if self.debugMode then
-                    self:Debug("Using Lifeblood at " .. string.format("%.1f", self:GetPlayerHealthPercent()) .. "% health")
+                if self:CastSpell("Lifeblood", "player") then
+                    if self.debugMode then
+                        self:Debug("Using Lifeblood at " .. string.format("%.1f", self:GetPlayerHealthPercent()) .. "% health")
+                    end
+                    return true
                 end
-                return true
             end
         end
     end

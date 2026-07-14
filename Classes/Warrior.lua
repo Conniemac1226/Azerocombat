@@ -14,11 +14,8 @@ local S = {
     ConcussionBlow = "Concussion Blow",
     ShieldBlock = "Shield Block", VictoryRush = "Victory Rush", SweepingStrikes = "Sweeping Strikes",
     
-    -- Threat abilities
-    Taunt = "Taunt", MockingBlow = "Mocking Blow", ChallengingShout = "Challenging Shout",
-    
     -- Cooldowns
-    Recklessness = "Recklessness", BloodRage = "Bloodrage", Retaliation = "Retaliation", ShieldWall = "Shield Wall", 
+    Recklessness = "Recklessness", BloodRage = "Bloodrage", ShieldWall = "Shield Wall",
     LastStand = "Last Stand", EnragedRegeneration = "Enraged Regeneration", DeathWish = "Death Wish", 
     BerserkerRage = "Berserker Rage", Bladestorm = "Bladestorm", SpellReflection = "Spell Reflection",
     ShatteringThrow = "Shattering Throw", Vigilance = "Vigilance",
@@ -32,17 +29,17 @@ local S = {
     
     -- Utility
     Pummel = "Pummel", ShieldBash = "Shield Bash", 
-    Charge = "Charge", Intercept = "Intercept", Intervene = "Intervene", Hamstring = "Hamstring", Disarm = "Disarm",
+    Charge = "Charge", Intercept = "Intercept", Hamstring = "Hamstring",
     
     -- Buffs/Debuffs
-    Rampage = "Rampage", Bloodsurge = "Bloodsurge", SuddenDeath = "Sudden Death", 
-    TasteForBlood = "Taste for Blood", SlamEffect = "Slam!", BloodFrenzy = "Blood Frenzy",
+    Rampage = "Rampage", SuddenDeath = "Sudden Death",
+    TasteForBlood = "Taste for Blood", SlamEffect = "Slam!",
     EnrageEffect = "Enrage", VictoryRushBuff = "Victorious",
     
     -- Racial Abilities
     BloodFury = "Blood Fury", Berserking = "Berserking", WarStomp = "War Stomp", 
     WillOfForsaken = "Will of the Forsaken", EveryMan = "Every Man for Himself",      
-    Stoneform = "Stoneform", EscapeArtist = "Escape Artist", Shadowmeld = "Shadowmeld",               
+    Stoneform = "Stoneform", EscapeArtist = "Escape Artist",
     GiftOfNaaru = "Gift of the Naaru", ArcaneTorrent = "Arcane Torrent"
 }
 
@@ -65,25 +62,16 @@ local function WarriorDebug(msg)
     end
 end
 
-local function TankDebug(msg)
-    local _, class = UnitClass("player")
-    if class == "WARRIOR" then
-        WarriorDebug(msg)
-    elseif AC.debugMode and AC and AC.Debug then
-        local label = class == "PALADIN" and "|cFFFFD700Paladin:|r " or
-                      class == "DRUID" and "|cFFFF7D0ADruid:|r " or
-                      class == "DEATHKNIGHT" and "|cFFC41F3BDeathKnight:|r " or
-                      "|cFFFFFFFFTank:|r "
-        AC:Debug(label .. tostring(msg))
-    end
-end
-
 local function QueueOnNextSwing(spellName, debugText)
-    if not spellName or not AC:IsUsableSpell(spellName) or IsCurrentSpell(spellName) then
+    if not spellName or not AC:IsUsableSpell(spellName) or AC:GetSpellCooldown(spellName) > 0 or
+       IsCurrentSpell(spellName) then
         return false
     end
 
     CastSpellByName(spellName, "target")
+    if not IsCurrentSpell(spellName) then
+        return false
+    end
     if debugText then
         WarriorDebug(debugText)
     end
@@ -157,6 +145,11 @@ AC.lastWarriorChargeCastTime = AC.lastWarriorChargeCastTime or 0
 
 -- ENHANCED: Range detection functions for WotLK 3.3.5a with better error handling
 function AC:IsInMeleeRange(unit, strict)
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "WARRIOR" and self.CoreIsInMeleeRange then
+        return self:CoreIsInMeleeRange(unit, strict)
+    end
+
     if not UnitExists(unit) or not UnitCanAttack("player", unit) then return false end
 
     -- Prefer spell-based checks that respect boss hitboxes (edge-to-edge)
@@ -201,17 +194,6 @@ function AC:IsInMeleeRange(unit, strict)
     return success and result or false
 end
 
-function AC:IsInTauntRange(unit)
-    if not UnitExists(unit) then return false end
-    
-    -- FIXED: Add error handling and fallback
-    local success, result = pcall(IsSpellInRange, S.Taunt, unit)
-    if not success then return false end
-    
-    -- Taunt has 30 yard range in WotLK
-    return result == 1
-end
-
 function AC:IsInHeroicThrowRange(unit)
     if not UnitExists(unit) then return false end
     
@@ -234,64 +216,28 @@ function AC:IsInChargeRange(unit)
     return result == 1
 end
 
-function AC:IsInInterveneRange(unit)
+function AC:IsInInterceptRange(unit)
     if not UnitExists(unit) then return false end
-    
-    -- FIXED: Add error handling
-    local success, result = pcall(IsSpellInRange, S.Intervene, unit)
-    if not success then return false end
-    
-    -- Intervene has 25 yard range in WotLK
-    return result == 1
+
+    local success, result = pcall(IsSpellInRange, S.Intercept, unit)
+    return success and result == 1
 end
 
--- Intercept disabled. Keep this helper commented for easy re-enable if needed.
--- function AC:IsInInterceptRange(unit)
---     if not UnitExists(unit) then return false end
---
---     local success, result = pcall(IsSpellInRange, S.Intercept, unit)
---     if not success then return false end
---
---     return result == 1
--- end
-
--- ENHANCED: Check available ranged abilities for Protection warriors with cooldown validation
+-- ENHANCED: Check available ranged abilities with cooldown validation
 function AC:GetAvailableRangedAbilities()
     local abilities = {}
-    
-    -- FIXED: Check both spell knowledge AND cooldown status
-    -- Taunt (level 10+, most important)
-    if UnitLevel("player") >= 10 and self:IsUsableSpell(S.Taunt) and self:GetSpellCooldown(S.Taunt) == 0 then
-        abilities.taunt = true
-    end
-    
-    -- Mocking Blow (level 14+, backup taunt)
-    if UnitLevel("player") >= 14 and self:IsUsableSpell(S.MockingBlow) and self:GetSpellCooldown(S.MockingBlow) == 0 then
-        abilities.mockingBlow = true
-    end
     
     -- Heroic Throw (level 20+, ranged damage)
     if UnitLevel("player") >= 20 and self:IsUsableSpell(S.HeroicThrow) and self:GetSpellCooldown(S.HeroicThrow) == 0 then
         abilities.heroicThrow = true
     end
-    
-    -- Charge (level 4+, gap closer - but only out of combat)
-    if UnitLevel("player") >= 4 and not UnitAffectingCombat("player") and self:IsUsableSpell(S.Charge) and self:GetSpellCooldown(S.Charge) == 0 then
-        abilities.charge = true
-    end
-    
-    -- Intercept disabled as a gap closer. Re-enable this block only if
-    -- Intercept targeting is explicitly wanted again.
-    -- if UnitLevel("player") >= 30 and self:IsUsableSpell(S.Intercept) and self:GetSpellCooldown(S.Intercept) == 0 then
-    --     local hasWarbringer = self:HasWarbringerTalent()
-    --     if hasWarbringer or self:GetCurrentStance() == 3 then
-    --         abilities.intercept = true
-    --     end
-    -- end
-    
-    -- Challenging Shout (level 6+, AoE taunt)
-    if UnitLevel("player") >= 6 and self:IsUsableSpell(S.ChallengingShout) and self:GetSpellCooldown(S.ChallengingShout) == 0 then
-        abilities.challengingShout = true
+
+    -- Fury may use Intercept as its in-combat gap closer. Protection keeps
+    -- Charge-only behavior because its universal tank system owns movement.
+    if self:GetPlayerSpec() == "Fury" and UnitAffectingCombat("player") and
+       UnitLevel("player") >= 30 and self:GetCurrentStance() == 3 and
+       self:IsUsableSpell(S.Intercept) and self:GetSpellCooldown(S.Intercept) == 0 then
+        abilities.intercept = true
     end
     
     return abilities
@@ -355,6 +301,81 @@ function AC:HasEnemyInThunderClapReach(maxNameplates)
     return self:GetEnemiesInThunderClapReach(maxNameplates) >= 1
 end
 
+-- Spread Protection threat across nearby mobs after the current target has
+-- received an initial threat/debuff application. This avoids random target
+-- swapping on pull while still giving Shield Slam/Revenge/Devastate/Cleave
+-- time on targets that have not yet been marked by this rotation.
+function AC:TryProtectionMultiTargetDistribution(nearbyEnemies)
+    if nearbyEnemies < 2 or not self:IsAutoTargetSwitchAllowed() then return false end
+    if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then
+        return false
+    end
+    if not self:IsInMeleeRange("target", true) then return false end
+    if not Throttle("ProtMultiTargetDistribution", 0.5) then return false end
+
+    local currentGUID = UnitGUID("target")
+    if not currentGUID or not self.expectedThreatTargets or not self.expectedThreatTargets[currentGUID] then
+        return false
+    end
+
+    -- Require evidence that the current mob has received a tanking debuff;
+    -- target marks alone can also be created by target-acquisition logic.
+    local currentHasThreatDebuff = self:HasDebuff("target", S.SunderArmor) or
+                                   self:HasDebuff("target", S.ThunderClap) or
+                                   self:HasDebuff("target", S.DemoShout)
+    if not currentHasThreatDebuff then return false end
+
+    local candidates = {}
+    local seenGUIDs = {}
+
+    local function addCandidate(unit)
+        if not UnitExists(unit) or UnitIsDeadOrGhost(unit) or
+           not UnitCanAttack("player", unit) or UnitIsUnit(unit, "target") or
+           not UnitAffectingCombat(unit) or not self:IsInMeleeRange(unit, true) then
+            return
+        end
+
+        local guid = UnitGUID(unit)
+        if not guid or seenGUIDs[guid] then return end
+        seenGUIDs[guid] = true
+
+        local score = 0
+        local markedAt = self.expectedThreatTargets and self.expectedThreatTargets[guid]
+        if not markedAt or GetTime() - markedAt > 15 then
+            score = score + 100
+        end
+        if not self:HasDebuff(unit, S.SunderArmor) and not self:HasDebuff(unit, S.ThunderClap) then
+            score = score + 35
+        end
+        candidates[#candidates + 1] = {unit = unit, score = score}
+    end
+
+    for i = 1, 20 do
+        addCandidate("nameplate" .. i)
+    end
+
+    local groupCount = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
+    local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
+    for i = 1, groupCount do
+        addCandidate(prefix .. i .. "target")
+    end
+
+    local bestCandidate
+    for _, candidate in ipairs(candidates) do
+        if not bestCandidate or candidate.score > bestCandidate.score then
+            bestCandidate = candidate
+        end
+    end
+
+    if not bestCandidate or bestCandidate.score < 100 then return false end
+
+    TargetUnit(bestCandidate.unit)
+    self.lastTargetSwitch = GetTime()
+    if not IsCurrentSpell("Attack") then StartAttack() end
+    WarriorDebug("Prot: Distributing threat to " .. (UnitName(bestCandidate.unit) or "Unknown"))
+    return true
+end
+
 -- =============================================
 -- ENHANCED TARGET FINDING AND SWITCHING LOGIC
 -- =============================================
@@ -372,55 +393,10 @@ function AC:UseRangedAbilityAndReturn(ability, target)
     local success = false
 
     local function castAttempt(spellName, unit)
-        CastSpellByName(spellName, unit)
-        return true
+        return self:CastSpell(spellName, unit)
     end
 
-    if (ability == "Taunt" or ability == "Mocking Blow") and not self:IsAutoTauntAllowed() then
-        if Throttle("AutoTauntSuppressed", 2.0) then
-            WarriorDebug("Skipping " .. ability .. " - auto taunt disabled for large groups")
-        end
-        return false
-    end
-
-    if ability == "Taunt" and self:IsUsableSpell(S.Taunt) then
-        -- FIXED: Check cooldown before attempting
-        if self:GetSpellCooldown(S.Taunt) > 0 then
-            WarriorDebug("Taunt on cooldown, skipping")
-            return false
-        end
-        
-        -- ENHANCED: Prevent wasteful Taunt usage - only for threat emergencies
-        local targetTarget = target .. "target"
-        if UnitExists(targetTarget) and UnitIsFriend("player", targetTarget) and not UnitIsUnit(targetTarget, "player") then
-            if self:GetGroupSize() > 5 and not self:IsRaidTauntSafeVictim(targetTarget) then
-                WarriorDebug("BLOCKED raid Taunt - target is on confirmed tank victim: " .. (UnitName(targetTarget) or "Unknown"))
-                return false
-            end
-
-            -- Target is attacking an ally - legitimate Taunt use
-            if self:IsInTauntRange(target) then
-                local targetGUID = UnitGUID(target)
-                if self:ShouldSkipTankRepeatTaunt(targetGUID, targetTarget) then return false end
-                if castAttempt(S.Taunt, target) then
-                    self.lastTauntTime = GetTime()
-                    self.lastTauntTarget = targetGUID
-                    self:RecordTankTaunt(targetGUID)
-                    self:MarkAsOurTarget(targetGUID)
-                    self:TrackTauntedLooseMob(targetGUID, UnitName(target))
-                    WarriorDebug("Used EMERGENCY Taunt - target attacking ally: " .. (UnitName(targetTarget) or "Unknown"))
-                    success = true
-                else
-                    WarriorDebug("Taunt cast attempt failed")
-                    return false
-                end
-            end
-        else
-            -- Target is not attacking anyone or attacking the player - don't waste Taunt
-            WarriorDebug("BLOCKED wasteful Taunt - target not threatening allies (use Heroic Throw instead)")
-            return false
-        end
-    elseif ability == "Heroic Throw" and self:IsUsableSpell(S.HeroicThrow) then
+    if ability == "Heroic Throw" and self:IsUsableSpell(S.HeroicThrow) then
         -- FIXED: Check cooldown
         if self:GetSpellCooldown(S.HeroicThrow) > 0 then
             WarriorDebug("Heroic Throw on cooldown, skipping")
@@ -437,79 +413,23 @@ function AC:UseRangedAbilityAndReturn(ability, target)
                 return false
             end
         end
-    elseif ability == "Charge" and self:IsUsableSpell(S.Charge) then
-        -- Charge is normally out-of-combat only; Warbringer allows in-combat usage.
-        local hasWarbringer = self:HasWarbringerTalent()
-        local inCombat = UnitAffectingCombat("player")
-        if inCombat and not hasWarbringer then
-            WarriorDebug("Charge blocked in combat (no Warbringer)")
+    elseif ability == "Intercept" and self:GetPlayerSpec() == "Fury" and
+           self:IsUsableSpell(S.Intercept) then
+        if self:GetSpellCooldown(S.Intercept) > 0 or self:GetCurrentStance() ~= 3 then
             return false
         end
 
-        if self:GetSpellCooldown(S.Charge) > 0 then
-            WarriorDebug("Charge on cooldown, skipping")
-            return false
-        end
-
-        if self:IsInChargeRange(target) then
-            if castAttempt(S.Charge, target) then
-                self:MarkWarriorChargeCast()
+        if self:IsInInterceptRange(target) then
+            if castAttempt(S.Intercept, target) then
                 self:MarkAsOurTarget(UnitGUID(target))
-                WarriorDebug("Used Charge on distant target" .. (hasWarbringer and " (Warbringer)" or ""))
+                WarriorDebug("Fury: Intercept gap closer")
                 success = true
-            else
-                WarriorDebug("Charge cast attempt failed")
-                return false
             end
         end
-    -- Intercept disabled as a ranged/gap-close action. Re-enable this branch only
-    -- if Intercept should be considered by rotations again.
-    -- elseif ability == "Intercept" and self:IsUsableSpell(S.Intercept) then
-    --     if self:GetSpellCooldown(S.Intercept) > 0 then
-    --         WarriorDebug("Intercept on cooldown, skipping")
-    --         return false
-    --     end
-    --
-    --     local hasWarbringer = self:HasWarbringerTalent()
-    --     if not hasWarbringer and self:GetCurrentStance() ~= 3 then
-    --         WarriorDebug("Not in Berserker Stance for Intercept (no Warbringer)")
-    --         return false
-    --     end
-    --
-    --     if self:IsInInterceptRange(target) then
-    --         if castAttempt(S.Intercept, target) then
-    --             self:MarkAsOurTarget(UnitGUID(target))
-    --             WarriorDebug("Used Intercept on distant target")
-    --             success = true
-    --         else
-    --             WarriorDebug("Intercept cast attempt failed")
-    --             return false
-    --         end
-    --     end
-    elseif ability == "Mocking Blow" and self:IsUsableSpell(S.MockingBlow) then
-        -- FIXED: Check cooldown
-        if self:GetSpellCooldown(S.MockingBlow) > 0 then
-            WarriorDebug("Mocking Blow on cooldown, skipping")
-            return false
-        end
-        
-        if self:IsInMeleeRange(target, true) then  -- Mocking Blow is melee range
-            if castAttempt(S.MockingBlow, target) then
-                self:MarkAsOurTarget(UnitGUID(target))
-                WarriorDebug("Used Mocking Blow")
-                success = true
-            else
-                WarriorDebug("Mocking Blow cast attempt failed")
-                return false
-            end
-        end
-    elseif ability == "Intervene" then
-        WarriorDebug("Intervene disabled, skipping")
-        return false
     end
     
     -- Ranged attacks can return to a better melee target after firing.
-    if success and ability ~= "Intervene" and self:IsAutoTargetSwitchAllowed() and not self:IsInMeleeRange(target) then
+    if success and ability ~= "Intercept" and self:IsAutoTargetSwitchAllowed() and not self:IsInMeleeRange(target) then
         local meleeTarget = self:FindMeleeTarget()
         if meleeTarget and not UnitIsUnit(meleeTarget, target) then
             TargetUnit(meleeTarget)
@@ -545,72 +465,6 @@ function AC:FindMeleeTarget()
         end
     end
     
-    return nil
-end
-
-function AC:ResolveWarriorInterveneFriendlyUnit(unit)
-    if not unit or not UnitExists(unit) or UnitIsUnit(unit, "player") or UnitIsDeadOrGhost(unit) then
-        return nil
-    end
-
-    local resolvedUnit = unit
-
-    if UnitCanAttack("player", unit) then
-        local victimUnit = unit .. "target"
-        if not UnitExists(victimUnit) or not UnitIsFriend("player", victimUnit) or UnitIsUnit(victimUnit, "player") or
-           UnitIsDeadOrGhost(victimUnit) then
-            return nil
-        end
-
-        local groupSize = GetGroupSize()
-        local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
-        for i = 1, groupSize do
-            local groupUnit = unitPrefix .. i
-            if UnitExists(groupUnit) and UnitIsUnit(groupUnit, victimUnit) then
-                resolvedUnit = groupUnit
-                break
-            end
-        end
-    elseif not UnitIsFriend("player", unit) then
-        return nil
-    end
-
-    if not self:IsInInterveneRange(resolvedUnit) then
-        return nil
-    end
-
-    return resolvedUnit
-end
-
-function AC:FindWarriorInterveneTarget(hostileTarget)
-    if self:GetPlayerSpec() ~= "Protection" then return nil end
-    if GetGroupSize() > 5 then return nil end
-    if not UnitAffectingCombat("player") then return nil end
-    if not self:KnowsSpell(S.Intervene) or not self:IsUsableSpell(S.Intervene) then return nil end
-    if self:GetSpellCooldown(S.Intervene) > 0 then return nil end
-    if not hostileTarget or not UnitExists(hostileTarget) or not UnitCanAttack("player", hostileTarget) or UnitIsDeadOrGhost(hostileTarget) then
-        return nil
-    end
-
-    local groupSize = GetGroupSize()
-    local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
-
-    local directInterveneUnit = self:ResolveWarriorInterveneFriendlyUnit(hostileTarget)
-    if directInterveneUnit then
-        return directInterveneUnit
-    end
-
-    for i = 1, groupSize do
-        local unit = unitPrefix .. i
-        local interveneUnit = self:ResolveWarriorInterveneFriendlyUnit(unit)
-        if interveneUnit then
-            local unitTarget = interveneUnit .. "target"
-            if UnitExists(unitTarget) and UnitIsUnit(unitTarget, hostileTarget) then
-                return interveneUnit
-            end
-        end
-    end
-
     return nil
 end
 
@@ -676,7 +530,7 @@ function AC:TryVictoryRush()
         local rage = UnitPower("player", 1)
         
         if health < 80 or rage > 90 then
-            CastSpellByName(S.VictoryRush)
+            if not self:CastSpell(S.VictoryRush) then return false end
             WarriorDebug("Victory Rush - free healing")
             return true
         end
@@ -760,22 +614,25 @@ function AC:UseWarriorDefensives()
     end
     
     -- Last Stand is the first major survivability button for prot pressure.
-    if self:KnowsSpell(S.LastStand) and self:GetSpellCooldown(S.LastStand) == 0 and canRetry("lastStand", 8) then
+    if self:KnowsSpell(S.LastStand) and self:IsUsableSpell(S.LastStand) and
+       self:GetSpellCooldown(S.LastStand) == 0 and canRetry("lastStand", 8) then
         if health < 30 or (spec == "Protection" and underHeavyPressure and health < 40) then
             markAttempt("lastStand")
-            CastSpellByName(S.LastStand)
+            if not self:CastSpell(S.LastStand) then return false end
             WarriorDebug("Last Stand at low health / tank pressure")
             return true
         end
     end
 
     -- Shield Wall is the hard panic button; keep it later than Last Stand.
-    if self:KnowsSpell(S.ShieldWall) and self:GetSpellCooldown(S.ShieldWall) == 0 and canRetry("shieldWall", 8) then
-        if self:KnowsSpell(S.ShieldWall) and self:GetSpellCooldown(S.ShieldWall) == 0 then
+    if self:KnowsSpell(S.ShieldWall) and self:IsUsableSpell(S.ShieldWall) and
+       self:GetSpellCooldown(S.ShieldWall) == 0 and canRetry("shieldWall", 8) then
+        if self:KnowsSpell(S.ShieldWall) and self:IsUsableSpell(S.ShieldWall) and
+           self:GetSpellCooldown(S.ShieldWall) == 0 then
             if hasShield and (health < 20 or (spec == "Protection" and underHeavyPressure and health < 30)) then
                 markAttempt("shieldWall")
                 self.shieldWallBlocked = false
-                CastSpellByName(S.ShieldWall)
+                if not self:CastSpell(S.ShieldWall) then return false end
                 WarriorDebug("Shield Wall at critical health / tank burst")
                 return true
             else
@@ -791,8 +648,9 @@ function AC:UseWarriorDefensives()
     end
     
     -- Enraged Regeneration works best as follow-up stabilization.
-    if health < 45 and canRetry("enragedRegen", 6) and self:KnowsSpell(S.EnragedRegeneration) then
-        if self:KnowsSpell(S.EnragedRegeneration) then
+    if health < 45 and canRetry("enragedRegen", 6) and self:KnowsSpell(S.EnragedRegeneration) and
+       self:IsUsableSpell(S.EnragedRegeneration) then
+        if self:KnowsSpell(S.EnragedRegeneration) and self:IsUsableSpell(S.EnragedRegeneration) then
             local isEnraged = self:HasBuff("player", S.BerserkerRage) or 
                              self:HasBuff("player", S.DeathWish) or 
                              self:HasBuff("player", S.EnrageEffect) or
@@ -800,14 +658,14 @@ function AC:UseWarriorDefensives()
             
             if isEnraged and self:GetSpellCooldown(S.EnragedRegeneration) == 0 then
                 markAttempt("enragedRegen")
-                CastSpellByName(S.EnragedRegeneration)
+                if not self:CastSpell(S.EnragedRegeneration) then return false end
                 WarriorDebug("Enraged Regeneration")
                 return true
-            elseif not isEnraged and self:KnowsSpell(S.BerserkerRage) and 
+            elseif not isEnraged and self:KnowsSpell(S.BerserkerRage) and self:IsUsableSpell(S.BerserkerRage) and
                    self:GetSpellCooldown(S.BerserkerRage) == 0 and 
                    canRetry("berserkerForRegen", 4) and health < 35 then
                 markAttempt("berserkerForRegen")
-                CastSpellByName(S.BerserkerRage)
+                if not self:CastSpell(S.BerserkerRage) then return false end
                 WarriorDebug("Berserker Rage for Enraged Regen")
                 return true
             end
@@ -818,9 +676,10 @@ function AC:UseWarriorDefensives()
     
     -- Fear is a last-resort solo survival tool, not a normal tank-group button.
     if not IsInGroup() and health < 12 and enemies >= 3 and canRetry("intimidatingShout", 15) then
-        if self:KnowsSpell(S.IntimidatingShout) and self:GetSpellCooldown(S.IntimidatingShout) == 0 then
+        if self:KnowsSpell(S.IntimidatingShout) and self:IsUsableSpell(S.IntimidatingShout) and
+           self:GetSpellCooldown(S.IntimidatingShout) == 0 then
             markAttempt("intimidatingShout")
-            CastSpellByName(S.IntimidatingShout)
+            if not self:CastSpell(S.IntimidatingShout) then return false end
             WarriorDebug("Intimidating Shout - crowd control")
             return true
         end
@@ -863,6 +722,13 @@ function AC:UseEnhancedSpellReflection()
     end
     
     local spec = self:GetPlayerSpec()
+    local stance = self:GetCurrentStance()
+    -- WotLK Spell Reflection requires Battle or Defensive Stance plus a
+    -- shield. Do not consume a rotation tick from Fury's Berserker Stance.
+    if stance ~= 1 and stance ~= 2 then
+        return false
+    end
+
     local hasShield = IsEquippedItemType("Shields")
     if not hasShield then
         -- For DPS specs, never attempt reflection without a shield.
@@ -882,11 +748,9 @@ function AC:UseEnhancedSpellReflection()
     
     -- Check if target is casting a spell worth reflecting
     local spellName, _, _, _, _, endTime = UnitCastingInfo("target")
-    local isChanneling = false
     
     if not spellName then
         spellName, _, _, _, _, endTime = UnitChannelInfo("target")
-        isChanneling = true
     end
     
     if not spellName or not endTime then
@@ -895,6 +759,14 @@ function AC:UseEnhancedSpellReflection()
     
     local timeLeft = (endTime / 1000) - GetTime()
     local health = self:GetPlayerHealthPercent()
+
+    local function castReflection(reason)
+        if self:CastSpell(S.SpellReflection, "player") then
+            WarriorDebug("SPELL REFLECTION: " .. spellName .. " (" .. reason .. ")")
+            return true
+        end
+        return false
+    end
     
     -- High-priority dangerous spells that should ALWAYS be reflected
     local dangerousSpells = {
@@ -922,39 +794,29 @@ function AC:UseEnhancedSpellReflection()
         if spellName:find(dangerous) then
             -- Optimal timing: cast when 0.5-2.5s left on cast
             if timeLeft > 0.5 and timeLeft < 2.5 then
-                CastSpellByName(S.SpellReflection)
-                WarriorDebug("SPELL REFLECTION: " .. spellName .. " (HIGH PRIORITY)")
-                return true
+                return castReflection("HIGH PRIORITY")
             -- Emergency timing for very dangerous spells
             elseif (spellName:find("Fear") or spellName:find("Polymorph") or spellName:find("Hex")) and timeLeft > 0.2 then
-                CastSpellByName(S.SpellReflection)
-                WarriorDebug("SPELL REFLECTION: " .. spellName .. " (EMERGENCY CC)")
-                return true
+                return castReflection("EMERGENCY CC")
             end
         end
     end
     
     -- Reflect any spell when health is low (survival mode)
     if health < 50 and timeLeft > 0.5 and timeLeft < 2.5 then
-        CastSpellByName(S.SpellReflection)
-        WarriorDebug("SPELL REFLECTION: " .. spellName .. " (LOW HEALTH SURVIVAL)")
-        return true
+        return castReflection("LOW HEALTH SURVIVAL")
     end
     
     -- Reflect any spell when health is critical (desperation mode)
     if health < 25 and timeLeft > 0.2 and timeLeft < 3.0 then
-        CastSpellByName(S.SpellReflection)
-        WarriorDebug("SPELL REFLECTION: " .. spellName .. " (CRITICAL HEALTH)")
-        return true
+        return castReflection("CRITICAL HEALTH")
     end
     
     -- Elite/Boss enemies: reflect more liberally
     local classification = UnitClassification("target")
     if (classification == "elite" or classification == "rareelite" or classification == "worldboss") then
         if health < 75 and timeLeft > 0.5 and timeLeft < 2.5 then
-            CastSpellByName(S.SpellReflection)
-            WarriorDebug("SPELL REFLECTION: " .. spellName .. " (ELITE/BOSS)")
-            return true
+            return castReflection("ELITE/BOSS")
         end
     end
     
@@ -965,9 +827,9 @@ end
 -- ENHANCED: Smart offensive cooldown usage with better conditions
 function AC:UseWarriorOffensives()
     local targetHP = self:GetTargetHealthPercent("target")
+    local targetMaxHealth = UnitHealthMax("target") or 0
     local targetClass = UnitClassification("target")
     local spec = self:GetPlayerSpec()
-    local rage = UnitPower("player", 1)
     
     -- FIXED: Throttle offensive cooldowns to prevent spam
     if not Throttle("WarriorOffensives", 5.0) then return false end
@@ -979,7 +841,7 @@ function AC:UseWarriorOffensives()
     
     -- Check if it's worth using offensive CDs
     local worthIt = targetClass == "elite" or targetClass == "rareelite" or 
-                   targetClass == "worldboss" or targetHP > 200000 or
+                   targetClass == "worldboss" or targetMaxHealth > 200000 or
                    (IsInGroup() and targetHP > 50)
     
     if not worthIt then return false end
@@ -987,28 +849,31 @@ function AC:UseWarriorOffensives()
     -- FIXED: Check cooldowns before attempting
     -- Recklessness (big DPS boost)
     if self:IsUsableSpell(S.Recklessness) and self:GetSpellCooldown(S.Recklessness) == 0 and Throttle("Recklessness", 180) then
-        CastSpellByName(S.Recklessness)
-        WarriorDebug("Recklessness - burst window")
-        -- Use offensive racial
-        self:UseRacialsWarrior(true, false)
-        -- Use offensive trinkets
-        self:UseTrinketsFixed()
-        return true
+        if self:CastSpell(S.Recklessness, "player") then
+            WarriorDebug("Recklessness - burst window")
+            -- Use offensive racial
+            self:UseRacialsWarrior(true, false)
+            -- Use offensive trinkets
+            self:UseTrinketsFixed()
+            return true
+        end
     end
     
     -- Death Wish
     if self:KnowsSpell(S.DeathWish) and self:IsUsableSpell(S.DeathWish) and self:GetSpellCooldown(S.DeathWish) == 0 and Throttle("DeathWish", 120) then
-        CastSpellByName(S.DeathWish)
-        WarriorDebug("Death Wish - increased damage")
-        return true
+        if self:CastSpell(S.DeathWish, "player") then
+            WarriorDebug("Death Wish - increased damage")
+            return true
+        end
     end
     
     -- Arms handles Bladestorm inside its rotation so it does not delay Rend, Overpower, or Mortal Strike.
     if spec ~= "Arms" and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm) and self:GetSpellCooldown(S.Bladestorm) == 0 and
        (UnitExists("target") and self:GetEnemiesAtLocation("target", 10) >= 2 or targetHP > 50) and Throttle("Bladestorm", 90) then
-        CastSpellByName(S.Bladestorm)
-        WarriorDebug("Bladestorm")
-        return true
+        if self:CastSpell(S.Bladestorm, "player") then
+            WarriorDebug("Bladestorm")
+            return true
+        end
     end
     
     return false
@@ -1023,65 +888,43 @@ function AC:UseRacialsWarrior(burst, emergency)
     race = string.upper(race) 
     local healthPercent = self:GetPlayerHealthPercent()
     local inCombat = UnitAffectingCombat("player")
+
+    local function castRacial(spellName, message)
+        if not self:IsUsableSpell(spellName) or self:GetSpellCooldown(spellName) > 0 then
+            return false
+        end
+        if self:CastSpell(spellName, "player") then
+            WarriorDebug(message)
+            return true
+        end
+        return false
+    end
     
     -- Offensive racials during burst
     if burst and inCombat then
-        if race == "ORC" and self:IsUsableSpell(S.BloodFury) and self:GetSpellCooldown(S.BloodFury) == 0 then
-            CastSpellByName(S.BloodFury)
-            WarriorDebug("Racial: Blood Fury (DPS)")
-            return true
-        end
-        if race == "TROLL" and self:IsUsableSpell(S.Berserking) and self:GetSpellCooldown(S.Berserking) == 0 then
-            CastSpellByName(S.Berserking)
-            WarriorDebug("Racial: Berserking (Haste)")
-            return true
-        end
+        if race == "ORC" and castRacial(S.BloodFury, "Racial: Blood Fury (DPS)") then return true end
+        if race == "TROLL" and castRacial(S.Berserking, "Racial: Berserking (Haste)") then return true end
     end
     
     -- Defensive/Emergency racials
     if emergency or healthPercent < 50 then
-        if race == "DWARF" and self:IsUsableSpell(S.Stoneform) and self:GetSpellCooldown(S.Stoneform) == 0 then
-            CastSpellByName(S.Stoneform)
-            WarriorDebug("Racial: Stoneform (Remove debuffs)")
-            return true
-        end
-        if race == "HUMAN" and self:IsUsableSpell(S.EveryMan) and self:GetSpellCooldown(S.EveryMan) == 0 then
-            CastSpellByName(S.EveryMan)
-            WarriorDebug("Racial: Every Man for Himself")
-            return true
-        end
-        if race == "GNOME" and self:IsUsableSpell(S.EscapeArtist) and self:GetSpellCooldown(S.EscapeArtist) == 0 then
-            CastSpellByName(S.EscapeArtist)
-            WarriorDebug("Racial: Escape Artist")
-            return true
-        end
-        if (race == "UNDEAD" or race == "SCOURGE") and self:IsUsableSpell(S.WillOfForsaken) and self:GetSpellCooldown(S.WillOfForsaken) == 0 then
-            CastSpellByName(S.WillOfForsaken)
-            WarriorDebug("Racial: Will of the Forsaken")
-            return true
-        end
-        if race == "DRAENEI" and healthPercent < 70 and self:IsUsableSpell(S.GiftOfNaaru) and self:GetSpellCooldown(S.GiftOfNaaru) == 0 then
-            CastSpellByName(S.GiftOfNaaru, "player")
-            WarriorDebug("Racial: Gift of Naaru (HoT)")
-            return true
-        end
+        if race == "DWARF" and castRacial(S.Stoneform, "Racial: Stoneform (Remove debuffs)") then return true end
+        if race == "HUMAN" and castRacial(S.EveryMan, "Racial: Every Man for Himself") then return true end
+        if race == "GNOME" and castRacial(S.EscapeArtist, "Racial: Escape Artist") then return true end
+        if (race == "UNDEAD" or race == "SCOURGE") and castRacial(S.WillOfForsaken, "Racial: Will of the Forsaken") then return true end
+        if race == "DRAENEI" and healthPercent < 70 and castRacial(S.GiftOfNaaru, "Racial: Gift of Naaru (HoT)") then return true end
     end
     
     -- Utility racials in combat
     if inCombat and UnitExists("target") and UnitCanAttack("player", "target") then
         if race == "TAUREN" and UnitExists("target") and self:GetEnemiesAtLocation("target", 10) >= 2 and self:IsInMeleeRange("target") and 
-           self:IsUsableSpell(S.WarStomp) and self:GetSpellCooldown(S.WarStomp) == 0 then
-            CastSpellByName(S.WarStomp)
-            WarriorDebug("Racial: War Stomp (AoE Stun)")
-            return true
-        end
+           self:IsUsableSpell(S.WarStomp) and self:GetSpellCooldown(S.WarStomp) == 0 and
+           castRacial(S.WarStomp, "Racial: War Stomp (AoE Stun)") then return true end
         if race == "BLOODELF" and self:IsUsableSpell(S.ArcaneTorrent) and self:GetSpellCooldown(S.ArcaneTorrent) == 0 and self:IsInMeleeRange("target") then
             -- Use for rage generation or silence
             local targetCasting = UnitCastingInfo("target")
             if targetCasting or UnitPower("player", 1) < 20 then
-                CastSpellByName(S.ArcaneTorrent)
-                WarriorDebug("Racial: Arcane Torrent")
-                return true
+                if castRacial(S.ArcaneTorrent, "Racial: Arcane Torrent") then return true end
             end
         end
     end
@@ -1122,57 +965,6 @@ function AC:UseProtectionWarriorCombatRacials(nearbyEnemies)
     return false
 end
 
--- =============================================
--- ENHANCED THREAT TRACKING SYSTEM
--- =============================================
-
--- ENHANCED: Track which enemies should be targeting us with better cleanup
-AC.expectedThreatTargets = AC.expectedThreatTargets or {}
-
--- FIXED: Better MarkAsOurTarget function with time tracking
-function AC:MarkAsOurTarget(unitGUID)
-    if unitGUID then
-        self.expectedThreatTargets = self.expectedThreatTargets or {}
-        self.expectedThreatTargets[unitGUID] = GetTime()
-        TankDebug("Marked target as ours: " .. (UnitName("target") or "Unknown"))
-    end
-end
-
--- FIXED: Clean up old threat targets with performance optimization
-function AC:CleanupThreatTargets()
-    if not self.expectedThreatTargets then return end
-    
-    local now = GetTime()
-    local toRemove = {}
-    
-    -- Collect entries to remove
-    for guid, timestamp in pairs(self.expectedThreatTargets) do
-        if now - timestamp > 30 then -- Remove after 30 seconds
-            table.insert(toRemove, guid)
-        end
-    end
-    
-    -- Remove collected entries
-    for _, guid in ipairs(toRemove) do
-        self.expectedThreatTargets[guid] = nil
-    end
-    
-    -- FIXED: Prevent memory leaks by limiting table size
-    local count = 0
-    for _ in pairs(self.expectedThreatTargets) do
-        count = count + 1
-        if count > 50 then -- Limit to 50 entries max
-            -- Clear old entries if we have too many
-            self.expectedThreatTargets = {}
-            break
-        end
-    end
-end
-
--- =============================================
--- FIXED ENHANCED TAUNT SYSTEM WITH SMART TARGETING (3.3.5a COMPATIBLE)
--- =============================================
--- =============================================
 -- STANCE AND COMBAT UTILITY FUNCTIONS
 -- =============================================
 
@@ -1213,49 +1005,6 @@ function AC:WarriorHasCommandingBuff()
         end
     end
     return false
-end
-
-function AC:GetWarriorGroupClassMap()
-    local now = GetTime()
-    if self.warriorGroupClassCache and (now - self.warriorGroupClassCache.time) < 5 then
-        return self.warriorGroupClassCache.map
-    end
-
-    local classMap = {}
-    local _, playerClass = UnitClass("player")
-    if playerClass then
-        classMap[playerClass] = true
-    end
-
-    if IsInGroup() then
-        if GetNumRaidMembers() > 0 then
-            for i = 1, GetNumRaidMembers() do
-                local unit = "raid" .. i
-                if UnitExists(unit) then
-                    local _, class = UnitClass(unit)
-                    if class then
-                        classMap[class] = true
-                    end
-                end
-            end
-        else
-            for i = 1, GetNumPartyMembers() do
-                local unit = "party" .. i
-                if UnitExists(unit) then
-                    local _, class = UnitClass(unit)
-                    if class then
-                        classMap[class] = true
-                    end
-                end
-            end
-        end
-    end
-
-    self.warriorGroupClassCache = {
-        time = now,
-        map = classMap
-    }
-    return classMap
 end
 
 function AC:GetPreferredWarriorShout(spec)
@@ -1311,10 +1060,6 @@ function AC:GetPreferredWarriorShout(spec)
     return nil
 end
 
-function AC:WarriorHasActiveAPOrStamBuff()
-    return not self:GetPreferredWarriorShout(self:GetPlayerSpec())
-end
-
 function AC:GetCurrentStance()
     local stance = GetShapeshiftForm()
     return stance or 0
@@ -1327,9 +1072,13 @@ function AC:ForceBattleStance()
     if currentStance == 1 then return true end
     
     -- FIXED: Check cooldown before attempting
-    if self:GetSpellCooldown(S.BattleStance) == 0 then
+    if self:GetSpellCooldown(S.BattleStance) == 0 and self:IsUsableSpell(S.BattleStance) then
         WarriorDebug("Casting Battle Stance")
-        CastSpellByName(S.BattleStance)
+        -- Stances are self abilities.  Passing the default target here made
+        -- OOC stance correction fail whenever no hostile target was selected.
+        if not self:CastSpell(S.BattleStance, "player") then return false end
+        -- The stance/form state can update on the next client frame; the cast
+        -- wrapper already verified that the action was accepted.
         return true
     end
     return false
@@ -1341,9 +1090,9 @@ function AC:ForceDefensiveStance()
     if currentStance == 2 then return true end
     
     -- FIXED: Check cooldown before attempting
-    if self:GetSpellCooldown(S.DefensiveStance) == 0 then
+    if self:GetSpellCooldown(S.DefensiveStance) == 0 and self:IsUsableSpell(S.DefensiveStance) then
         WarriorDebug("Casting Defensive Stance")
-        CastSpellByName(S.DefensiveStance)
+        if not self:CastSpell(S.DefensiveStance, "player") then return false end
         return true
     end
     return false
@@ -1355,9 +1104,9 @@ function AC:ForceBerserkerStance()
     if currentStance == 3 then return true end
     
     -- FIXED: Check cooldown before attempting
-    if self:GetSpellCooldown(S.BerserkerStance) == 0 then
+    if self:GetSpellCooldown(S.BerserkerStance) == 0 and self:IsUsableSpell(S.BerserkerStance) then
         WarriorDebug("Casting Berserker Stance")
-        CastSpellByName(S.BerserkerStance)
+        if not self:CastSpell(S.BerserkerStance, "player") then return false end
         return true
     end
     return false
@@ -1416,16 +1165,23 @@ function AC:TryFuryInterrupt(unit)
     end
 
     local timeLeft = endTime and ((endTime / 1000) - GetTime()) or 0
-    if timeLeft >= 2.0 and self:KnowsSpell(S.BerserkerStance) and self:GetSpellCooldown(S.BerserkerStance) == 0 then
-        CastSpellByName(S.BerserkerStance)
-        WarriorDebug("Fury: Switching to Berserker for Pummel on " .. spellName)
-        return true
+    if timeLeft >= 2.0 and self:KnowsSpell(S.BerserkerStance) and
+       self:IsUsableSpell(S.BerserkerStance) and self:GetSpellCooldown(S.BerserkerStance) == 0 then
+        if self:ForceBerserkerStance() then
+            WarriorDebug("Fury: Switching to Berserker for Pummel on " .. spellName)
+            return true
+        end
     end
     return false
 end
 
 -- FIXED: Enhanced talent checking with error handling
 function AC:HasTalentByName(talentName, cacheKey)
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "WARRIOR" and self.DruidHasTalentByName then
+        return self:DruidHasTalentByName(talentName, cacheKey)
+    end
+
     if not talentName then return false end
 
     self.warriorTalentCache = self.warriorTalentCache or {}
@@ -1469,29 +1225,27 @@ function AC:HasJuggernautTalent()
     return self:HasTalentByName("Juggernaut", "Juggernaut")
 end
 
-function AC:MarkWarriorChargeCast()
-    self.lastWarriorChargeCastTime = GetTime()
+function AC:HasWarriorGlyph(glyphName)
+    if not glyphName or not GetGlyphSocketInfo then return false end
+
+    local wanted = string.lower(glyphName)
+    for glyphSlot = 1, 6 do
+        -- WotLK 3.3.5a returns the installed glyph's spell ID in the fourth
+        -- result, so resolve it through GetSpellInfo before comparing names.
+        local enabled, _, _, glyphSpellID = GetGlyphSocketInfo(glyphSlot)
+        if enabled and glyphSpellID and GetSpellInfo then
+            local installedName = GetSpellInfo(glyphSpellID)
+            if installedName and string.find(string.lower(installedName), wanted, 1, true) then
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
--- Prevent mid-charge Thunder Clap by waiting for charge movement to settle.
-function AC:ShouldDelayThunderClapAfterCharge()
-    local lastCharge = self.lastWarriorChargeCastTime or 0
-    if lastCharge <= 0 then
-        return false
-    end
-
-    local elapsed = GetTime() - lastCharge
-    if elapsed > 1.4 then
-        return false
-    end
-
-    -- Always block briefly after Charge starts, regardless of movement-state reporting.
-    if elapsed < 0.8 then
-        return true
-    end
-
-    -- Keep delaying while still moving during the tail of the charge window.
-    return self:IsPlayerMoving()
+function AC:MarkWarriorChargeCast()
+    self.lastWarriorChargeCastTime = GetTime()
 end
 
 function AC:ShouldDelayProtectionThunderClapAfterCharge()
@@ -1548,15 +1302,13 @@ function AC:TryCharge()
     end
     
     if hasWarbringer then
-        if self:IsUsableSpell(S.Charge) then
-            CastSpellByName(S.Charge)
+        if self:IsUsableSpell(S.Charge) and self:CastSpell(S.Charge, "target") then
             self:MarkWarriorChargeCast()
             WarriorDebug("Attempting to Charge target (Warbringer)")
             return true
         end
     else
-        if self:IsUsableSpell(S.Charge) then
-            CastSpellByName(S.Charge)
+        if self:IsUsableSpell(S.Charge) and self:CastSpell(S.Charge, "target") then
             self:MarkWarriorChargeCast()
             WarriorDebug("Attempting to Charge target")
             return true
@@ -1574,14 +1326,12 @@ function AC:TryProtectionWarbringerCharge(target)
     if self:GetSpellCooldown(S.Charge) > 0 or not self:IsUsableSpell(S.Charge) then return false end
     if not self:IsInChargeRange(target) then return false end
 
-    CastSpellByName(S.Charge, target)
-    self:MarkWarriorChargeCast()
-    self:MarkAsOurTarget(UnitGUID(target))
-    WarriorDebug("Prot: Warbringer Charge")
-    return true
-end
-
-function AC:TryProtectionInterveneGapCloser(target)
+    if self:CastSpell(S.Charge, target) then
+        self:MarkWarriorChargeCast()
+        self:MarkAsOurTarget(UnitGUID(target))
+        WarriorDebug("Prot: Warbringer Charge")
+        return true
+    end
     return false
 end
 
@@ -1596,11 +1346,13 @@ function AC:TryArmsCombatCharge(target)
     if not self:IsUsableSpell(S.Charge) then return false end
     if not self:IsInChargeRange(target) then return false end
 
-    CastSpellByName(S.Charge, target)
-    self:MarkWarriorChargeCast()
-    self:MarkAsOurTarget(UnitGUID(target))
-    WarriorDebug("Arms: Juggernaut Charge gap-closer")
-    return true
+    if self:CastSpell(S.Charge, target) then
+        self:MarkWarriorChargeCast()
+        self:MarkAsOurTarget(UnitGUID(target))
+        WarriorDebug("Arms: Juggernaut Charge gap-closer")
+        return true
+    end
+    return false
 end
 
 function AC:ShouldMaintainArmsSunder(unit)
@@ -1694,7 +1446,7 @@ function AC:TryArmsSoloBurst(rage, nearbyEnemies, targetHP, msCooldown, overpowe
     if highValueSoloTarget and freshTarget and self:KnowsSpell(S.DeathWish) and self:IsUsableSpell(S.DeathWish) and
        self:GetSpellCooldown(S.DeathWish) == 0 and not overpowerReady and msCooldown > 0.5 and
        Throttle("ArmsSoloDeathWish", 45) then
-        CastSpellByName(S.DeathWish)
+        if not self:CastSpell(S.DeathWish) then return false end
         WarriorDebug("Arms Solo Burst: Death Wish")
         return true
     end
@@ -1703,7 +1455,7 @@ function AC:TryArmsSoloBurst(rage, nearbyEnemies, targetHP, msCooldown, overpowe
     if highValueSoloTarget and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm) and
        self:GetSpellCooldown(S.Bladestorm) == 0 and rage >= 25 and not overpowerReady and
        msCooldown > 1.0 and rendRemaining > 2 and Throttle("ArmsSoloBladestorm", 30) then
-        CastSpellByName(S.Bladestorm)
+        if not self:CastSpell(S.Bladestorm) then return false end
         WarriorDebug("Arms Solo Burst: Bladestorm")
         return true
     end
@@ -1810,10 +1562,12 @@ function AC:TryProtectionShockwave(nearbyEnemies, inMeleeRange, targetInCombat)
         return false
     end
 
-    CastSpellByName(S.Shockwave, "target")
-    self:MarkAsOurTarget(UnitGUID("target"))
-    WarriorDebug("Prot: Shockwave" .. (nearbyEnemies >= 2 and " (AoE)" or " (single target)"))
-    return true
+    if self:CastSpell(S.Shockwave, "target") then
+        self:MarkAsOurTarget(UnitGUID("target"))
+        WarriorDebug("Prot: Shockwave" .. (nearbyEnemies >= 2 and " (AoE)" or " (single target)"))
+        return true
+    end
+    return false
 end
 
 function AC:ManageWarriorVigilance()
@@ -1833,7 +1587,7 @@ function AC:ManageWarriorVigilance()
 
     local function isVigilanceInRange(unit)
         local ok, range = pcall(IsSpellInRange, S.Vigilance, unit)
-        return (not ok) or range == nil or range == 1
+        return ok and range == 1
     end
 
     local function getGroupUnits()
@@ -1891,11 +1645,12 @@ function AC:ManageWarriorVigilance()
         end
 
         if isVigilanceInRange(trackedUnit) then
-            CastSpellByName(S.Vigilance, trackedUnit)
-            self.warriorVigilance.lastCast = now
-            self.warriorVigilance.name = UnitName(trackedUnit)
-            WarriorDebug("Prot: Refreshing Vigilance on " .. (UnitName(trackedUnit) or trackedUnit))
-            return true
+            if self:CastSpell(S.Vigilance, trackedUnit) then
+                self.warriorVigilance.lastCast = now
+                self.warriorVigilance.name = UnitName(trackedUnit)
+                WarriorDebug("Prot: Refreshing Vigilance on " .. (UnitName(trackedUnit) or trackedUnit))
+                return true
+            end
         end
 
         return false
@@ -1932,12 +1687,13 @@ function AC:ManageWarriorVigilance()
     end
 
     if bestUnit then
-        CastSpellByName(S.Vigilance, bestUnit)
-        self.warriorVigilance.guid = UnitGUID(bestUnit)
-        self.warriorVigilance.name = UnitName(bestUnit)
-        self.warriorVigilance.lastCast = now
-        WarriorDebug("Prot: Vigilance on " .. (UnitName(bestUnit) or bestUnit))
-        return true
+        if self:CastSpell(S.Vigilance, bestUnit) then
+            self.warriorVigilance.guid = UnitGUID(bestUnit)
+            self.warriorVigilance.name = UnitName(bestUnit)
+            self.warriorVigilance.lastCast = now
+            WarriorDebug("Prot: Vigilance on " .. (UnitName(bestUnit) or bestUnit))
+            return true
+        end
     end
 
     return false
@@ -1957,7 +1713,7 @@ function AC:CheckWarriorBuffs(spec)
     local shoutToUse = self:GetPreferredWarriorShout(spec)
     if shoutToUse and Throttle("WarriorOOCShoutCast", 12) then
         if self:IsUsableSpell(shoutToUse) and rage >= 10 then
-            CastSpellByName(shoutToUse)
+            if not self:CastSpell(shoutToUse) then return false end
             WarriorDebug("OOC Buff: " .. shoutToUse)
             applied = true
         end
@@ -1976,9 +1732,10 @@ function AC:CheckWarriorBuffs(spec)
         desiredStanceNum = 3
     end
 
-    if currentStance ~= desiredStanceNum and self:KnowsSpell(desiredStanceSpell) then
+    if currentStance ~= desiredStanceNum and self:KnowsSpell(desiredStanceSpell) and
+       self:IsUsableSpell(desiredStanceSpell) then
         if self:GetSpellCooldown(desiredStanceSpell) == 0 then 
-            CastSpellByName(desiredStanceSpell)
+            if not self:CastSpell(desiredStanceSpell, "player") then return false end
             WarriorDebug("OOC Stance: " .. desiredStanceSpell)
             stanceActionTaken = true
         end
@@ -2021,7 +1778,7 @@ function AC:ProtectionWarriorRotation()
     if inCombat then
         if not largeGroupMode and self:HandleTankTargeting() then return true end
         hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
-        if not hasTarget then return true end
+        if not hasTarget then return false end
     end
 
     -- Intervene disabled; use Warbringer Charge as the primary combat gap closer.
@@ -2060,7 +1817,7 @@ function AC:ProtectionWarriorRotation()
     if (level >= 10 and knowsDefensiveStance and currentStance ~= 2) or
        ((level < 10 or not knowsDefensiveStance) and currentStance ~= 1) then
         WarriorDebug("Prot: Waiting for stance")
-        return true
+        return false
     end
 
     if inCombat then
@@ -2072,7 +1829,7 @@ function AC:ProtectionWarriorRotation()
         
         -- Rage generation with Blood Rage
         if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
-            CastSpellByName(S.BloodRage)
+            if not self:CastSpell(S.BloodRage) then return false end
             WarriorDebug("Prot: Blood Rage")
             rage = UnitPower("player", 1)
         end
@@ -2083,7 +1840,7 @@ function AC:ProtectionWarriorRotation()
         local needsFearBreak = UnitIsFeared("player") or UnitIsCharmed("player")
         if self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 and
            (needsFearBreak or (rage < 30 and not self:HasBuff("player", S.BloodRage)) or needsEnrageSetup) then
-            CastSpellByName(S.BerserkerRage)
+            if not self:CastSpell(S.BerserkerRage) then return false end
             WarriorDebug("Prot: Berserker Rage (offensive enrage)")
             if needsFearBreak then
                 return true
@@ -2094,7 +1851,7 @@ function AC:ProtectionWarriorRotation()
         if UnitCastingInfo("target") then
             -- Shield Bash first (Protection preferred, silences for 6 seconds)
             if self:IsUsableSpell(S.ShieldBash) and self:GetSpellCooldown(S.ShieldBash) == 0 then
-                CastSpellByName(S.ShieldBash, "target")
+                if not self:CastSpell(S.ShieldBash, "target") then return false end
                 WarriorDebug("Prot: Shield Bash interrupt")
                 return true
             end
@@ -2110,6 +1867,10 @@ function AC:ProtectionWarriorRotation()
         local targetInCombat = UnitExists("target") and UnitAffectingCombat("target")
         if Throttle("ProtAOEDebug", 3.0) then
             WarriorDebug("AoE Check: nearbyEnemies=" .. nearbyEnemies .. " inMelee=" .. (inMeleeRange and "Y" or "N"))
+        end
+
+        if nearbyEnemies >= 2 and inMeleeRange and self:TryProtectionMultiTargetDistribution(nearbyEnemies) then
+            return true
         end
 
         if self:UseProtectionWarriorCombatRacials(nearbyEnemies) then
@@ -2128,7 +1889,7 @@ function AC:ProtectionWarriorRotation()
             local delayForCharge = self:ShouldDelayProtectionThunderClapAfterCharge()
             
             if canUseTC and hasRage and notThrottled and inRange and hasTCReach and notOnCD and not delayForCharge and targetInCombat then 
-                CastSpellByName(S.ThunderClap)
+                if not self:CastSpell(S.ThunderClap) then return false end
                 self:MarkAsOurTarget(UnitGUID("target"))
                 WarriorDebug("Prot: Thunder Clap (AoE threat priority)")
                 return true
@@ -2156,7 +1917,7 @@ function AC:ProtectionWarriorRotation()
         if self:IsUsableSpell(S.ShieldBlock) and rage >= 10 and self:IsUsableSpell(S.ShieldSlam) and
            self:GetSpellCooldown(S.ShieldBlock) == 0 and self:GetSpellCooldown(S.ShieldSlam) == 0 and
            Throttle("ShieldBlockProt", 5) then 
-            CastSpellByName(S.ShieldBlock)
+            if not self:CastSpell(S.ShieldBlock) then return false end
             WarriorDebug("Prot: Shield Block")
         end
         
@@ -2180,7 +1941,7 @@ function AC:ProtectionWarriorRotation()
 
         -- Maintain the Thunder Clap attack-speed debuff on real tank targets, not random combat units.
         if nearbyEnemies < 2 and Throttle("ProtTCSingle", 0.5) and self:ShouldMaintainProtectionThunderClap() then
-            CastSpellByName(S.ThunderClap)
+            if not self:CastSpell(S.ThunderClap) then return false end
             self:MarkAsOurTarget(UnitGUID("target"))
             WarriorDebug("Prot: Thunder Clap (single-target debuff)")
             return true
@@ -2191,7 +1952,7 @@ function AC:ProtectionWarriorRotation()
                                   self:GetSpellCooldown(S.ThunderClap) == 0
         if not tcReadyAndInRange and self:ShouldUseDemoShout(nearbyEnemies) and self:IsUsableSpell(S.DemoShout) and
            self:GetSpellCooldown(S.DemoShout) == 0 and rage >= 10 and Throttle("DemoShoutProt", 4) then
-            CastSpellByName(S.DemoShout)
+            if not self:CastSpell(S.DemoShout) then return false end
             self:MarkAsOurTarget(UnitGUID("target"))
             WarriorDebug("Prot: Demo Shout")
             return true
@@ -2232,14 +1993,14 @@ function AC:ProtectionWarriorRotation()
         -- Execute is a Protection rage dump, not a replacement for core threat buttons.
         if targetHP < 20 and self:IsUsableSpell(S.Execute) and rage >= 50 and
            self:GetSpellCooldown(S.ShieldSlam) > 1.5 and self:GetSpellCooldown(S.ThunderClap) > 1.5 then 
-            CastSpellByName(S.Execute, "target")
+            if not self:CastSpell(S.Execute, "target") then return false end
             WarriorDebug("Prot: Execute")
             return true
         end
         
         -- Rend (only at low levels)
         if level < 20 and self:IsUsableSpell(S.Rend) and rage >= 10 and not self:HasDebuff("target", S.Rend) then
-            CastSpellByName(S.Rend, "target")
+            if not self:CastSpell(S.Rend, "target") then return false end
             WarriorDebug("Prot: Rend")
             return true
         end
@@ -2262,7 +2023,7 @@ function AC:ProtectionWarriorRotation()
         local combatShout = self:GetPreferredWarriorShout("Protection")
         if combatShout and Throttle("ProtCombatShout", 10) then
             if self:IsUsableSpell(combatShout) and rage >= 10 then
-                CastSpellByName(combatShout)
+                if not self:CastSpell(combatShout) then return false end
                 WarriorDebug("Prot: " .. combatShout)
                 return true
             end
@@ -2297,7 +2058,7 @@ function AC:ArmsWarriorRotation()
     end
     if currentStance ~= 1 then
         WarriorDebug("Arms: Waiting for Battle Stance")
-        return true
+        return false
     end 
 
     if inCombat then
@@ -2317,7 +2078,7 @@ function AC:ArmsWarriorRotation()
                 end
             end
         end
-        if not hasTarget then return true end
+        if not hasTarget then return false end
 
         -- Only use melee abilities in range; try a safe gap-closer first to reduce idle time.
         if not self:IsInMeleeRange("target") then
@@ -2330,17 +2091,6 @@ function AC:ArmsWarriorRotation()
             if level >= 50 and self:TryArmsCombatCharge("target") then
                 return true
             end
-            -- Intercept disabled as a gap closer.
-            -- if level >= 30 then
-            --     local hasWarbringer = self:HasWarbringerTalent()
-            --     if hasWarbringer or currentStance == 3 then
-            --         local availableRanged = self:GetAvailableRangedAbilities()
-            --         if availableRanged.intercept and self:UseRangedAbilityAndReturn("Intercept", "target") then
-            --             WarriorDebug("Arms: Intercept gap closer" .. (hasWarbringer and " (Warbringer)" or ""))
-            --             return true
-            --         end
-            --     end
-            -- end
             local availableRanged = self:GetAvailableRangedAbilities()
             if availableRanged.heroicThrow and self:UseRangedAbilityAndReturn("Heroic Throw", "target") then
                 WarriorDebug("Arms: Heroic Throw while out of melee")
@@ -2362,7 +2112,7 @@ function AC:ArmsWarriorRotation()
         
         -- Rage generation
         if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
-            CastSpellByName(S.BloodRage)
+            if not self:CastSpell(S.BloodRage) then return false end
             WarriorDebug("Arms: Blood Rage")
             rage = UnitPower("player", 1)
         end
@@ -2371,7 +2121,7 @@ function AC:ArmsWarriorRotation()
         local needsFearBreak = UnitIsFeared("player") or UnitIsCharmed("player")
         if (needsFearBreak or (rage < 30 and GetSpellCooldown(S.BerserkerRage) == 0)) and 
            self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 then 
-            CastSpellByName(S.BerserkerRage)
+            if not self:CastSpell(S.BerserkerRage) then return false end
             WarriorDebug("Arms: Berserker Rage")
             if needsFearBreak then
                 return true
@@ -2388,8 +2138,6 @@ function AC:ArmsWarriorRotation()
         
         -- Victory Rush
         if self:TryVictoryRush() then return true end
-
-        -- Retaliation/Disarm are utility tools and are intentionally not used in DPS flow.
 
         local targetHP = self:GetTargetHealthPercent("target")
         local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
@@ -2495,7 +2243,7 @@ function AC:ArmsWarriorRotation()
 
         -- Sweeping Strikes before Arms cleave burst.
         if sweepingReady and Throttle("ArmsSweepingStrikes", 0.5) then
-            CastSpellByName(S.SweepingStrikes)
+            if not self:CastSpell(S.SweepingStrikes) then return false end
             WarriorDebug("Arms: Sweeping Strikes")
             return true
         end
@@ -2506,7 +2254,7 @@ function AC:ArmsWarriorRotation()
                self:GetSpellCooldown(S.ThunderClap) == 0 and self:ThunderClapInRange() and
                self:HasEnemyInThunderClapReach(20) and
                (not overpowerExpiring) and Throttle("ArmsThunderClap", 0.5) then
-                CastSpellByName(S.ThunderClap)
+                if not self:CastSpell(S.ThunderClap) then return false end
                 WarriorDebug("Arms: Thunder Clap AoE")
                 return true
             end
@@ -2515,7 +2263,7 @@ function AC:ArmsWarriorRotation()
                and not suddenDeathProc and not executePhase
                and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm)
                and self:GetSpellCooldown(S.Bladestorm) == 0 then
-                CastSpellByName(S.Bladestorm)
+                if not self:CastSpell(S.Bladestorm) then return false end
                 WarriorDebug("Arms: Bladestorm AoE")
                 return true
             end
@@ -2527,7 +2275,7 @@ function AC:ArmsWarriorRotation()
         
         -- Mortal Strike on cooldown for single-target damage and Blood Frenzy uptime.
         if self:KnowsSpell(S.MortalStrike) and self:IsUsableSpell(S.MortalStrike) and msCooldown == 0 and rage >= 20 then 
-            CastSpellByName(S.MortalStrike, "target")
+            if not self:CastSpell(S.MortalStrike, "target") then return false end
             WarriorDebug("Arms: Mortal Strike")
             return true
         end
@@ -2541,7 +2289,7 @@ function AC:ArmsWarriorRotation()
            self:GetSpellCooldown(S.ShatteringThrow) == 0 and not self:IsPlayerMoving() and
            not suddenDeathReady and not overpowerExpiring and msCooldown > 1.5 and rendRemaining > 3 and
            Throttle("ArmsShatteringThrow", 45) then
-            CastSpellByName(S.ShatteringThrow, "target")
+            if not self:CastSpell(S.ShatteringThrow, "target") then return false end
             WarriorDebug("Arms: Shattering Throw")
             return true
         end
@@ -2552,7 +2300,7 @@ function AC:ArmsWarriorRotation()
            and msCooldown > 1.5 and self:KnowsSpell(S.Bladestorm)
            and self:IsUsableSpell(S.Bladestorm) and self:GetSpellCooldown(S.Bladestorm) == 0
            and Throttle("ArmsBladestormSingle", 90) then
-            CastSpellByName(S.Bladestorm)
+            if not self:CastSpell(S.Bladestorm) then return false end
             WarriorDebug("Arms: Bladestorm")
             return true
         end
@@ -2562,7 +2310,7 @@ function AC:ArmsWarriorRotation()
            not self:IsPlayerMoving() and not UnitCastingInfo("player") then
             local opWindowSoon = overpowerReady or (hasTaste and opCooldown < 1.5)
             if (msCooldown > 1.5 or not self:KnowsSpell(S.MortalStrike)) and not opWindowSoon and rendRemaining > 2 then
-                CastSpellByName(S.Slam, "target")
+                if not self:CastSpell(S.Slam, "target") then return false end
                 WarriorDebug("Arms: Slam filler")
                 return true
             end
@@ -2580,7 +2328,7 @@ function AC:ArmsWarriorRotation()
 
         local combatShout = self:GetPreferredWarriorShout("Arms")
         if combatShout and rage >= 10 and Throttle("ArmsCombatShout", 10) and self:IsUsableSpell(combatShout) then
-            CastSpellByName(combatShout)
+            if not self:CastSpell(combatShout) then return false end
             WarriorDebug("Arms: " .. combatShout)
             return true
         end
@@ -2637,9 +2385,11 @@ function AC:FuryWarriorRotation()
     local inGroup = IsInGroup()
     local durableGroupTarget = preTargetClassification == "elite" or preTargetClassification == "rareelite" or
                                preTargetClassification == "worldboss"
+    local canRendWeave = self:HasTalentByName("Improved Rend", "ImprovedRend") and
+                         self:HasWarriorGlyph("Glyph of Rending")
     local preBTCooldown = self:GetSpellCooldown(S.Bloodthirst)
     local preWWCooldown = self:GetSpellCooldown(S.Whirlwind)
-    local shouldStartRendWeave = inCombat and hasTarget and level >= 30 and self:KnowsSpell(S.Rend)
+    local shouldStartRendWeave = canRendWeave and inCombat and hasTarget and level >= 30 and self:KnowsSpell(S.Rend)
         and inGroup and durableGroupTarget and preNearbyEnemies < 2
         and not rendWeavePending
         and (now - self.furyRendWeaveLastAttempt) > 12
@@ -2661,7 +2411,7 @@ function AC:FuryWarriorRotation()
     
     if inCombat and ((level >= 30 and currentStance ~= 3 and not (currentStance == 1 and (shouldStartRendWeave or rendWeavePending))) or (level < 30 and currentStance ~= 1)) then
         WarriorDebug("Fury: Waiting for stance")
-        return true
+        return false
     end 
 
     if inCombat then
@@ -2681,7 +2431,7 @@ function AC:FuryWarriorRotation()
                 end
             end
         end
-        if not hasTarget then return true end
+        if not hasTarget then return false end
 
         -- ENHANCED: Intercept for gap closing, otherwise skip melee abilities if out of range
         if not self:IsInMeleeRange("target") then
@@ -2690,18 +2440,10 @@ function AC:FuryWarriorRotation()
             if touchContact then
                 WarriorDebug("Fury: Melee contact fallback confirmed")
             else
-            -- Intercept disabled as a gap closer.
-            -- if level >= 30 then
-            --     local hasWarbringer = self:HasWarbringerTalent()
-            --     if (hasWarbringer or currentStance == 3) then
-            --         local availableRanged = self:GetAvailableRangedAbilities()
-            --         if availableRanged.intercept and self:UseRangedAbilityAndReturn("Intercept", "target") then
-            --             WarriorDebug("Fury: Intercept gap closer" .. (hasWarbringer and " (Warbringer)" or ""))
-            --             return true
-            --         end
-            --     end
-            -- end
             local availableRanged = self:GetAvailableRangedAbilities()
+            if availableRanged.intercept and self:UseRangedAbilityAndReturn("Intercept", "target") then
+                return true
+            end
             if availableRanged.heroicThrow and self:UseRangedAbilityAndReturn("Heroic Throw", "target") then
                 WarriorDebug("Fury: Heroic Throw while out of melee")
                 return true
@@ -2728,7 +2470,7 @@ function AC:FuryWarriorRotation()
         if self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 then
             if UnitIsFeared("player") or UnitIsCharmed("player")
                or (rage < 25 and not coreSoon and not hasSlamProc) then 
-                CastSpellByName(S.BerserkerRage)
+                if not self:CastSpell(S.BerserkerRage) then return false end
                 WarriorDebug("Fury: Berserker Rage")
                 return true 
             end
@@ -2737,7 +2479,7 @@ function AC:FuryWarriorRotation()
         -- Blood Rage
         if rage < 20 and not coreSoon and not hasSlamProc
            and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
-            CastSpellByName(S.BloodRage)
+            if not self:CastSpell(S.BloodRage) then return false end
             WarriorDebug("Fury: Blood Rage")
             return true
         end
@@ -2747,7 +2489,7 @@ function AC:FuryWarriorRotation()
 
         -- Rampage upkeep is core Fury maintenance in WotLK.
         if self:KnowsSpell(S.Rampage) and not self:HasBuff("player", S.Rampage) and self:IsUsableSpell(S.Rampage) and rage >= 20 then
-            CastSpellByName(S.Rampage)
+            if not self:CastSpell(S.Rampage) then return false end
             WarriorDebug("Fury: Rampage upkeep")
             return true
         end
@@ -2755,12 +2497,10 @@ function AC:FuryWarriorRotation()
         -- Keep shout buff maintained in combat.
         local combatShout = self:GetPreferredWarriorShout("Fury")
         if combatShout and rage >= 10 and Throttle("FuryCombatShout", 10) and self:IsUsableSpell(combatShout) then
-            CastSpellByName(combatShout)
+            if not self:CastSpell(combatShout) then return false end
             WarriorDebug("Fury: " .. combatShout)
             return true
         end
-
-        -- Retaliation is utility and intentionally not used in DPS flow.
 
         -- AoE rotation - use strict local hostile detection
         local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
@@ -2931,7 +2671,7 @@ function AC:LevelingWarriorRotation()
     end
 
     if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
-        CastSpellByName(S.BloodRage)
+        if not self:CastSpell(S.BloodRage) then return false end
         WarriorDebug("Leveling mode: Blood Rage")
         return true
     end
@@ -2942,19 +2682,19 @@ function AC:LevelingWarriorRotation()
 
     local targetHP = self:GetTargetHealthPercent("target")
     if targetHP < 20 and level >= 24 and self:IsUsableSpell(S.Execute) and rage >= 10 then
-        CastSpellByName(S.Execute, "target")
+        if not self:CastSpell(S.Execute, "target") then return false end
         WarriorDebug("Leveling mode: Execute")
         return true
     end
 
     if level >= 4 and self:DebuffTimeRemaining("target", S.Rend) < 2 and self:IsUsableSpell(S.Rend) and rage >= 10 then
-        CastSpellByName(S.Rend, "target")
+        if not self:CastSpell(S.Rend, "target") then return false end
         WarriorDebug("Leveling mode: Rend")
         return true
     end
 
     if level >= 8 and self:HasBuff("player", S.TasteForBlood) and self:IsUsableSpell(S.Overpower) and rage >= 5 then
-        CastSpellByName(S.Overpower, "target")
+        if not self:CastSpell(S.Overpower, "target") then return false end
         WarriorDebug("Leveling mode: Overpower")
         return true
     end
@@ -3035,11 +2775,6 @@ function AC:InitWarriorRotations()
     
     -- FIXED: Register buff checking function
     self.CheckWarriorBuffs = AC.CheckWarriorBuffs
-    
-    -- FIXED: Initialize combat log tracking if available
-    if self.InitCombatTracking then
-        self:InitCombatTracking()
-    end
     
     -- FIXED: Register for combat events to clean up tracking data
     if self.RegisterEvent then

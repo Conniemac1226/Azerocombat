@@ -48,6 +48,7 @@ local S = {
     RemoveCurse = "Remove Curse",
     Spellsteal = "Spellsteal",
     Polymorph = "Polymorph",
+    FocusMagic = "Focus Magic",
     
     -- Armor spells
     MoltenArmor = "Molten Armor",
@@ -103,6 +104,85 @@ local ManaGems = {
     "Mana Agate", -- 205 mana
 }
 
+local ConjuredFood = {
+    "Conjured Mana Strudel",
+    "Conjured Cinnamon Roll",
+    "Conjured Croissant",
+    "Conjured Sweet Roll",
+    "Conjured Rye",
+}
+
+local ConjuredWater = {
+    "Conjured Mana Strudel",
+    "Conjured Glacier Water",
+    "Conjured Spring Water",
+    "Conjured Purified Water",
+}
+
+local MageSpellstealBuffs = {
+    ["Power Infusion"] = true,
+    ["Innervate"] = true,
+    ["Heroism"] = true,
+    ["Bloodlust"] = true,
+    ["Blessing of Protection"] = true,
+    ["Blessing of Freedom"] = true,
+    ["Ice Barrier"] = true,
+    ["Hand of Protection"] = true,
+}
+
+local function MageManaPercent()
+    local maxMana = UnitPowerMax("player", 0)
+    if not maxMana or maxMana <= 0 then return 100 end
+    return UnitPower("player", 0) / maxMana * 100
+end
+
+local function MageSpellReady(self, spellName)
+    return spellName and self:IsUsableSpell(spellName) and self:GetSpellCooldown(spellName) <= 0
+end
+
+-- Cooldowns are polled frequently, so use a short retry throttle instead of
+-- a second independent cooldown timer. This prevents a failed attempt from
+-- delaying the next legitimate cast for several minutes.
+local function MageUseCooldown(self, spellName, unit, throttleKey)
+    if not MageSpellReady(self, spellName) then return false end
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then return false end
+    if not self:ActionThrottle(throttleKey or ("MageCooldown_" .. spellName), 0.25) then
+        return false
+    end
+    return self:CastSpell(spellName, unit or "player")
+end
+
+local function MageHasDebuffKeyword(unit, keywords)
+    for index = 1, 40 do
+        local name, _, _, _, debuffType = UnitDebuff(unit, index)
+        if not name then break end
+        local lowerName = string.lower(name)
+        for _, keyword in ipairs(keywords) do
+            if lowerName:find(string.lower(keyword), 1, true) then
+                return true, name, debuffType
+            end
+        end
+    end
+    return false
+end
+
+local function MageFindPetAction(actionName)
+    if not GetPetActionInfo then return nil end
+    for index = 1, 10 do
+        local name = GetPetActionInfo(index)
+        if name == actionName then return index end
+    end
+    return nil
+end
+
+local function MagePetActionReady(actionIndex)
+    if not actionIndex or not GetPetActionCooldown then return false end
+    local start, duration, enabled = GetPetActionCooldown(actionIndex)
+    if enabled == 0 then return false end
+    if not start or start == 0 or not duration or duration == 0 then return true end
+    return GetTime() >= start + duration
+end
+
 -- Debug function
 local function MageDebug(msg)
     if AC.debugMode then
@@ -148,12 +228,18 @@ end
 -- =============================================
 
 function AC:ManageMageMana()
-    local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
+    local manaPercent = MageManaPercent()
+
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return false
+    end
     
     -- Use mana gems (best first)
     if manaPercent < 40 then
         for _, gem in ipairs(ManaGems) do
-            if GetItemCount(gem) > 0 and GetItemCooldown(gem) == 0 then
+            local start, duration = GetItemCooldown(gem)
+            local ready = not start or start == 0 or not duration or GetTime() >= start + duration
+            if GetItemCount(gem) > 0 and ready then
                 UseItemByName(gem)
                 MageDebug("Using " .. gem)
                 return true
@@ -170,10 +256,11 @@ function AC:ManageMageMana()
     end
     
     -- Evocation as last resort
-    if manaPercent < 20 and self:IsUsableSpell(S.Evocation) and not self:IsPlayerMoving() then
-        self:CastSpell(S.Evocation, "player")
-        MageDebug("Using Evocation")
-        return true
+    if manaPercent < 20 and MageSpellReady(self, S.Evocation) and not self:IsPlayerMoving() then
+        if self:CastSpell(S.Evocation, "player") then
+            MageDebug("Using Evocation")
+            return true
+        end
     end
     
     return false
@@ -188,40 +275,39 @@ function AC:UseMageDefensives()
     local enemies = self:GetEnemyCount()
     
     -- Ice Block for emergencies
-    if health < 15 and self:IsUsableSpell(S.IceBlock) then
-        self:CastSpell(S.IceBlock, "player")
-        MageDebug("Emergency Ice Block")
-        return true
+    if health < 20 and MageSpellReady(self, S.IceBlock) then
+        if self:CastSpell(S.IceBlock, "player") then
+            MageDebug("Emergency Ice Block")
+            return true
+        end
     end
     
     -- Ice Barrier for damage mitigation
-    if health < 50 and self:IsUsableSpell(S.IceBarrier) and not self:HasBuff("player", S.IceBarrier) then
-        self:CastSpell(S.IceBarrier, "player")
-        MageDebug("Ice Barrier for protection")
-        return true
+    if health < 60 and MageSpellReady(self, S.IceBarrier) and not self:HasBuff("player", S.IceBarrier) then
+        if self:CastSpell(S.IceBarrier, "player") then
+            MageDebug("Ice Barrier for protection")
+            return true
+        end
     end
     
     -- Mana Shield if low health but have mana
     local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
-    if health < 40 and manaPercent > 30 and self:IsUsableSpell(S.ManaShield) and 
+    if health < 40 and manaPercent > 30 and MageSpellReady(self, S.ManaShield) and 
        not self:HasBuff("player", S.ManaShield) and not self:HasBuff("player", S.IceBarrier) then
-        self:CastSpell(S.ManaShield, "player")
-        MageDebug("Mana Shield for protection")
-        return true
+        if self:CastSpell(S.ManaShield, "player") then
+            MageDebug("Mana Shield for protection")
+            return true
+        end
     end
     
     -- Mirror Image for threat reduction
-    if health < 30 and self:IsUsableSpell(S.MirrorImage) and enemies >= 2 then
-        self:CastSpell(S.MirrorImage, "player")
-        MageDebug("Mirror Image for threat drop")
-        return true
-    end
-    
-    -- Frost Nova if surrounded
-    if enemies >= 2 and CheckInteractDistance("target", 3) and self:IsUsableSpell(S.FrostNova) then
-        self:CastSpell(S.FrostNova, "player")
-        MageDebug("Frost Nova for crowd control")
-        return true
+    -- Frost Nova is reserved for a genuine emergency. Using it routinely
+    -- can make frozen mobs attack the mage instead of the tank.
+    if health < 30 and enemies >= 2 and CheckInteractDistance("target", 3) and MageSpellReady(self, S.FrostNova) then
+        if self:CastSpell(S.FrostNova, "player") then
+            MageDebug("Emergency Frost Nova")
+            return true
+        end
     end
     
     -- Use health potions
@@ -232,6 +318,113 @@ function AC:UseMageDefensives()
         end
     end
     
+    return false
+end
+
+local function MageGroupUnits()
+    local units = {"player"}
+    local raidMembers = GetNumRaidMembers and GetNumRaidMembers() or 0
+    local partyMembers = GetNumPartyMembers and GetNumPartyMembers() or 0
+
+    if raidMembers > 0 then
+        for index = 1, raidMembers do
+            table.insert(units, "raid" .. index)
+        end
+    elseif partyMembers > 0 then
+        for index = 1, partyMembers do
+            table.insert(units, "party" .. index)
+        end
+    end
+
+    return units
+end
+
+function AC:HasMageTalentByName(talentName)
+    self.MageTalentCache = self.MageTalentCache or {}
+    self.MageTalentCacheTime = self.MageTalentCacheTime or 0
+
+    if GetTime() - self.MageTalentCacheTime > 5 then
+        self.MageTalentCache = {}
+        self.MageTalentCacheTime = GetTime()
+    end
+
+    if self.MageTalentCache[talentName] ~= nil then
+        return self.MageTalentCache[talentName]
+    end
+
+    local found = false
+    if GetNumTalentTabs and GetTalentInfo then
+        for tab = 1, GetNumTalentTabs() do
+            local talentCount = GetNumTalents(tab) or 0
+            for talent = 1, talentCount do
+                local name, _, _, _, currentRank = GetTalentInfo(tab, talent)
+                if name == talentName and (currentRank or 0) > 0 then
+                    found = true
+                    break
+                end
+            end
+            if found then break end
+        end
+    end
+
+    self.MageTalentCache[talentName] = found
+    return found
+end
+
+function AC:GetMageFireNuke()
+    -- Torment the Weak is the Fireball build. Fire builds without it are
+    -- normally Frostfire builds, so use Frostfire Bolt when learned.
+    if self:HasMageTalentByName("Torment the Weak") then
+        return S.Fireball
+    end
+    if MageSpellReady(self, S.FrostfireBolt) or self:KnowsSpell(S.FrostfireBolt) then
+        return S.FrostfireBolt
+    end
+    return S.Fireball
+end
+
+function AC:IsMageBossTarget()
+    local classification = UnitClassification("target")
+    return classification == "worldboss" or classification == "rareelite"
+end
+
+function AC:ShouldUseMageMajorCooldowns()
+    local classification = UnitClassification("target")
+    return classification == "worldboss" or classification == "rareelite" or
+           classification == "elite"
+end
+
+function AC:CheckMageFocusMagic()
+    if self:HasBuff("player", S.FocusMagic) then return false end
+    if not MageSpellReady(self, S.FocusMagic) then return false end
+
+    local function IsCandidate(unit)
+        if not UnitExists(unit) or UnitIsUnit(unit, "player") then return false end
+        if UnitIsDeadOrGhost(unit) or not UnitIsConnected(unit) then return false end
+        if UnitCanAssist and not UnitCanAssist("player", unit) then return false end
+        if not CheckInteractDistance(unit, 4) then return false end
+
+        local _, class = UnitClass(unit)
+        return class == "MAGE" or class == "WARLOCK" or class == "PRIEST" or
+               class == "DRUID" or class == "SHAMAN"
+    end
+
+    if IsCandidate("focus") and not self:HasBuff("focus", S.FocusMagic) then
+        if self:CastSpell(S.FocusMagic, "focus") then
+            MageDebug("Applying Focus Magic to focus")
+            return true
+        end
+    end
+
+    for _, unit in ipairs(MageGroupUnits()) do
+        if IsCandidate(unit) and not self:HasBuff(unit, S.FocusMagic) then
+            if self:CastSpell(S.FocusMagic, unit) then
+                MageDebug("Applying Focus Magic to " .. (UnitName(unit) or unit))
+                return true
+            end
+        end
+    end
+
     return false
 end
 
@@ -249,27 +442,27 @@ function AC:CheckMageBuffs(spec)
     -- Group buffing system (out of combat only)
     if not UnitAffectingCombat("player") then
         if self:CheckMageGroupBuffs() then return true end
+        if self:CheckMageFocusMagic() then return true end
     end
     
-    -- Armor buffs (always maintain best available)
-    local hasArmor = self:HasBuff("player", S.MoltenArmor) or 
-                    self:HasBuff("player", S.MageArmor) or
-                    self:HasBuff("player", S.FrostArmor) or 
-                    self:HasBuff("player", S.IceArmor)
-    
-    if not hasArmor then
-        local armorSpell = nil
-        if spec == "Fire" or spec == "Arcane" then
-            armorSpell = self:KnowsSpell(S.MoltenArmor) and S.MoltenArmor or S.MageArmor
-        elseif spec == "Frost" then
-            armorSpell = self:KnowsSpell(S.FrostArmor) and S.FrostArmor or 
-                        (self:KnowsSpell(S.IceArmor) and S.IceArmor or S.MageArmor)
-        else
-            armorSpell = S.MageArmor
-        end
-        
-        if self:IsUsableSpell(armorSpell) then
-            self:CastSpell(armorSpell, "player")
+    -- Maintain the preferred armor, including replacing a leveling armor
+    -- after a spec change. Molten Armor is the normal PvE choice; Mage Armor
+    -- is reserved for severe mana pressure.
+    local armorSpell = nil
+    if spec == "Frost" and MageManaPercent() < 25 and self:KnowsSpell(S.MageArmor) then
+        armorSpell = S.MageArmor
+    elseif self:KnowsSpell(S.MoltenArmor) then
+        armorSpell = S.MoltenArmor
+    elseif self:KnowsSpell(S.MageArmor) then
+        armorSpell = S.MageArmor
+    elseif self:KnowsSpell(S.FrostArmor) then
+        armorSpell = S.FrostArmor
+    elseif self:KnowsSpell(S.IceArmor) then
+        armorSpell = S.IceArmor
+    end
+
+    if armorSpell and not self:HasBuff("player", armorSpell) and MageSpellReady(self, armorSpell) then
+        if self:CastSpell(armorSpell, "player") then
             MageDebug("Applying " .. armorSpell)
             return true
         end
@@ -279,10 +472,11 @@ function AC:CheckMageBuffs(spec)
     local hasInt = self:HasBuff("player", S.ArcaneIntellect) or self:HasBuff("player", S.ArcaneBrilliance)
     if not hasInt then
         local intSpell = self:KnowsSpell(S.ArcaneBrilliance) and S.ArcaneBrilliance or S.ArcaneIntellect
-        if self:IsUsableSpell(intSpell) then
-            self:CastSpell(intSpell, "player")
-            MageDebug("Applying " .. intSpell)
-            return true
+        if MageSpellReady(self, intSpell) then
+            if self:CastSpell(intSpell, "player") then
+                MageDebug("Applying " .. intSpell)
+                return true
+            end
         end
     end
     
@@ -297,28 +491,19 @@ function AC:CheckMageGroupBuffs()
     if not self:Throttle("MageGroupBuffCheck", 15) then return false end
     if UnitAffectingCombat("player") or IsMounted() then return false end
     
-    local unitsToBuff = {"player"}
-    if GetNumPartyMembers() > 0 then
-        for i = 1, GetNumPartyMembers() do 
-            table.insert(unitsToBuff, "party"..i) 
-        end
-    elseif GetNumRaidMembers() > 0 then
-        for i = 1, GetNumRaidMembers() do 
-            table.insert(unitsToBuff, "raid"..i) 
-        end
-    end
-    
-    for _, unit in ipairs(unitsToBuff) do
+    for _, unit in ipairs(MageGroupUnits()) do
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
             local hasInt = self:HasBuff(unit, S.ArcaneIntellect) or 
                           self:HasBuff(unit, S.ArcaneBrilliance)
-            if not hasInt and CheckInteractDistance(unit, 4) then
+            local inRange = unit == "player" or CheckInteractDistance(unit, 4)
+            if not hasInt and inRange then
                 local intSpell = self:KnowsSpell(S.ArcaneBrilliance) and 
                                 S.ArcaneBrilliance or S.ArcaneIntellect
-                if self:IsUsableSpell(intSpell) then
-                    self:CastSpell(intSpell, unit)
-                    MageDebug("GROUP BUFF: " .. intSpell .. " on " .. (UnitName(unit) or unit))
-                    return true
+                if MageSpellReady(self, intSpell) then
+                    if self:CastSpell(intSpell, unit) then
+                        MageDebug("GROUP BUFF: " .. intSpell .. " on " .. (UnitName(unit) or unit))
+                        return true
+                    end
                 end
             end
         end
@@ -332,76 +517,70 @@ end
 
 function AC:UseMageRacials(offensive, defensive)
     if not offensive and not defensive then return false end
-    
-    if not self:Throttle("MageRacials", 2) then return false end
-    
+
     local _, race = UnitRace("player")
-    race = string.upper(race)
+    race = string.upper(race or "")
     local health = self:GetPlayerHealthPercent()
-    local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
+    local manaPercent = MageManaPercent()
     local inCombat = UnitAffectingCombat("player")
-    
-    -- Offensive racials
-    if offensive and inCombat then
-        if race == "ORC" and self:IsUsableSpell(S.BloodFury) then
-            self:CastSpell(S.BloodFury, "player")
-            MageDebug("Racial: Blood Fury")
-            return true
-        end
-        if race == "TROLL" and self:IsUsableSpell(S.Berserking) then
-            self:CastSpell(S.Berserking, "player")
-            MageDebug("Racial: Berserking")
-            return true
-        end
-    end
-    
-    -- Defensive racials
-    if defensive or health < 50 then
-        if race == "BLOODELF" and self:IsUsableSpell(S.ArcaneTorrent) then
-            if manaPercent < 80 then -- Mana restore
-                self:CastSpell(S.ArcaneTorrent, "player")
-                MageDebug("Racial: Arcane Torrent")
+
+    local function CastRacial(spellName, message)
+        if MageSpellReady(self, spellName) and self:ActionThrottle("MageRacial_" .. spellName, 0.25) then
+            if self:CastSpell(spellName, "player") then
+                MageDebug(message)
                 return true
             end
         end
-        if race == "UNDEAD" and self:IsUsableSpell(S.WillOfTheForsaken) then
-            self:CastSpell(S.WillOfTheForsaken, "player")
-            MageDebug("Racial: Will of the Forsaken")
+        return false
+    end
+
+    -- Offensive racials
+    if offensive and inCombat then
+        if race == "ORC" and CastRacial(S.BloodFury, "Racial: Blood Fury") then
             return true
         end
-        if race == "DWARF" and self:IsUsableSpell(S.Stoneform) then
-            self:CastSpell(S.Stoneform, "player")
-            MageDebug("Racial: Stoneform")
-            return true
-        end
-        if race == "DRAENEI" and health < 70 and self:IsUsableSpell(S.GiftOfTheNaaru) then
-            self:CastSpell(S.GiftOfTheNaaru, "player")
-            MageDebug("Racial: Gift of the Naaru")
-            return true
-        end
-        if race == "GNOME" and self:IsUsableSpell(S.EscapeArtist) then
-            self:CastSpell(S.EscapeArtist, "player")
-            MageDebug("Racial: Escape Artist")
-            return true
-        end
-        if race == "NIGHTELF" and self:IsUsableSpell(S.Shadowmeld) then
-            self:CastSpell(S.Shadowmeld, "player")
-            MageDebug("Racial: Shadowmeld")
-            return true
-        end
-        if race == "HUMAN" and self:IsUsableSpell(S.EveryManForHimself) then
-            self:CastSpell(S.EveryManForHimself, "player")
-            MageDebug("Racial: Every Man for Himself")
-            return true
-        end
-        if race == "TAUREN" and self:GetEnemyCount() >= 2 and CheckInteractDistance("target", 3) and 
-           self:IsUsableSpell(S.WarStomp) then
-            self:CastSpell(S.WarStomp, "player")
-            MageDebug("Racial: War Stomp")
+        if race == "TROLL" and CastRacial(S.Berserking, "Racial: Berserking") then
             return true
         end
     end
-    
+
+    if not defensive then return false end
+
+    local crowdControlled = MageHasDebuffKeyword("player", {
+        "fear", "horror", "charm", "polymorph", "stun", "silence",
+        "root", "entangling", "frost nova", "hamstring", "chains of ice",
+        "crippling poison", "wing clip",
+    })
+    local harmfulDebuff = MageHasDebuffKeyword("player", {
+        "bleed", "poison", "disease",
+    })
+
+    -- Defensive racials
+    if race == "BLOODELF" and (manaPercent < 50 or (UnitExists("target") and CheckInteractDistance("target", 3) and UnitCastingInfo("target"))) then
+        if CastRacial(S.ArcaneTorrent, "Racial: Arcane Torrent") then return true end
+    end
+    if race == "UNDEAD" and crowdControlled then
+        if CastRacial(S.WillOfTheForsaken, "Racial: Will of the Forsaken") then return true end
+    end
+    if race == "DWARF" and (harmfulDebuff or health < 25) then
+        if CastRacial(S.Stoneform, "Racial: Stoneform") then return true end
+    end
+    if race == "DRAENEI" and health < 45 then
+        if CastRacial(S.GiftOfTheNaaru, "Racial: Gift of the Naaru") then return true end
+    end
+    if race == "GNOME" and crowdControlled then
+        if CastRacial(S.EscapeArtist, "Racial: Escape Artist") then return true end
+    end
+    if race == "NIGHTELF" and health < 25 and UnitExists("targettarget") and UnitIsUnit("targettarget", "player") then
+        if CastRacial(S.Shadowmeld, "Racial: Shadowmeld") then return true end
+    end
+    if race == "HUMAN" and crowdControlled then
+        if CastRacial(S.EveryManForHimself, "Racial: Every Man for Himself") then return true end
+    end
+    if race == "TAUREN" and health < 30 and self:GetEnemyCount() >= 2 and CheckInteractDistance("target", 3) then
+        if CastRacial(S.WarStomp, "Racial: War Stomp") then return true end
+    end
+
     return false
 end
 
@@ -413,8 +592,9 @@ function AC:ManageMageConjures()
     -- Only check when out of combat
     if UnitAffectingCombat("player") then return false end
     
-    -- Throttle conjure checks
-    if not self:Throttle("ConjureCheck", 30) then return false end
+    -- Throttle conjure checks, but do not use the throttle as a substitute
+    -- for spell readiness. A failed cast should be retried promptly.
+    if not self:Throttle("ConjureCheck", 5) then return false end
     
     -- Mana gems (most important)
     local hasManaGem = false
@@ -425,10 +605,39 @@ function AC:ManageMageConjures()
         end
     end
     
-    if not hasManaGem and self:IsUsableSpell(S.ConjureManaGem) then
-        self:CastSpell(S.ConjureManaGem, "player")
-        MageDebug("Conjuring Mana Gem")
-        return true
+    if not hasManaGem and MageSpellReady(self, S.ConjureManaGem) then
+        if self:CastSpell(S.ConjureManaGem, "player") then
+            MageDebug("Conjuring Mana Gem")
+            return true
+        end
+    end
+
+    local hasFood = false
+    for _, food in ipairs(ConjuredFood) do
+        if GetItemCount(food) > 0 then
+            hasFood = true
+            break
+        end
+    end
+    if not hasFood and MageSpellReady(self, S.ConjureFood) then
+        if self:CastSpell(S.ConjureFood, "player") then
+            MageDebug("Conjuring food")
+            return true
+        end
+    end
+
+    local hasWater = false
+    for _, water in ipairs(ConjuredWater) do
+        if GetItemCount(water) > 0 then
+            hasWater = true
+            break
+        end
+    end
+    if not hasWater and MageSpellReady(self, S.ConjureWater) then
+        if self:CastSpell(S.ConjureWater, "player") then
+            MageDebug("Conjuring water")
+            return true
+        end
     end
     
     return false
@@ -447,22 +656,38 @@ function AC:ManageWaterElemental()
     -- Don't summon if mounted
     if IsMounted() then return false end
     
-    -- Summon if we don't have one and know the spell
-    if not UnitExists("pet") and self:KnowsSpell(S.SummonWaterElemental) then
-        if self:Throttle("SummonWaterElemental", 10) then
-            self:CastSpell(S.SummonWaterElemental, "player")
+    -- Summon if the elemental is missing or dead. This also supports both
+    -- the normal timed elemental and Glyph of Eternal Water.
+    if (not UnitExists("pet") or UnitIsDead("pet")) and MageSpellReady(self, S.SummonWaterElemental) then
+        if self:ActionThrottle("SummonWaterElemental", 0.25) and self:CastSpell(S.SummonWaterElemental, "player") then
             MageDebug("Summoning Water Elemental")
             return true
         end
     end
-    
-    -- Use pet abilities in combat
-    if UnitExists("pet") and UnitAffectingCombat("player") and UnitExists("target") then
-        -- Throttle pet abilities
-        if self:Throttle("PetFreeze", 25) then
-            -- Try to use Freeze ability (usually pet action slot 1)
-            if GetPetActionCooldown(1) == 0 then
-                CastPetAction(1)
+
+    if UnitExists("pet") and not UnitIsDead("pet") and UnitAffectingCombat("player") and UnitExists("target") then
+        -- PetAttack is required after target changes; otherwise the elemental
+        -- can remain idle or continue attacking the previous target.
+        if PetAttack and (not UnitExists("pettarget") or not UnitIsUnit("pettarget", "target")) then
+            PetAttack()
+            MageDebug("Water Elemental attacking current target")
+            return true
+        end
+
+        -- Find Freeze by action name instead of assuming a fixed pet-bar slot.
+        -- Glyph of Eternal Water removes Freeze, so no action is taken when it
+        -- is not present and the elemental's Waterbolt autocast is preserved.
+        local freezeAction = MageFindPetAction(S.Freeze)
+        local targetFrozen = self:HasDebuff("target", "Frost Nova") or
+                             self:HasDebuff("target", S.Freeze) or
+                             self:HasDebuff("target", "Frostbite")
+        if freezeAction and not targetFrozen and MagePetActionReady(freezeAction) and
+           self:ActionThrottle("PetFreeze", 0.25) then
+            CastPetAction(freezeAction)
+            local afterStart, afterDuration = GetPetActionCooldown(freezeAction)
+            local started = afterStart and afterDuration and afterDuration > 0 and
+                            (afterStart + afterDuration - GetTime()) > 0.05
+            if started or UnitCastingInfo("pet") or UnitChannelInfo("pet") then
                 MageDebug("Water Elemental using Freeze")
                 return true
             end
@@ -488,24 +713,89 @@ function AC:TryMageInterrupt()
     -- Priority interrupt list
     local highPrioritySpells = {
         "Heal", "Greater Heal", "Flash Heal", "Healing Touch", "Chain Heal",
-        "Polymorph", "Fear", "Mind Control", "Banish",
-        "Fireball", "Frostbolt", "Lightning Bolt", "Shadow Bolt"
+        "Regrowth", "Rejuvenation", "Prayer of Healing", "Polymorph", "Fear",
+        "Mind Control", "Banish", "Cyclone", "Hex", "Chaos Bolt",
+        "Fireball", "Frostbolt", "Lightning Bolt", "Shadow Bolt", "Mind Blast",
     }
     
     local shouldInterrupt = false
+    local lowerSpellName = string.lower(spellName)
     for _, priority in ipairs(highPrioritySpells) do
-        if spellName:find(priority) then
+        if lowerSpellName:find(string.lower(priority), 1, true) then
             shouldInterrupt = true
             break
         end
     end
-    
-    if shouldInterrupt and self:IsUsableSpell(S.Counterspell) then
-        self:CastSpell(S.Counterspell, "target")
-        MageDebug("Interrupted " .. spellName)
-        return true
+
+    if self.ShouldInterruptSpell and self:ShouldInterruptSpell(spellName) then
+        shouldInterrupt = true
+    end
+
+    local inRange = not IsSpellInRange or IsSpellInRange(S.Counterspell, "target")
+    if shouldInterrupt and inRange ~= 0 and MageSpellReady(self, S.Counterspell) then
+        if self:CastSpell(S.Counterspell, "target") then
+            MageDebug("Interrupted " .. spellName)
+            return true
+        end
     end
     
+    return false
+end
+
+function AC:TryMageUtility()
+    -- Remove curses from the mage first, then from nearby group members.
+    if MageSpellReady(self, S.RemoveCurse) then
+        local hasCurse = false
+        for index = 1, 40 do
+            local name, _, _, _, debuffType = UnitDebuff("player", index)
+            if not name then break end
+            if debuffType == "Curse" then
+                hasCurse = true
+                break
+            end
+        end
+        if hasCurse and self:CastSpell(S.RemoveCurse, "player") then
+            MageDebug("Utility: Remove Curse from player")
+            return true
+        end
+
+        for _, unit in ipairs(MageGroupUnits()) do
+            if unit ~= "player" and UnitExists(unit) and not UnitIsDeadOrGhost(unit) and
+               UnitCanAssist("player", unit) and CheckInteractDistance(unit, 4) then
+                local cursed = false
+                for index = 1, 40 do
+                    local name, _, _, _, debuffType = UnitDebuff(unit, index)
+                    if not name then break end
+                    if debuffType == "Curse" then
+                        cursed = true
+                        break
+                    end
+                end
+                if cursed and self:CastSpell(S.RemoveCurse, unit) then
+                    MageDebug("Utility: Remove Curse from " .. (UnitName(unit) or unit))
+                    return true
+                end
+            end
+        end
+    end
+
+    -- Spellsteal only known high-value buffs. Stealing every buff is a mana
+    -- trap and can remove harmless effects that the group expects.
+    local spellstealRange = not IsSpellInRange or IsSpellInRange(S.Spellsteal, "target")
+    if UnitExists("target") and UnitCanAttack("player", "target") and spellstealRange ~= 0 and
+       MageSpellReady(self, S.Spellsteal) then
+        for index = 1, 40 do
+            local name = UnitBuff("target", index)
+            if not name then break end
+            if MageSpellstealBuffs[name] then
+                if self:CastSpell(S.Spellsteal, "target") then
+                    MageDebug("Utility: Spellsteal " .. name)
+                    return true
+                end
+            end
+        end
+    end
+
     return false
 end
 
@@ -517,10 +807,9 @@ end
 -- =============================================
 
 function AC:ArcaneMageRotation()
-    local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
+    local manaPercent = MageManaPercent()
     local procs = self:CheckMageProcs()
     local enemies = self:GetEnemyCount()
-    local complexity = self:GetRotationComplexity()
     
     -- Interrupt priority
     if self:TryMageInterrupt() then return true end
@@ -530,152 +819,116 @@ function AC:ArcaneMageRotation()
     
     -- AoE rotation
     if enemies >= 3 then
-        -- Use procs for AoE
-        if procs.missileBarrage and self:IsUsableSpell(S.ArcaneMissiles) then
-            self:CastSpell(S.ArcaneMissiles, "target")
-            MageDebug("Arcane AoE: Missile Barrage proc")
-            return true
-        end
-        
-        -- Get some AB stacks for AE
-        if procs.arcaneBlastStacks < 2 and self:IsUsableSpell(S.ArcaneBlast) then
-            self:CastSpell(S.ArcaneBlast, "target")
-            MageDebug("Arcane AoE: Building AB stacks")
-            return true
-        end
-        
         -- Arcane Explosion for AoE
-        if CheckInteractDistance("target", 3) and self:IsUsableSpell(S.ArcaneExplosion) then
-            self:CastSpell(S.ArcaneExplosion, "player")
-            MageDebug("Arcane AoE: Arcane Explosion")
-            return true
-        end
-        
-        -- Flamestrike if available
-        if self:KnowsSpell(S.Flamestrike) and self:Throttle("FlamestrikeArcane", 8) then
-            if not self:IsChanneling() and not self:IsPlayerMoving() then
-                MageDebug("Arcane AoE: Flamestrike")
-                CastSpellByName(S.Flamestrike)
-                CameraOrSelectOrMoveStart()
-                CameraOrSelectOrMoveStop()
+        if CheckInteractDistance("target", 3) and MageSpellReady(self, S.ArcaneExplosion) then
+            if self:CastSpell(S.ArcaneExplosion, "player") then
+                MageDebug("Arcane AoE: Arcane Explosion")
                 return true
             end
         end
-    end
-    
-    -- Cooldown usage for tough targets
-    local targetClassification = UnitClassification("target")
-    local isBoss = targetClassification == "worldboss" or targetClassification == "elite" or targetClassification == "rareelite"
-    local targetHP = self:GetTargetHealthPercent("target")
-    
-    if isBoss and targetHP > 50 then
-        -- Arcane Power (main burst cooldown)
-        if self:Throttle("ArcanePower", 120) and self:IsUsableSpell(S.ArcanePower) then
-            self:CastSpell(S.ArcanePower, "player")
-            MageDebug("Arcane: Arcane Power burst")
-            
-            -- Use other burst cooldowns with AP
-            if self:IsUsableSpell(S.PresenceOfMind) then
-                self:CastSpell(S.PresenceOfMind, "player")
-                MageDebug("Arcane: Presence of Mind")
+
+        -- Do not spend a single-target Missile Barrage proc as an AoE spell.
+        -- At range, build a small Arcane Blast bonus before the ground AoE.
+        if procs.arcaneBlastStacks < 2 and MageSpellReady(self, S.ArcaneBlast) then
+            if self:CastSpell(S.ArcaneBlast, "target") then
+                MageDebug("Arcane AoE: building Arcane Blast stacks")
+                return true
             end
-            
-            if self:IsUsableSpell(S.IcyVeins) then
-                self:CastSpell(S.IcyVeins, "player") 
-                MageDebug("Arcane: Icy Veins")
-            end
-            
-            -- Use trinkets
-            if self:UseTrinkets() then
-                MageDebug("Used trinkets during Arcane Power")
-            end
-            
-            -- Use offensive racials
-            if self:UseMageRacials(true, false) then
-                MageDebug("Used offensive racial during burst")
-            end
-            
-            return true
         end
         
-        -- Mirror Image for threat management
-        if self:Throttle("MirrorImageBurst", 180) and self:IsUsableSpell(S.MirrorImage) then
-            self:CastSpell(S.MirrorImage, "player")
+        -- Flamestrike if available
+        if MageSpellReady(self, S.Flamestrike) and not self:IsChanneling() and
+           not self:IsPlayerMoving() and self:Throttle("FlamestrikeArcane", 8) then
+            MageDebug("Arcane AoE: Flamestrike")
+            if not self:CastSpell(S.Flamestrike) then return false end
+            CameraOrSelectOrMoveStart()
+            CameraOrSelectOrMoveStop()
+            return true
+        end
+    end
+    
+    -- Cooldowns are restricted to elite/boss targets, but are no longer
+    -- blocked by target health or a second timer that can drift from the
+    -- actual spell cooldown.
+    if self:ShouldUseMageMajorCooldowns() then
+        if MageUseCooldown(self, S.ArcanePower, "player", "MageArcanePower") then
+            MageDebug("Arcane: Arcane Power burst")
+            return true
+        end
+        if MageUseCooldown(self, S.IcyVeins, "player", "MageArcaneIcyVeins") then
+            MageDebug("Arcane: Icy Veins")
+            return true
+        end
+        if self:IsMageBossTarget() and self:UseTrinkets() then
+            MageDebug("Arcane: offensive trinket")
+            return true
+        end
+        if self:IsMageBossTarget() and self:UseOffensivePotion(true) then
+            MageDebug("Arcane: offensive potion")
+            return true
+        end
+        if self:UseMageRacials(true, false) then
+            MageDebug("Arcane: offensive racial")
+            return true
+        end
+        if MageUseCooldown(self, S.PresenceOfMind, "player", "MageArcanePresenceOfMind") then
+            MageDebug("Arcane: Presence of Mind")
+            return true
+        end
+        if MageUseCooldown(self, S.MirrorImage, "player", "MageArcaneMirrorImage") then
             MageDebug("Arcane: Mirror Image")
             return true
         end
     end
-    
-    -- ENHANCED SINGLE TARGET ROTATION WITH COMPLEXITY AWARENESS
-    
-    -- Priority 1: Enhanced Missile Barrage proc management
-    if procs.missileBarrage and self:IsUsableSpell(S.ArcaneMissiles) then
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            -- Advanced: Check proc duration and mana efficiency
-            local procTime = self:GetBuffTimeRemaining("player", S.MissileBarrage)
-            if procTime > 0.5 or manaPercent < 30 then -- Don't waste procs or use for mana efficiency
-                self:CastSpell(S.ArcaneMissiles, "target")
-                MageDebug("Arcane: Missile Barrage proc (optimal timing - " .. string.format("%.1f", procTime) .. "s left)")
-                return true
-            end
-        else
-            -- Simple: Always use immediately
-            self:CastSpell(S.ArcaneMissiles, "target")
-            MageDebug("Arcane: Missile Barrage proc")
+
+    -- Do not spend Missile Barrage before the Arcane Blast multiplier is
+    -- established unless the proc is about to expire.
+    local procTime = self:BuffTimeRemaining("player", S.MissileBarrage)
+    if procs.missileBarrage and procs.arcaneBlastStacks >= 4 and
+       MageSpellReady(self, S.ArcaneMissiles) then
+        if self:CastSpell(S.ArcaneMissiles, "target") then
+            MageDebug("Arcane: Missile Barrage after four Arcane Blasts")
+            return true
+        end
+    elseif procs.missileBarrage and procTime > 0 and procTime < 0.8 and
+           MageSpellReady(self, S.ArcaneMissiles) then
+        if self:CastSpell(S.ArcaneMissiles, "target") then
+            MageDebug("Arcane: spending expiring Missile Barrage")
             return true
         end
     end
-    
-    -- Enhanced Arcane Blast stack management
-    local targetManaThreshold = complexity == "ADVANCED" and 40 or 30
-    local optimalStackCount = complexity == "ADVANCED" and 4 or 3
-    
-    if manaPercent > targetManaThreshold or procs.arcaneBlastStacks < 2 then
-        -- Advanced: Optimize stack building for mana efficiency
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            local shouldBuildStacks = procs.arcaneBlastStacks < optimalStackCount and 
-                                    (manaPercent > targetManaThreshold or procs.arcaneBlastStacks == 0)
-            if shouldBuildStacks and self:IsUsableSpell(S.ArcaneBlast) then
-                self:CastSpell(S.ArcaneBlast, "target")
-                MageDebug("Arcane: Building AB stacks (" .. procs.arcaneBlastStacks .. "/" .. optimalStackCount .. ") - mana: " .. math.floor(manaPercent) .. "%")
-                return true
-            end
-        else
-            -- Simple: Basic stack building
-            if procs.arcaneBlastStacks < 3 and self:IsUsableSpell(S.ArcaneBlast) then
-                self:CastSpell(S.ArcaneBlast, "target")
-                MageDebug("Arcane: Building AB stacks (" .. procs.arcaneBlastStacks .. "/3)")
-                return true
-            end
-        end
-        
-        -- Spend stacks with Arcane Missiles
-        if procs.arcaneBlastStacks >= 3 and manaPercent > 20 and self:IsUsableSpell(S.ArcaneMissiles) then
-            self:CastSpell(S.ArcaneMissiles, "target")
-            MageDebug("Arcane: Spending AB stacks with AM")
-            return true
-        end
-    else
-        -- Low mana - use Arcane Barrage to conserve mana
-        if procs.arcaneBlastStacks >= 1 and self:IsUsableSpell(S.ArcaneBarrage) then
-            self:CastSpell(S.ArcaneBarrage, "target")
-            MageDebug("Arcane: Mana conservation with AB")
-            return true
-        end
-        
-        -- Very low mana - build a few stacks and barrage
-        if self:IsUsableSpell(S.ArcaneBlast) then
-            self:CastSpell(S.ArcaneBlast, "target")
-            MageDebug("Arcane: Low mana AB building")
+
+    -- Arcane Barrage is the correct movement/low-mana fallback and clears
+    -- the expensive Arcane Blast stacks.
+    if (self:IsPlayerMoving() or manaPercent < 35) and procs.arcaneBlastStacks > 0 and
+       MageSpellReady(self, S.ArcaneBarrage) then
+        if self:CastSpell(S.ArcaneBarrage, "target") then
+            MageDebug("Arcane: Arcane Barrage fallback")
             return true
         end
     end
-    
-    -- Emergency wand
-    if manaPercent < 5 and self:IsUsableSpell(S.Shoot) then
-        self:CastSpell(S.Shoot, "target")
-        MageDebug("Arcane: Emergency wanding")
-        return true
+
+    if procs.arcaneBlastStacks < 4 and manaPercent > 35 and MageSpellReady(self, S.ArcaneBlast) then
+        if self:CastSpell(S.ArcaneBlast, "target") then
+            MageDebug("Arcane: building Arcane Blast stacks (" .. procs.arcaneBlastStacks .. "/4)")
+            return true
+        end
+    end
+
+    -- If the cycle is complete, Arcane Missiles is the normal finisher even
+    -- without Missile Barrage. It is only used once the four-stack bonus is up.
+    if procs.arcaneBlastStacks >= 4 and manaPercent > 20 and MageSpellReady(self, S.ArcaneMissiles) then
+        if self:CastSpell(S.ArcaneMissiles, "target") then
+            MageDebug("Arcane: Arcane Missiles finisher")
+            return true
+        end
+    end
+
+    if manaPercent < 5 and MageSpellReady(self, S.Shoot) then
+        if self:CastSpell(S.Shoot, "target") then
+            MageDebug("Arcane: emergency wanding")
+            return true
+        end
     end
     
     return false
@@ -686,10 +939,9 @@ end
 -- =============================================
 
 function AC:FireMageRotation()
-    local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
+    local manaPercent = MageManaPercent()
     local procs = self:CheckMageProcs()
     local enemies = self:GetEnemyCount()
-    local complexity = self:GetRotationComplexity()
     
     -- Interrupt priority
     if self:TryMageInterrupt() then return true end
@@ -700,10 +952,10 @@ function AC:FireMageRotation()
     -- AoE rotation
     if enemies >= 3 then
         -- Use Firestarter proc for instant Flamestrike
-        if procs.firestarter and self:IsUsableSpell(S.Flamestrike) then
+        if procs.firestarter and MageSpellReady(self, S.Flamestrike) then
             if not self:IsChanneling() and not self:IsPlayerMoving() then
                 MageDebug("Fire AoE: Firestarter Flamestrike")
-                CastSpellByName(S.Flamestrike)
+                if not self:CastSpell(S.Flamestrike) then return false end
                 CameraOrSelectOrMoveStart()
                 CameraOrSelectOrMoveStop()
                 return true
@@ -711,10 +963,11 @@ function AC:FireMageRotation()
         end
         
         -- Apply Living Bomb to main target
-        if self:KnowsSpell(S.LivingBomb) and not self:HasDebuff("target", S.LivingBomb) and self:IsUsableSpell(S.LivingBomb) then
-            self:CastSpell(S.LivingBomb, "target")
-            MageDebug("Fire AoE: Living Bomb on target")
-            return true
+        if self:KnowsSpell(S.LivingBomb) and not self:HasDebuff("target", S.LivingBomb) and MageSpellReady(self, S.LivingBomb) then
+            if self:CastSpell(S.LivingBomb, "target") then
+                MageDebug("Fire AoE: Living Bomb on target")
+                return true
+            end
         end
         
         -- Apply Living Bomb to additional targets (spread for explosions)
@@ -733,139 +986,128 @@ function AC:FireMageRotation()
         end
         
         -- Blast Wave for close AoE
-        if CheckInteractDistance("target", 3) and self:IsUsableSpell(S.BlastWave) then
-            self:CastSpell(S.BlastWave, "player")
-            MageDebug("Fire AoE: Blast Wave")
-            return true
+        if CheckInteractDistance("target", 3) and MageSpellReady(self, S.BlastWave) then
+            if self:CastSpell(S.BlastWave, "player") then
+                MageDebug("Fire AoE: Blast Wave")
+                return true
+            end
         end
         
         -- Dragon's Breath for cone AoE
-        if CheckInteractDistance("target", 3) and self:IsUsableSpell(S.DragonsBreath) then
-            self:CastSpell(S.DragonsBreath, "player")
-            MageDebug("Fire AoE: Dragon's Breath")
-            return true
+        if CheckInteractDistance("target", 3) and MageSpellReady(self, S.DragonsBreath) then
+            if self:CastSpell(S.DragonsBreath, "player") then
+                MageDebug("Fire AoE: Dragon's Breath")
+                return true
+            end
         end
         
         -- Flamestrike
-        if self:IsUsableSpell(S.Flamestrike) and self:Throttle("FlamestrikeRegular", 8) then
-            if not self:IsChanneling() and not self:IsPlayerMoving() then
-                MageDebug("Fire AoE: Flamestrike")
-                CastSpellByName(S.Flamestrike)
-                CameraOrSelectOrMoveStart()
-                CameraOrSelectOrMoveStop()
-                return true
-            end
+        if MageSpellReady(self, S.Flamestrike) and not self:IsChanneling() and
+           not self:IsPlayerMoving() and self:Throttle("FlamestrikeRegular", 8) then
+            MageDebug("Fire AoE: Flamestrike")
+            if not self:CastSpell(S.Flamestrike) then return false end
+            CameraOrSelectOrMoveStart()
+            CameraOrSelectOrMoveStop()
+            return true
         end
     end
     
-    -- Cooldown usage for tough targets
-    local targetClassification = UnitClassification("target")
-    local isBoss = targetClassification == "worldboss" or targetClassification == "elite" or targetClassification == "rareelite"
+    -- Cooldown usage for elite and boss targets. Combustion is a player buff,
+    -- and should be used only when both Living Bomb and Ignite are present.
     local targetHP = self:GetTargetHealthPercent("target")
-    
-    if isBoss and targetHP > 50 then
-        -- Combustion (requires DoTs on target)
-        local hasDoTs = self:HasDebuff("target", S.LivingBomb) or 
-                       self:HasDebuff("target", "Ignite")
-        
-        if hasDoTs and self:Throttle("Combustion", 120) and self:IsUsableSpell(S.Combustion) then
-            self:CastSpell(S.Combustion, "target")
+    if self:ShouldUseMageMajorCooldowns() then
+        local hasLivingBomb = self:HasDebuff("target", S.LivingBomb)
+        local hasIgnite = self:HasDebuff("target", "Ignite")
+        local livingBombTime = self:DebuffTimeRemaining("target", S.LivingBomb)
+
+        if hasLivingBomb and hasIgnite and livingBombTime > 1 and
+           MageUseCooldown(self, S.Combustion, "player", "MageFireCombustion") then
             MageDebug("Fire: Combustion burst")
             return true
         end
-        
-        -- Icy Veins for haste
-        if self:Throttle("IcyVeinsFire", 120) and self:IsUsableSpell(S.IcyVeins) then
-            self:CastSpell(S.IcyVeins, "player")
+
+        if MageUseCooldown(self, S.IcyVeins, "player", "MageFireIcyVeins") then
             MageDebug("Fire: Icy Veins")
             return true
         end
-        
-        -- Mirror Image for threat management
-        if self:Throttle("MirrorImageFire", 180) and self:IsUsableSpell(S.MirrorImage) then
-            self:CastSpell(S.MirrorImage, "player")
+
+        if self:IsMageBossTarget() and self:UseTrinkets() then
+            MageDebug("Fire: offensive trinket")
+            return true
+        end
+
+        if self:IsMageBossTarget() and self:UseOffensivePotion(true) then
+            MageDebug("Fire: offensive potion")
+            return true
+        end
+
+        if self:UseMageRacials(true, false) then
+            MageDebug("Fire: offensive racial")
+            return true
+        end
+
+        if MageUseCooldown(self, S.MirrorImage, "player", "MageFireMirrorImage") then
             MageDebug("Fire: Mirror Image")
             return true
         end
-        
-        -- Use trinkets
-        if self:UseTrinkets() then
-            MageDebug("Used trinkets during Combustion")
-        end
-        
-        -- Use offensive racials
-        if self:UseMageRacials(true, false) then
-            MageDebug("Used offensive racial during burst")
-        end
     end
-    
-    -- ENHANCED SINGLE TARGET ROTATION WITH COMPLEXITY AWARENESS
-    
-    -- Priority 1: Enhanced Living Bomb management with pandemic timing
-    if self:KnowsSpell(S.LivingBomb) then
-        local lbTime = self:DebuffTimeRemaining("target", S.LivingBomb)
-        local shouldRefreshLB = false
-        
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            -- Pandemic timing: refresh at 30% of 12s base duration = ~4s
-            shouldRefreshLB = not self:HasDebuff("target", S.LivingBomb) or lbTime < 4
-        else
-            -- Simple timing for basic rotations
-            shouldRefreshLB = not self:HasDebuff("target", S.LivingBomb) or lbTime < 3
-        end
-        
-        if shouldRefreshLB then
-            self:CastSpell(S.LivingBomb, "target")
-            MageDebug("Fire: Living Bomb (pandemic-aware)")
-            return true
-        end
-    end
-    
-    -- Priority 2: Enhanced Hot Streak proc management
-    if procs.hotStreak and self:IsUsableSpell(S.Pyroblast) then
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            -- Advanced: Check proc duration to avoid waste
-            local procTime = self:GetBuffTimeRemaining("player", S.HotStreak)
-            if procTime > 0.5 then -- Don't waste proc in last 0.5 seconds
-                self:CastSpell(S.Pyroblast, "target")
-                MageDebug("Fire: Hot Streak Pyroblast (optimal timing - " .. string.format("%.1f", procTime) .. "s left)")
-                return true
-            end
-        else
-            -- Simple: Always use immediately
-            self:CastSpell(S.Pyroblast, "target")
+
+    -- Hot Streak has priority over a Living Bomb refresh.
+    if procs.hotStreak and MageSpellReady(self, S.Pyroblast) then
+        if self:CastSpell(S.Pyroblast, "target") then
             MageDebug("Fire: Hot Streak Pyroblast")
             return true
         end
     end
-    
-    -- Apply/maintain Improved Scorch debuff
-    if self:KnowsSpell(S.Scorch) and (not self:HasDebuff("target", S.ImprovedScorch) or 
-       self:DebuffTimeRemaining("target", S.ImprovedScorch) < 5) then
-        self:CastSpell(S.Scorch, "target")
-        MageDebug("Fire: Improved Scorch application/refresh")
-        return true
+
+    -- Living Bomb should be allowed to explode. Refreshing several seconds
+    -- early loses the explosion and is a direct damage loss.
+    if self:KnowsSpell(S.LivingBomb) then
+        local lbTime = self:DebuffTimeRemaining("target", S.LivingBomb)
+        if (not self:HasDebuff("target", S.LivingBomb) or lbTime <= 0.5) and MageSpellReady(self, S.LivingBomb) then
+            if self:CastSpell(S.LivingBomb, "target") then
+                MageDebug("Fire: Living Bomb")
+                return true
+            end
+        end
     end
-    
-    -- Main nuke - Fireball
-    if self:IsUsableSpell(S.Fireball) and not UnitCastingInfo("player") then
-        self:CastSpell(S.Fireball, "target")
-        MageDebug("Fire: Fireball")
-        return true
+
+    -- Only maintain Improved Scorch when this mage actually has the talent,
+    -- and build the debuff to five stacks instead of checking presence only.
+    if self:HasMageTalentByName("Improved Scorch") and MageSpellReady(self, S.Scorch) then
+        local hasScorch, scorchStacks = self:HasDebuff("target", S.ImprovedScorch)
+        if not hasScorch or (scorchStacks or 0) < 5 or self:DebuffTimeRemaining("target", S.ImprovedScorch) < 5 then
+            if self:CastSpell(S.Scorch, "target") then
+                MageDebug("Fire: building/refreshing Improved Scorch")
+                return true
+            end
+        end
     end
-    
-    -- Fire Blast as instant filler
-    if self:IsUsableSpell(S.FireBlast) then
-        self:CastSpell(S.FireBlast, "target")
-        MageDebug("Fire: Fire Blast")
-        return true
+
+    -- Main nuke: Fireball for TTW, Frostfire Bolt for Frostfire builds.
+    local fireNuke = self:GetMageFireNuke()
+    if MageSpellReady(self, fireNuke) and not UnitCastingInfo("player") and not self:IsPlayerMoving() then
+        if self:CastSpell(fireNuke, "target") then
+            MageDebug("Fire: " .. fireNuke)
+            return true
+        end
+    end
+
+    -- Fire Blast is primarily a movement/execute spell, not a stationary
+    -- filler that displaces a Fireball/Frostfire Bolt cast.
+    if (self:IsPlayerMoving() or targetHP < 35) and MageSpellReady(self, S.FireBlast) then
+        if self:CastSpell(S.FireBlast, "target") then
+            MageDebug("Fire: Fire Blast movement/execute")
+            return true
+        end
     end
     
     -- Emergency wand
-    if manaPercent < 5 and self:IsUsableSpell(S.Shoot) then
-        self:CastSpell(S.Shoot, "target")
-        MageDebug("Fire: Emergency wanding")
-        return true
+    if manaPercent < 5 and MageSpellReady(self, S.Shoot) then
+        if self:CastSpell(S.Shoot, "target") then
+            MageDebug("Fire: Emergency wanding")
+            return true
+        end
     end
     
     return false
@@ -876,10 +1118,9 @@ end
 -- =============================================
 
 function AC:FrostMageRotation()
-    local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
+    local manaPercent = MageManaPercent()
     local procs = self:CheckMageProcs()
     local enemies = self:GetEnemyCount()
-    local complexity = self:GetRotationComplexity()
     
     -- Water Elemental management
     if self:ManageWaterElemental() then return true end
@@ -893,155 +1134,137 @@ function AC:FrostMageRotation()
     -- AoE rotation
     if enemies >= 3 then
         -- Blizzard for sustained AoE
-        if self:KnowsSpell(S.Blizzard) and manaPercent > 30 and self:Throttle("BlizzardCast", 8) then
-            if not self:IsChanneling() and not self:IsPlayerMoving() then
-                MageDebug("Frost AoE: Blizzard")
-                CastSpellByName(S.Blizzard)
-                CameraOrSelectOrMoveStart()
-                CameraOrSelectOrMoveStop()
-                return true
-            end
+        if MageSpellReady(self, S.Blizzard) and manaPercent > 30 and
+           not self:IsChanneling() and not self:IsPlayerMoving() and
+           self:Throttle("BlizzardCast", 8) then
+            MageDebug("Frost AoE: Blizzard")
+            if not self:CastSpell(S.Blizzard) then return false end
+            CameraOrSelectOrMoveStart()
+            CameraOrSelectOrMoveStop()
+            return true
         end
         
         -- Cone of Cold for close AoE
-        if CheckInteractDistance("target", 3) and self:IsUsableSpell(S.ConeOfCold) then
-            self:CastSpell(S.ConeOfCold, "player")
-            MageDebug("Frost AoE: Cone of Cold")
-            return true
-        end
-        
-        -- Frost Nova for crowd control
-        if CheckInteractDistance("target", 3) and self:Throttle("FrostNovaAoE", 25) and self:IsUsableSpell(S.FrostNova) then
-            self:CastSpell(S.FrostNova, "player")
-            MageDebug("Frost AoE: Frost Nova")
-            return true
-        end
-        
-        -- Flamestrike if available
-        if self:KnowsSpell(S.Flamestrike) and self:Throttle("FlamestrikeFrost", 8) then
-            if not self:IsChanneling() and not self:IsPlayerMoving() then
-                MageDebug("Frost AoE: Flamestrike")
-                CastSpellByName(S.Flamestrike)
-                CameraOrSelectOrMoveStart()
-                CameraOrSelectOrMoveStop()
+        if CheckInteractDistance("target", 3) and MageSpellReady(self, S.ConeOfCold) then
+            if self:CastSpell(S.ConeOfCold, "player") then
+                MageDebug("Frost AoE: Cone of Cold")
                 return true
             end
         end
+        
+        -- Frost Nova for crowd control
+        if CheckInteractDistance("target", 3) and MageSpellReady(self, S.FrostNova) and self:Throttle("FrostNovaAoE", 25) then
+            if self:CastSpell(S.FrostNova, "player") then
+                MageDebug("Frost AoE: Frost Nova")
+                return true
+            end
+        end
+        
+        -- Flamestrike if available
+        if MageSpellReady(self, S.Flamestrike) and not self:IsChanneling() and
+           not self:IsPlayerMoving() and self:Throttle("FlamestrikeFrost", 8) then
+            MageDebug("Frost AoE: Flamestrike")
+            if not self:CastSpell(S.Flamestrike) then return false end
+            CameraOrSelectOrMoveStart()
+            CameraOrSelectOrMoveStop()
+            return true
+        end
     end
     
-    -- Cooldown usage for tough targets
-    local targetClassification = UnitClassification("target")
-    local isBoss = targetClassification == "worldboss" or targetClassification == "elite" or targetClassification == "rareelite"
-    local targetHP = self:GetTargetHealthPercent("target")
-    
-    if isBoss and targetHP > 50 then
-        -- Icy Veins (main burst cooldown)
-        if self:Throttle("IcyVeinsFrost", 120) and self:IsUsableSpell(S.IcyVeins) then
-            self:CastSpell(S.IcyVeins, "player")
+    -- Cooldown usage for elite and boss targets.
+    if self:ShouldUseMageMajorCooldowns() then
+        if MageUseCooldown(self, S.IcyVeins, "player", "MageFrostIcyVeins") then
+            self.MageLastIcyVeinsTime = GetTime()
             MageDebug("Frost: Icy Veins burst")
             return true
         end
-        
-        -- Cold Snap to reset cooldowns
-        local health = self:GetPlayerHealthPercent()
-        if (GetSpellCooldown(S.IcyVeins) > 60 or health < 40) and 
-           self:Throttle("ColdSnap", 480) and self:IsUsableSpell(S.ColdSnap) then
-            self:CastSpell(S.ColdSnap, "player")
+
+        -- Cold Snap should reset a genuinely spent Icy Veins, not fire
+        -- immediately after it or compare the raw cooldown start timestamp.
+        local timeSinceIcy = self.MageLastIcyVeinsTime and (GetTime() - self.MageLastIcyVeinsTime) or 0
+        if timeSinceIcy >= 90 and self:GetSpellCooldown(S.IcyVeins) > 30 and
+           MageUseCooldown(self, S.ColdSnap, "player", "MageFrostColdSnap") then
             MageDebug("Frost: Cold Snap reset")
             return true
         end
-        
-        -- Mirror Image for threat management
-        if self:Throttle("MirrorImageFrost", 180) and self:IsUsableSpell(S.MirrorImage) then
-            self:CastSpell(S.MirrorImage, "player")
+
+        if self:IsMageBossTarget() and self:UseTrinkets() then
+            MageDebug("Frost: offensive trinket")
+            return true
+        end
+        if self:IsMageBossTarget() and self:UseOffensivePotion(true) then
+            MageDebug("Frost: offensive potion")
+            return true
+        end
+        if self:UseMageRacials(true, false) then
+            MageDebug("Frost: offensive racial")
+            return true
+        end
+        if MageUseCooldown(self, S.MirrorImage, "player", "MageFrostMirrorImage") then
             MageDebug("Frost: Mirror Image")
             return true
         end
-        
-        -- Use trinkets
-        if self:UseTrinkets() then
-            MageDebug("Used trinkets during Icy Veins")
-        end
-        
-        -- Use offensive racials
-        if self:UseMageRacials(true, false) then
-            MageDebug("Used offensive racial during burst")
-        end
     end
-    
-    -- ENHANCED SINGLE TARGET ROTATION WITH COMPLEXITY AWARENESS
-    
-    -- Check if target is frozen
+
+    -- Check actual freezes plus Fingers of Frost, which makes the target
+    -- count as frozen for Deep Freeze even without a target debuff.
     local targetFrozen = self:HasDebuff("target", "Frost Nova") or 
                         self:HasDebuff("target", S.Freeze) or 
                         self:HasDebuff("target", "Frostbite") or
                         self:HasDebuff("target", "Deep Freeze")
-    
-    -- Priority 1: Deep Freeze on frozen targets (high priority nuke)
-    if targetFrozen and self:IsUsableSpell(S.DeepFreeze) then
-        self:CastSpell(S.DeepFreeze, "target")
-        MageDebug("Frost: Deep Freeze on frozen target")
-        return true
+
+    local fingersTreatAsFrozen = procs.fingersOfFrost and procs.fingersOfFrostStacks > 0
+    if (targetFrozen or fingersTreatAsFrozen) and MageSpellReady(self, S.DeepFreeze) then
+        if self:CastSpell(S.DeepFreeze, "target") then
+            MageDebug("Frost: Deep Freeze on frozen/Fingers of Frost target")
+            return true
+        end
     end
-    
-    -- Priority 2: Enhanced Brain Freeze proc management
+
+    -- Brain Freeze is an instant Frostfire Bolt in Frost PvE.
     if procs.brainFreeze then
         local brainFreezeSpell = self:KnowsSpell(S.FrostfireBolt) and S.FrostfireBolt or S.Fireball
-        if self:IsUsableSpell(brainFreezeSpell) then
-            if complexity == "ADVANCED" or complexity == "MODERATE" then
-                -- Advanced: Check proc duration to avoid waste
-                local procTime = self:GetBuffTimeRemaining("player", S.BrainFreeze)
-                if procTime > 0.5 then -- Don't waste proc in last 0.5 seconds
-                    self:CastSpell(brainFreezeSpell, "target")
-                    MageDebug("Frost: Brain Freeze " .. brainFreezeSpell .. " (optimal timing - " .. string.format("%.1f", procTime) .. "s left)")
-                    return true
-                end
-            else
-                -- Simple: Always use immediately
-                self:CastSpell(brainFreezeSpell, "target")
+        if MageSpellReady(self, brainFreezeSpell) then
+            if self:CastSpell(brainFreezeSpell, "target") then
                 MageDebug("Frost: Brain Freeze " .. brainFreezeSpell)
                 return true
             end
         end
     end
-    
-    -- Priority 3: Enhanced Fingers of Frost proc management
-    if procs.fingersOfFrost and self:IsUsableSpell(S.IceLance) then
-        if complexity == "ADVANCED" or complexity == "MODERATE" then
-            -- Advanced: Optimize usage based on stacks and situation
-            local shouldUseFoF = procs.fingersOfFrostStacks >= 1
-            if shouldUseFoF then
-                self:CastSpell(S.IceLance, "target")
-                MageDebug("Frost: Fingers of Frost Ice Lance (optimal - " .. procs.fingersOfFrostStacks .. " stacks)")
-                return true
-            end
-        else
-            -- Simple: Always use when available
-            self:CastSpell(S.IceLance, "target")
-            MageDebug("Frost: Fingers of Frost Ice Lance (" .. procs.fingersOfFrostStacks .. " stacks)")
+
+    -- Ice Lance is a high-value frozen/movement spell. While stationary with
+    -- Fingers of Frost, continue Frostbolt/Deep Freeze usage instead of
+    -- replacing the stronger Frostbolt casts with low-damage Ice Lance.
+    if (targetFrozen or self:IsPlayerMoving()) and MageSpellReady(self, S.IceLance) then
+        if self:CastSpell(S.IceLance, "target") then
+            MageDebug("Frost: Ice Lance (" .. (targetFrozen and "frozen target" or "moving") .. ")")
             return true
         end
     end
-    
-    -- Ice Lance if target is actually frozen or while moving
-    if (targetFrozen or self:IsPlayerMoving()) and self:IsUsableSpell(S.IceLance) then
-        self:CastSpell(S.IceLance, "target")
-        MageDebug("Frost: Ice Lance (" .. (targetFrozen and "frozen target" or "moving") .. ")")
-        return true
+
+    -- Fire Blast is the fallback instant while moving when no Ice Lance is
+    -- available.
+    if self:IsPlayerMoving() and MageSpellReady(self, S.FireBlast) then
+        if self:CastSpell(S.FireBlast, "target") then
+            MageDebug("Frost: Fire Blast while moving")
+            return true
+        end
     end
-    
+
     -- Main nuke - Frostbolt
-    if self:IsUsableSpell(S.Frostbolt) and not UnitCastingInfo("player") then
-        self:CastSpell(S.Frostbolt, "target")
-        MageDebug("Frost: Frostbolt")
-        return true
+    if MageSpellReady(self, S.Frostbolt) and not UnitCastingInfo("player") and not self:IsPlayerMoving() then
+        if self:CastSpell(S.Frostbolt, "target") then
+            MageDebug("Frost: Frostbolt")
+            return true
+        end
     end
-    
+
     -- Emergency wand
-    if manaPercent < 5 and self:IsUsableSpell(S.Shoot) then
-        self:CastSpell(S.Shoot, "target")
-        MageDebug("Frost: Emergency wanding")
-        return true
+    if manaPercent < 5 and MageSpellReady(self, S.Shoot) then
+        if self:CastSpell(S.Shoot, "target") then
+            MageDebug("Frost: Emergency wanding")
+            return true
+        end
     end
     
     return false
@@ -1058,7 +1281,7 @@ function AC:MageRotation()
     local spec = self:GetPlayerSpec()
     local level = UnitLevel("player")
     local health = self:GetPlayerHealthPercent()
-    local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
+    local manaPercent = MageManaPercent()
     local inCombat = UnitAffectingCombat("player")
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target")
     
@@ -1068,7 +1291,8 @@ function AC:MageRotation()
                   spec, level, health, manaPercent, inCombat and "Y" or "N", hasTarget and "Y" or "N"))
     end
     
-    -- Skip if busy channeling
+    -- Channels cannot be interrupted by the rotation. Regular casts still
+    -- allow Counterspell to fire below because it is off the normal cast path.
     if UnitChannelInfo("player") then
         return true
     end
@@ -1091,15 +1315,17 @@ function AC:MageRotation()
         if hasTarget and not UnitAffectingCombat("target") and UnitExists("target") then
             local pullSpell = S.Frostbolt
             if spec == "Fire" then
-                pullSpell = S.Fireball
+                pullSpell = self:GetMageFireNuke()
             elseif spec == "Arcane" then
                 pullSpell = S.ArcaneBlast
             end
             
-            if self:Throttle("MagePull", 1) and IsSpellInRange(pullSpell, "target") == 1 then
-                self:CastSpell(pullSpell, "target")
-                MageDebug("Pulling with " .. pullSpell)
-                return true
+            local inRange = not IsSpellInRange or IsSpellInRange(pullSpell, "target")
+            if inRange ~= 0 and MageSpellReady(self, pullSpell) and self:Throttle("MagePull", 1) then
+                if self:CastSpell(pullSpell, "target") then
+                    MageDebug("Pulling with " .. pullSpell)
+                    return true
+                end
             end
         end
         
@@ -1114,18 +1340,25 @@ function AC:MageRotation()
             hasTarget = true
             MageDebug("Auto-targeted: " .. (UnitName("target") or "Unknown"))
         else
-            return true
+            return false
         end
     end
-    if not hasTarget then return true end
+    if not hasTarget then return false end
+
+    if inCombat and self:TryMageInterrupt() then return true end
+    if UnitCastingInfo("player") then return true end
+
+    if inCombat and self:TryMageUtility() then return true end
     
-    -- Emergency defensives
-    if health < 40 then
+    -- Defensive spells should be available before the player reaches lethal
+    -- health, while the defensive function still guards each threshold.
+    if inCombat and health < 60 then
         if self:UseMageDefensives() then return true end
     end
     
-    -- Use defensive racials when needed
-    if health < 50 then
+    -- Break actual crowd control or use a racial only when its condition is
+    -- meaningful; the racial helper performs the detailed checks.
+    if inCombat then
         if self:UseMageRacials(false, true) then return true end
     end
     
@@ -1150,47 +1383,52 @@ function AC:MageRotation()
         if self:TryMageInterrupt() then return true end
         
         -- Basic mana management
-        if manaPercent < 20 and self:ManageMageMana() then return true end
+        if self:ManageMageMana() then return true end
+
+        if self:ShouldUseMageMajorCooldowns() and self:UseMageRacials(true, false) then
+            MageDebug("LEVELING: offensive racial")
+            return true
+        end
         
         -- Enhanced leveling rotation based on available spells
         local enemies = self:GetEnemyCount()
         
-        -- AoE for multiple enemies while leveling
+        -- AoE for multiple enemies while leveling. Keep ground AoE behavior
+        -- unchanged; use instant tools here for safe, mobile pulls.
         if enemies >= 3 then
-            if level >= 6 and CheckInteractDistance("target", 3) and self:IsUsableSpell(S.ArcaneExplosion) then
-                self:CastSpell(S.ArcaneExplosion, "player")
-                MageDebug("LEVELING: AoE Arcane Explosion")
-                rotationResult = true
-            elseif level >= 12 and CheckInteractDistance("target", 3) and self:IsUsableSpell(S.FrostNova) then
-                self:CastSpell(S.FrostNova, "player")
-                MageDebug("LEVELING: AoE Frost Nova")
-                rotationResult = true
+            if CheckInteractDistance("target", 3) and MageSpellReady(self, S.ArcaneExplosion) then
+                rotationResult = self:CastSpell(S.ArcaneExplosion, "player")
+                if rotationResult then MageDebug("LEVELING: Arcane Explosion") end
+            elseif CheckInteractDistance("target", 3) and health < 65 and MageSpellReady(self, S.FrostNova) then
+                rotationResult = self:CastSpell(S.FrostNova, "player")
+                if rotationResult then MageDebug("LEVELING: emergency Frost Nova") end
+            elseif CheckInteractDistance("target", 3) and MageSpellReady(self, S.ConeOfCold) then
+                rotationResult = self:CastSpell(S.ConeOfCold, "player")
+                if rotationResult then MageDebug("LEVELING: Cone of Cold") end
             end
         end
         
         -- Single target priority
         if not rotationResult then
-            -- Use best available nuke spell
-            if level >= 6 and self:IsUsableSpell(S.Frostbolt) and not UnitCastingInfo("player") then
-                self:CastSpell(S.Frostbolt, "target")
-                MageDebug("LEVELING: Frostbolt")
-                rotationResult = true
-            elseif level >= 4 and self:IsUsableSpell(S.Fireball) and not UnitCastingInfo("player") then
-                self:CastSpell(S.Fireball, "target")
-                MageDebug("LEVELING: Fireball")
-                rotationResult = true
-            elseif level >= 8 and manaPercent > 40 and self:IsUsableSpell(S.ArcaneMissiles) then
-                self:CastSpell(S.ArcaneMissiles, "target")
-                MageDebug("LEVELING: Arcane Missiles")
-                rotationResult = true
-            elseif level >= 12 and self:IsUsableSpell(S.FireBlast) then
-                self:CastSpell(S.FireBlast, "target")
-                MageDebug("LEVELING: Fire Blast")
-                rotationResult = true
-            elseif manaPercent < 10 and self:IsUsableSpell(S.Shoot) then
-                self:CastSpell(S.Shoot, "target")
-                MageDebug("LEVELING: Wanding (low mana)")
-                rotationResult = true
+            local levelingNuke = S.Frostbolt
+            if self:HasMageTalentByName("Improved Fireball") and not self:HasMageTalentByName("Improved Frostbolt") then
+                levelingNuke = S.Fireball
+            elseif not self:KnowsSpell(levelingNuke) then
+                levelingNuke = S.Fireball
+            end
+
+            if not self:IsPlayerMoving() and MageSpellReady(self, levelingNuke) then
+                rotationResult = self:CastSpell(levelingNuke, "target")
+                if rotationResult then MageDebug("LEVELING: " .. levelingNuke) end
+            elseif manaPercent > 50 and not self:IsPlayerMoving() and MageSpellReady(self, S.ArcaneMissiles) then
+                rotationResult = self:CastSpell(S.ArcaneMissiles, "target")
+                if rotationResult then MageDebug("LEVELING: Arcane Missiles") end
+            elseif (self:IsPlayerMoving() or self:GetTargetHealthPercent("target") < 25) and MageSpellReady(self, S.FireBlast) then
+                rotationResult = self:CastSpell(S.FireBlast, "target")
+                if rotationResult then MageDebug("LEVELING: Fire Blast") end
+            elseif manaPercent < 15 and MageSpellReady(self, S.Shoot) then
+                rotationResult = self:CastSpell(S.Shoot, "target")
+                if rotationResult then MageDebug("LEVELING: Wanding") end
             end
         end
     end
@@ -1206,7 +1444,7 @@ function AC:MageDebugInfo()
     local spec = self:GetPlayerSpec()
     local level = UnitLevel("player")
     local health = self:GetPlayerHealthPercent()
-    local manaPercent = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
+    local manaPercent = MageManaPercent()
     
     self:Print("=== MAGE DEBUG INFO ===")
     self:Print("Spec: " .. spec .. " (Level " .. level .. ")")
@@ -1238,6 +1476,10 @@ function AC:MageDebugInfo()
     local int = self:HasBuff("player", S.ArcaneBrilliance) and "Arcane Brilliance" or
                (self:HasBuff("player", S.ArcaneIntellect) and "Arcane Intellect" or "None")
     self:Print("Intelligence: " .. int)
+    self:Print("Focus Magic: " .. (self:HasBuff("player", S.FocusMagic) and "Active" or "Inactive"))
+    if spec == "Fire" then
+        self:Print("Fire filler: " .. self:GetMageFireNuke())
+    end
     
     -- Check consumables
     local hasManaGem = false

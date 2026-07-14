@@ -180,14 +180,13 @@ function AC:CastShamanSpell(spellName, unit)
 
     if self:IsUsableSpell(spellName) and (unit == "player" or UnitExists(unit)) then
         if IsCurrentSpell(spellName) or UnitCastingInfo("player") then return false end
-        
-        local success = pcall(function() CastSpellByName(spellName, unit) end)
-        if success then 
+        if self:GetSpellCooldown(spellName) > 0.1 then return false end
+
+        if self:CastSpell(spellName, unit) then
             ShamanDebug("Cast SUCCESS: " .. spellName .. (unit ~= "target" and (" on " .. unit) or ""))
             return true
-        else
-            ShamanDebug("Cast FAILED: " .. spellName)
         end
+        ShamanDebug("Cast FAILED: " .. spellName)
     end
     return false
 end
@@ -341,6 +340,55 @@ function AC:AnalyzeGroupDamage()
     return analysis
 end
 
+function AC:HandleShamanCleansing()
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "SHAMAN" or not IsInGroup() then return false end
+
+    local units = {"player"}
+    local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
+    local count = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
+    for i = 1, count do
+        table.insert(units, prefix .. i)
+    end
+
+    for _, unit in ipairs(units) do
+        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) then
+            for index = 1, 40 do
+                local name, _, _, debuffType = UnitDebuff(unit, index)
+                if not name then break end
+                if debuffType == "Poison" or debuffType == "Disease" or debuffType == "Curse" then
+                    if self:CanUseShamanSpell(S.CleanseSpirit) and
+                       self:CastShamanSpell(S.CleanseSpirit, unit) then
+                        ShamanDebug("Cleansed " .. (UnitName(unit) or unit) .. ": " .. name)
+                        return true
+                    end
+                    break
+                end
+            end
+        end
+    end
+    return false
+end
+
+function AC:HandleShamanPurge()
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "SHAMAN" or not UnitExists("target") or
+       not UnitCanAttack("player", "target") then
+        return false
+    end
+    if not self:CanUseShamanSpell(S.Purge) then return false end
+
+    for index = 1, 40 do
+        local name, _, _, _, _, _, _, isStealable = UnitBuff("target", index)
+        if not name then break end
+        if isStealable and self:CastShamanSpell(S.Purge, "target") then
+            ShamanDebug("Purged " .. name)
+            return true
+        end
+    end
+    return false
+end
+
 -- ENHANCED: Racial abilities usage
 function AC:UseShamanRacials(offensive, defensive)
     if not Throttle("ShamanRacials", 3) then return false end
@@ -349,46 +397,32 @@ function AC:UseShamanRacials(offensive, defensive)
     race = string.upper(race)
     local health = self:GetPlayerHealthPercent()
     local inCombat = UnitAffectingCombat("player")
+
+    local function castRacial(spellName, message)
+        if self:CastShamanSpell(spellName, "player") then
+            ShamanDebug(message)
+            return true
+        end
+        return false
+    end
     
     -- Offensive racials
     if offensive and inCombat then
-        if race == "ORC" and self:IsUsableSpell(S.BloodFury) then
-            CastSpellByName(S.BloodFury)
-            ShamanDebug("Racial: Blood Fury")
-            return true
-        end
-        if race == "TROLL" and self:IsUsableSpell(S.Berserking) then
-            CastSpellByName(S.Berserking)
-            ShamanDebug("Racial: Berserking")
-            return true
-        end
+        if race == "ORC" and castRacial(S.BloodFury, "Racial: Blood Fury") then return true end
+        if race == "TROLL" and castRacial(S.Berserking, "Racial: Berserking") then return true end
         if race == "BLOODELF" and self:IsUsableSpell(S.ArcaneTorrent) then
             local mana = UnitPower("player", 0) / UnitPowerMax("player", 0) * 100
             if mana < 80 then
-                CastSpellByName(S.ArcaneTorrent)
-                ShamanDebug("Racial: Arcane Torrent")
-                return true
+                if castRacial(S.ArcaneTorrent, "Racial: Arcane Torrent") then return true end
             end
         end
     end
     
     -- Defensive racials
     if defensive or health < 50 then
-        if race == "UNDEAD" and self:IsUsableSpell(S.WillOfTheForsaken) then
-            CastSpellByName(S.WillOfTheForsaken)
-            ShamanDebug("Racial: Will of the Forsaken")
-            return true
-        end
-        if race == "DWARF" and self:IsUsableSpell(S.Stoneform) then
-            CastSpellByName(S.Stoneform)
-            ShamanDebug("Racial: Stoneform")
-            return true
-        end
-        if race == "TAUREN" and self:IsUsableSpell(S.WarStomp) then
-            CastSpellByName(S.WarStomp)
-            ShamanDebug("Racial: War Stomp")
-            return true
-        end
+        if race == "UNDEAD" and castRacial(S.WillOfTheForsaken, "Racial: Will of the Forsaken") then return true end
+        if race == "DWARF" and castRacial(S.Stoneform, "Racial: Stoneform") then return true end
+        if race == "TAUREN" and castRacial(S.WarStomp, "Racial: War Stomp") then return true end
     end
     
     return false

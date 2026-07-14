@@ -25,7 +25,6 @@ local S = { -- Spells
     -- Cooldowns
     AdrenRush = "Adrenaline Rush", 
     BladeFlurry = "Blade Flurry", 
-    Vendetta = "Vendetta", 
     KillingSpree = "Killing Spree", 
     ShadowDance = "Shadow Dance", 
     Preparation = "Preparation", 
@@ -109,9 +108,9 @@ function AC:GetEnergyThreshold(actionType, level)
         threshold = EnergyThresholds.finisher
     elseif actionType == "generator" then
         local spec = self:GetPlayerSpec()
-        if spec == "Assassination" then
+        if spec == "Assassination" and self:KnowsSpell(S.Mutilate) and self:HasTwoDaggersEquipped() then
             threshold = EnergyThresholds.generator.mutilate
-        elseif spec == "Subtlety" and self:IsBehindTarget() then
+        elseif spec == "Subtlety" and self:IsBehindTarget() and self:HasMainHandDaggerEquipped() then
             threshold = EnergyThresholds.generator.backstab
         else
             threshold = EnergyThresholds.generator.sinister
@@ -209,7 +208,12 @@ end
 -- =============================================
 
 -- Determine if we should use burst cooldowns
-function AC:ShouldUseBurstCooldowns(spec, targetHP, targetType)
+function AC:ShouldUseBurstCooldowns(spec, targetHP, targetType, fourthArgument)
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "ROGUE" and self.PaladinShouldUseBurstCooldowns then
+        return self:PaladinShouldUseBurstCooldowns(spec, targetHP, targetType, fourthArgument)
+    end
+
     targetHP = targetHP or (UnitHealth("target") / UnitHealthMax("target") * 100)
     targetType = targetType or UnitClassification("target")
     local inGroup = IsInGroup()
@@ -241,9 +245,7 @@ end
 -- Stack cooldowns intelligently based on spec
 function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
     if not self:Throttle("RogueBurstCooldowns", 1) then return false end
-    
-    -- Don't use offensive cooldowns before combat starts
-    if not UnitAffectingCombat("player") then return false end
+    if not UnitAffectingCombat("player") or not UnitExists("target") then return false end
     
     local targetHP = UnitHealth("target") / UnitHealthMax("target") * 100
     local targetType = UnitClassification("target")
@@ -252,79 +254,54 @@ function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
         return false
     end
     
-    local used = false
-    
     -- Combat spec cooldown priority: BF → KS → AR
     if spec == "Combat" then
-        -- Blade Flurry first (works great with other cooldowns)
-        if level >= 30 and self:GetSpellCooldown(S.BladeFlurry) == 0 then
-            self:CastSpell(S.BladeFlurry, "player")
+        local enemies = self:GetEnemyCount()
+        if enemies >= 2 and self:IsRogueSpellReady(S.BladeFlurry) then
+            if not self:CastSpell(S.BladeFlurry, "player") then return false end
             RogueDebug("Combat burst: Blade Flurry")
-            used = true
+            return true
         end
-        
-        -- Killing Spree (no combo points required - instant ability)
-        if level >= 60 and self:GetSpellCooldown(S.KillingSpree) == 0 then
-            self:CastSpell(S.KillingSpree, "target")
+
+        if energy <= 50 and self:IsRogueSpellReady(S.KillingSpree) then
+            if not self:CastSpell(S.KillingSpree, "target") then return false end
             RogueDebug("Combat burst: Killing Spree")
-            -- Use trinkets and potions with Killing Spree
-            if self.UseTrinkets then 
-                self:UseTrinkets() 
-                RogueDebug("Enhanced burst: Trinkets activated with Killing Spree")
-            end
-            if self.UseOffensivePotion then 
-                self:UseOffensivePotion(true)
-                RogueDebug("Enhanced burst: Offensive potion activated with Killing Spree")
-            end
-            return true -- KS locks us out, return after chaining cooldowns
+            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensivePotion then self:UseOffensivePotion(true) end
+            return true
         end
-        
-        -- Adrenaline Rush
-        if level >= 40 and self:GetSpellCooldown(S.AdrenRush) == 0 then
-            self:CastSpell(S.AdrenRush, "player")
+
+        if energy <= 60 and self:IsRogueSpellReady(S.AdrenRush) then
+            if not self:CastSpell(S.AdrenRush, "player") then return false end
             RogueDebug("Combat burst: Adrenaline Rush")
-            used = true
+            if self.UseTrinkets then self:UseTrinkets() end
+            return true
         end
-        
-    -- Assassination spec cooldowns: Cold Blood → Vendetta
     elseif spec == "Assassination" then
-        -- Cold Blood for guaranteed crit
-        if level >= 20 and self:GetSpellCooldown(S.ColdBlood) == 0 then
-            self:CastSpell(S.ColdBlood, "player")
+        if cp >= 4 and self:IsRogueSpellReady(S.ColdBlood) then
+            if not self:CastSpell(S.ColdBlood, "player") then return false end
             RogueDebug("Assassination burst: Cold Blood")
-            used = true
+            if self.UseTrinkets then self:UseTrinkets() end
+            return true
         end
-        
-        -- Vendetta for damage increase
-        if level >= 79 and self:GetSpellCooldown(S.Vendetta) == 0 then
-            self:CastSpell(S.Vendetta, "target")
-            RogueDebug("Assassination burst: Vendetta")
-            used = true
-        end
-        
-    -- Subtlety spec: Shadow Dance → offensive racials
     elseif spec == "Subtlety" then
-        -- Shadow Dance for ambush spam
-        if level >= 60 and self:GetSpellCooldown(S.ShadowDance) == 0 and energy >= 60 then
-            self:CastSpell(S.ShadowDance, "player")
+        if energy >= 60 and self:IsBehindTarget() and self:IsRogueSpellReady(S.ShadowDance) then
+            if not self:CastSpell(S.ShadowDance, "player") then return false end
             RogueDebug("Subtlety burst: Shadow Dance")
-            used = true
+            if self.UseTrinkets then self:UseTrinkets() end
+            return true
+        end
+
+        if self:IsRogueSpellReady(S.Preparation) and
+           ((self:KnowsSpell(S.ShadowDance) and self:GetSpellCooldown(S.ShadowDance) > 1) or
+            (self:KnowsSpell(S.Vanish) and self:GetSpellCooldown(S.Vanish) > 1)) then
+            if not self:CastSpell(S.Preparation, "player") then return false end
+            RogueDebug("Subtlety burst: Preparation")
+            return true
         end
     end
-    
-    -- Chain trinkets and potions when cooldowns are used
-    if used then
-        if self.UseTrinkets then 
-            self:UseTrinkets() 
-            RogueDebug("Enhanced burst: Trinkets activated")
-        end
-        if self.UseOffensivePotion then 
-            self:UseOffensivePotion(true)
-            RogueDebug("Enhanced burst: Offensive potion activated")
-        end
-    end
-    
-    return used
+
+    return false
 end
 
 -- =============================================
@@ -333,7 +310,7 @@ end
 
 -- Find best target for Tricks of the Trade
 function AC:FindBestTricksTarget()
-    if not GetNumRaidMembers() > 0 and not IsInGroup() then return nil end
+    if GetNumRaidMembers() == 0 and not IsInGroup() then return nil end
     
     local bestTarget = nil
     local bestScore = 0
@@ -388,7 +365,7 @@ function AC:UseTricksOfTrade(level)
     
     local target = self:FindBestTricksTarget()
     if target then
-        self:CastSpell("Tricks of the Trade", target)
+        if not self:CastSpell("Tricks of the Trade", target) then return false end
         RogueDebug("Tricks of the Trade on " .. UnitName(target))
         return true
     end
@@ -449,6 +426,11 @@ end
 
 -- Helper function to check if behind target
 function AC:IsBehindTarget()
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "ROGUE" and self.DruidIsBehindTarget then
+        return self:DruidIsBehindTarget()
+    end
+
     if not UnitExists("target") then return false end
     
     -- Use facing check if available
@@ -456,8 +438,9 @@ function AC:IsBehindTarget()
         return UnitIsBehind("player", "target")
     end
     
-    -- Fallback: assume we're behind if in melee (for simplicity)
-    return CheckInteractDistance("target", 3)
+    -- The stock 3.3.5 client has no reliable facing API. Returning false is
+    -- safer than repeatedly selecting a positional attack from the front.
+    return false
 end
 
 -- NEW: Armor Penetration detection for Combat priority
@@ -482,19 +465,12 @@ end
 
 -- NEW: Check for Cut to the Chase talent (Assassination)
 function AC:HasCutToTheChase()
-    -- In WotLK, this is a talent that auto-refreshes SnD with Envenom
-    -- For now, assume talented if Assassination spec at appropriate level
-    local spec = self:GetPlayerSpec()
-    local level = UnitLevel("player")
-    return spec == "Assassination" and level >= 60
+    return self:GetRogueTalentRank("Cut to the Chase") > 0
 end
 
 -- NEW: Check for Honor Among Thieves (Subtlety)
 function AC:HasHonorAmongThieves()
-    -- Provides 1 CP per second from group member crits
-    local spec = self:GetPlayerSpec()
-    local level = UnitLevel("player")
-    return spec == "Subtlety" and level >= 60 and IsInGroup()
+    return self:GetRogueTalentRank("Honor Among Thieves") > 0
 end
 
 -- =============================================
@@ -700,41 +676,46 @@ function AC:ManageRogueThreat(threatLevel, threatScore, level, spec)
     -- High threat - immediate action needed
     if threatLevel == "high" or health < 30 then
         -- Vanish if available (resets threat completely)
-        if self:GetSpellCooldown(S.Vanish) == 0 and level >= 22 then
-            self:CastSpell(S.Vanish, "player")
-            RogueDebug("Threat: Emergency Vanish")
-            return true
+        if self:IsRogueSpellReady(S.Vanish) then
+            if self:CastSpell(S.Vanish, "player") then
+                RogueDebug("Threat: Emergency Vanish")
+                return true
+            end
         end
         
         -- Blind target to reduce incoming damage
-        if self:GetSpellCooldown(S.Blind) == 0 and level >= 34 then
-            self:CastSpell(S.Blind, "target")
-            RogueDebug("Threat: Blind to reduce damage")
-            return true
+        if self:IsRogueSpellReady(S.Blind) then
+            if self:CastSpell(S.Blind, "target") then
+                RogueDebug("Threat: Blind to reduce damage")
+                return true
+            end
         end
         
         -- Gouge for breathing room
-        if self:GetSpellCooldown(S.Gouge) == 0 and CheckInteractDistance("target", 3) then
-            self:CastSpell(S.Gouge, "target")
-            RogueDebug("Threat: Gouge for positioning")
-            return true
+        if self:IsRogueSpellReady(S.Gouge) and CheckInteractDistance("target", 3) then
+            if self:CastSpell(S.Gouge, "target") then
+                RogueDebug("Threat: Gouge for positioning")
+                return true
+            end
         end
     end
     
     -- Medium threat - defensive measures
     if threatLevel == "medium" then
         -- Evasion to reduce incoming damage
-        if self:GetSpellCooldown(S.Evasion) == 0 and level >= 8 then
-            self:CastSpell(S.Evasion, "player")
-            RogueDebug("Threat: Evasion for damage mitigation")
-            return true
+        if self:IsRogueSpellReady(S.Evasion) then
+            if self:CastSpell(S.Evasion, "player") then
+                RogueDebug("Threat: Evasion for damage mitigation")
+                return true
+            end
         end
         
         -- Sprint to reposition near tank
-        if inGroup and self:GetSpellCooldown(S.Sprint) == 0 and level >= 10 then
-            self:CastSpell(S.Sprint, "player")
-            RogueDebug("Threat: Sprint to reposition")
-            return true
+        if inGroup and self:IsRogueSpellReady(S.Sprint) then
+            if self:CastSpell(S.Sprint, "player") then
+                RogueDebug("Threat: Sprint to reposition")
+                return true
+            end
         end
     end
     
@@ -771,15 +752,15 @@ function AC:UseRogueRacials(targetIsElite)
     -- Emergency defensive racials
     if health < 25 then
         if race == "Undead" and self:GetSpellCooldown(R.WillOfForsaken) == 0 then
-            self:CastSpell(R.WillOfForsaken, "player")
+            if not self:CastSpell(R.WillOfForsaken, "player") then return false end
             RogueDebug("Emergency Will of the Forsaken")
             return true
         elseif race == "Human" and self:GetSpellCooldown(R.EveryMan) == 0 then
-            self:CastSpell(R.EveryMan, "player")
+            if not self:CastSpell(R.EveryMan, "player") then return false end
             RogueDebug("Emergency Every Man for Himself")
             return true
         elseif race == "Dwarf" and self:GetSpellCooldown(R.Stoneform) == 0 then
-            self:CastSpell(R.Stoneform, "player")
+            if not self:CastSpell(R.Stoneform, "player") then return false end
             RogueDebug("Emergency Stoneform")
             return true
         end
@@ -789,11 +770,11 @@ function AC:UseRogueRacials(targetIsElite)
     local shouldUseBurst = targetIsElite or not IsInGroup() or UnitHealth("target") / UnitHealthMax("target") * 100 > 70
     if shouldUseBurst then
         if race == "Orc" and self:GetSpellCooldown(R.BloodFury) == 0 then
-            self:CastSpell(R.BloodFury, "player")
+            if not self:CastSpell(R.BloodFury, "player") then return false end
             RogueDebug("Using Blood Fury")
             return true
         elseif race == "Troll" and self:GetSpellCooldown(R.Berserking) == 0 then
-            self:CastSpell(R.Berserking, "player")
+            if not self:CastSpell(R.Berserking, "player") then return false end
             RogueDebug("Using Berserking")
             return true
         end
@@ -823,15 +804,10 @@ function AC:GetRogueBestFinisher(spec, cp, level, energy)
     
     -- ASSASSINATION SPEC (Cut to the Chase Priority)
     if spec == "Assassination" then
-        -- Hunger for Blood maintenance (CRITICAL)
-        if level >= 71 and not self:HasBuff("player", S.HFB) and energy >= 15 then
-            return S.HFB
-        end
-        
         -- With Cut to the Chase: Envenom refreshes SnD automatically
         if level >= 62 and self:KnowsSpell(S.Envenom) and self:HasCutToTheChase() then
-            local poisonStacks = select(4, UnitDebuff("target", S.DeadlyPoison)) or 0
-            if poisonStacks >= 1 or cp >= 5 then
+            local poisonStacks = self:GetRogueDebuffStacks("target", S.DeadlyPoison)
+            if poisonStacks >= 1 then
                 return S.Envenom -- Auto-refreshes SnD with talent
             end
         end
@@ -852,7 +828,8 @@ function AC:GetRogueBestFinisher(spec, cp, level, energy)
         end
         
         -- Envenom for poison builds
-        if level >= 62 and self:KnowsSpell(S.Envenom) and energy >= 35 then
+        if level >= 62 and self:KnowsSpell(S.Envenom) and energy >= 35 and
+           self:GetRogueDebuffStacks("target", S.DeadlyPoison) >= 1 then
             return S.Envenom
         end
         
@@ -947,7 +924,8 @@ function AC:GetRogueBestGenerator(spec, level, inMelee, energy)
     local behind = inMelee and self:IsBehindTarget()
     
     -- Spec-specific generators with proper thresholds
-    if spec == "Assassination" and level >= 50 and self:KnowsSpell(S.Mutilate) and energy >= 60 then
+    if spec == "Assassination" and self:KnowsSpell(S.Mutilate) and
+       self:HasTwoDaggersEquipped() and energy >= 60 then
         return S.Mutilate
     elseif spec == "Subtlety" then
         -- Honor Among Thieves reduces energy needs
@@ -960,7 +938,8 @@ function AC:GetRogueBestGenerator(spec, level, inMelee, energy)
             end
         end
         
-        if behind and level >= 4 and self:KnowsSpell(S.Backstab) and energy >= energyThreshold then
+        if behind and self:HasMainHandDaggerEquipped() and
+           self:KnowsSpell(S.Backstab) and energy >= energyThreshold then
             return S.Backstab
         end
     elseif spec == "Combat" then
@@ -971,7 +950,8 @@ function AC:GetRogueBestGenerator(spec, level, inMelee, energy)
     end
     
     -- Backstab if behind and enough energy
-    if behind and level >= 4 and self:KnowsSpell(S.Backstab) and energy >= 50 then
+    if behind and self:HasMainHandDaggerEquipped() and
+       self:KnowsSpell(S.Backstab) and energy >= 50 then
         return S.Backstab
     end
     
@@ -990,7 +970,8 @@ end
 -- FIXED: Check weapon enchants for WotLK 3.3.5a
 function AC:CheckWeaponEnchants()
     -- WotLK 3.3.5a GetWeaponEnchantInfo() returns up to 6 values for main hand + off hand
-    local hasMainHand, mainHandExpiration, mainHandCharges, mainHandEnchantID, hasOffHand, offHandExpiration = GetWeaponEnchantInfo()
+    local hasMainHand, mainHandExpiration, mainHandCharges,
+          hasOffHand, offHandExpiration, offHandCharges = GetWeaponEnchantInfo()
     
     -- Check if we have an off-hand weapon equipped
     local hasOffHandWeapon = GetInventoryItemLink("player", 17) ~= nil
@@ -1009,6 +990,19 @@ end
 -- FIXED: Enhanced poison finding that works with ALL WotLK poison ranks
 AC.FindPoisonInBags = function(self, poisonPatterns)
     local foundPoisons = {}
+
+    local function romanRank(name)
+        local roman = string.match(name or "", "%s([IVX]+)$")
+        if not roman then return 1 end
+        local values = {I = 1, V = 5, X = 10}
+        local total, previous = 0, 0
+        for index = string.len(roman), 1, -1 do
+            local value = values[string.sub(roman, index, index)] or 0
+            if value < previous then total = total - value else total = total + value end
+            previous = value
+        end
+        return total
+    end
     
     for bag = 0, 4 do
         local numSlots = GetContainerNumSlots(bag) or 0
@@ -1026,13 +1020,14 @@ AC.FindPoisonInBags = function(self, poisonPatterns)
                         
                         -- Match the poison type anywhere in the name
                         if string.find(itemNameLower, poisonPatternLower) then
-                            local _, _, _, _, _, _, _, stackCount = GetContainerItemInfo(bag, slot)
+                            local _, stackCount = GetContainerItemInfo(bag, slot)
                             table.insert(foundPoisons, {
                                 name = itemName,
                                 count = stackCount or 1,
                                 bag = bag,
                                 slot = slot,
-                                pattern = poisonPattern
+                                pattern = poisonPattern,
+                                rank = romanRank(itemName)
                             })
                             break -- Only match one pattern per item
                         end
@@ -1042,6 +1037,10 @@ AC.FindPoisonInBags = function(self, poisonPatterns)
         end
     end
     
+    table.sort(foundPoisons, function(left, right)
+        if left.rank == right.rank then return left.count > right.count end
+        return left.rank > right.rank
+    end)
     return foundPoisons
 end
 
@@ -1057,56 +1056,33 @@ function AC:ApplyPoisonToWeapon(poisonInfo, weaponSlot)
     local bag, slot = poisonInfo.bag, poisonInfo.slot
     
     -- Verify the item still exists
-    local itemName = GetContainerItemInfo(bag, slot)
-    if not itemName then
+    if not GetContainerItemLink(bag, slot) then
         RogueDebug("Poison item no longer exists in bag " .. bag .. " slot " .. slot)
         return false
     end
     
     RogueDebug("Attempting to apply " .. poisonInfo.name .. " to weapon slot " .. weaponSlot)
     
-    -- Method 1: Use container item directly on weapon slot
-    local success1 = pcall(function()
+    local ok = pcall(function()
+        ClearCursor()
         UseContainerItem(bag, slot)
+        -- PickupInventoryItem acts as the weapon target while the poison item
+        -- is awaiting a target. If item use failed it only picks the weapon up,
+        -- and ClearCursor safely returns it to the same slot.
         PickupInventoryItem(weaponSlot)
-    end)
-    
-    if success1 then
-        RogueDebug("Successfully applied " .. poisonInfo.name .. " (Method 1)")
-        return true
-    end
-    
-    -- Method 2: Clear cursor and try again
-    local success2 = pcall(function()
-        ClearCursor()
-        UseContainerItem(bag, slot)
-        if CursorHasItem() then
-            PickupInventoryItem(weaponSlot)
-            ClearCursor()
-        end
-    end)
-    
-    if success2 then
-        RogueDebug("Successfully applied " .. poisonInfo.name .. " (Method 2)")
-        return true
-    end
-    
-    -- Method 3: Use action slot method (backup)
-    local success3 = pcall(function()
-        ClearCursor()
-        PickupContainerItem(bag, slot)
-        if CursorHasItem() then
-            PickupInventoryItem(weaponSlot)
-        end
         ClearCursor()
     end)
-    
-    if success3 then
-        RogueDebug("Successfully applied " .. poisonInfo.name .. " (Method 3)")
+
+    local mainEnchanted, _, _, offEnchanted = GetWeaponEnchantInfo()
+    local enchantApplied = (weaponSlot == 16 and mainEnchanted) or
+                           (weaponSlot == 17 and offEnchanted)
+    local castStarted = UnitCastingInfo("player") ~= nil
+    if ok and (castStarted or enchantApplied) then
+        RogueDebug("Poison application started: " .. poisonInfo.name)
         return true
     end
-    
-    RogueDebug("Failed to apply " .. poisonInfo.name .. " - all methods failed")
+
+    RogueDebug("Failed to start poison application: " .. poisonInfo.name)
     return false
 end
 
@@ -1146,7 +1122,7 @@ function AC:CheckAndApplyPoisons()
             
             if self:ApplyPoisonToWeapon(bestPoison, 16) then
                 RogueDebug("Successfully applied " .. bestPoison.name .. " to main hand")
-                appliedAnything = true
+                return true -- Wait for the weapon application cast before checking off hand.
             else
                 RogueDebug("Failed to apply " .. bestPoison.name .. " to main hand")
             end
@@ -1278,7 +1254,8 @@ function AC:TestBasicPoisonMechanics()
     self:Print("=== BASIC POISON MECHANICS TEST ===")
     
     -- Test GetWeaponEnchantInfo() function
-    local hasMainHand, mainHandExpiration, mainHandCharges, mainHandEnchantID, hasOffHand, offHandExpiration = GetWeaponEnchantInfo()
+    local hasMainHand, mainHandExpiration, mainHandCharges,
+          hasOffHand, offHandExpiration, offHandCharges = GetWeaponEnchantInfo()
     
     self:Print("GetWeaponEnchantInfo() results:")
     self:Print("  hasMainHand: " .. tostring(hasMainHand))
@@ -1432,43 +1409,46 @@ function AC:RogueDefensives(health)
         end
         
         -- Gouge to create distance
-        if self:GetSpellCooldown(S.Gouge) == 0 and CheckInteractDistance("target", 3) then
-            self:CastSpell(S.Gouge, "target")
-            RogueDebug("Gouge for escape")
-            return true
+        if self:IsRogueSpellReady(S.Gouge) and CheckInteractDistance("target", 3) then
+            if self:CastSpell(S.Gouge, "target") then
+                RogueDebug("Gouge for escape")
+                return true
+            end
         end
         
         -- Blind as emergency CC
-        if health < 15 and self:GetSpellCooldown(S.Blind) == 0 then
-            self:CastSpell(S.Blind, "target")
-            RogueDebug("Blind for emergency escape")
-            return true
+        if health < 15 and self:IsRogueSpellReady(S.Blind) then
+            if self:CastSpell(S.Blind, "target") then
+                RogueDebug("Blind for emergency escape")
+                return true
+            end
         end
         
         -- Vanish as absolute last resort
-        if health < 10 and self:GetSpellCooldown(S.Vanish) == 0 then
-            self:CastSpell(S.Vanish, "player")
-            RogueDebug("Emergency Vanish!")
-            return true
+        if health < 10 and self:IsRogueSpellReady(S.Vanish) then
+            if self:CastSpell(S.Vanish, "player") then
+                RogueDebug("Emergency Vanish!")
+                return true
+            end
         end
     end
     
     -- Regular defensive cooldowns - SPEC SPECIFIC
     if health < 40 then
         -- Evasion - Available to all specs
-        if self:GetSpellCooldown(S.Evasion) == 0 then
-            self:CastSpell(S.Evasion, "player")
-            RogueDebug("Using Evasion")
-            return true
+        if self:IsRogueSpellReady(S.Evasion) then
+            if self:CastSpell(S.Evasion, "player") then
+                RogueDebug("Using Evasion")
+                return true
+            end
         end
         
         -- Cloak of Shadows - Subtlety and high-level talent
-        if (spec == "Subtlety" or UnitLevel("player") >= 66) and 
-           self:GetSpellCooldown(S.CloakOfShadows) == 0 and 
-           self:KnowsSpell(S.CloakOfShadows) then
-            self:CastSpell(S.CloakOfShadows, "player")
-            RogueDebug("Using Cloak of Shadows")
-            return true
+        if self:IsRogueSpellReady(S.CloakOfShadows) then
+            if self:CastSpell(S.CloakOfShadows, "player") then
+                RogueDebug("Using Cloak of Shadows")
+                return true
+            end
         end
     end
     
@@ -1479,7 +1459,7 @@ end
 -- ENHANCED COOLDOWN MANAGEMENT (WotLK Meta)
 -- =============================================
 
-function AC:UseRogueOffensiveCooldowns(spec, level, cp)
+function AC:UseRogueOffensiveCooldownsLegacy(spec, level, cp)
     if not UnitExists("target") or UnitIsDead("target") then return false end
     
     -- Don't use offensive cooldowns before combat starts
@@ -1499,26 +1479,15 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
     if spec == "Assassination" then
         -- CRITICAL: Hunger for Blood maintenance (100% uptime required)
         if level >= 71 and not self:HasBuff("player", S.HFB) and self:KnowsSpell(S.HFB) then
-            self:CastSpell(S.HFB, "player")
+            if not self:CastSpell(S.HFB, "player") then return false end
             RogueDebug("Activating Hunger for Blood (CRITICAL)")
             return true
         end
         
         if shouldUseCooldowns then
-            -- Vendetta for burst
-            if level >= 75 and self:GetSpellCooldown(S.Vendetta) == 0 then
-                self:CastSpell(S.Vendetta, "target")
-                RogueDebug("Using Vendetta")
-                
-                -- Chain cooldowns
-                if self.UseTrinkets then self:UseTrinkets() end
-                if self.UseOffensivePotion then self:UseOffensivePotion(true) end
-                return true
-            end
-            
             -- Cold Blood with finishers
             if cp >= 3 and self:GetSpellCooldown(S.ColdBlood) == 0 then
-                self:CastSpell(S.ColdBlood, "player")
+                if not self:CastSpell(S.ColdBlood, "player") then return false end
                 RogueDebug("Using Cold Blood")
                 return true
             end
@@ -1529,7 +1498,7 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
         
         -- Blade Flurry for multiple enemies (2+ for Combat)
         if enemies >= 2 and self:GetSpellCooldown(S.BladeFlurry) == 0 then
-            self:CastSpell(S.BladeFlurry, "player")
+            if not self:CastSpell(S.BladeFlurry, "player") then return false end
             RogueDebug("Blade Flurry for " .. enemies .. " enemies")
             return true
         end
@@ -1537,7 +1506,7 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
         if shouldUseCooldowns then
             -- Adrenaline Rush
             if self:GetSpellCooldown(S.AdrenRush) == 0 then
-                self:CastSpell(S.AdrenRush, "player")
+                if not self:CastSpell(S.AdrenRush, "player") then return false end
                 RogueDebug("Using Adrenaline Rush")
                 
                 -- Chain cooldowns
@@ -1548,7 +1517,7 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
             
             -- Killing Spree (no combo points required - instant ability)  
             if level >= 60 and self:GetSpellCooldown(S.KillingSpree) == 0 then
-                self:CastSpell(S.KillingSpree, "player")
+                if not self:CastSpell(S.KillingSpree, "player") then return false end
                 RogueDebug("Using Killing Spree")
                 
                 -- Chain cooldowns with Killing Spree
@@ -1561,7 +1530,7 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
     elseif spec == "Subtlety" then
         -- Premeditation for instant combo points
         if cp <= 2 and self:GetSpellCooldown(S.Premeditation) == 0 and not UnitAffectingCombat("player") then
-            self:CastSpell(S.Premeditation, "target")
+            if not self:CastSpell(S.Premeditation, "target") then return false end
             RogueDebug("Using Premeditation for instant CP")
             return true
         end
@@ -1569,7 +1538,7 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
         -- Shadow Dance burst phase
         if not self:HasBuff("player", S.ShadowDance) and self:GetSpellCooldown(S.ShadowDance) == 0 and
            shouldUseCooldowns then
-            self:CastSpell(S.ShadowDance, "player")
+            if not self:CastSpell(S.ShadowDance, "player") then return false end
             RogueDebug("Using Shadow Dance burst phase")
             if self.UseTrinkets then self:UseTrinkets() end
             return true
@@ -1579,7 +1548,7 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
             -- Preparation for cooldown reset
             if self:GetSpellCooldown(S.Preparation) == 0 and 
                (self:GetSpellCooldown(S.Vanish) > 0 or self:GetSpellCooldown(S.ShadowDance) > 0) then
-                self:CastSpell(S.Preparation, "player")
+                if not self:CastSpell(S.Preparation, "player") then return false end
                 RogueDebug("Using Preparation for CD reset")
                 return true
             end
@@ -1587,6 +1556,12 @@ function AC:UseRogueOffensiveCooldowns(spec, level, cp)
     end
     
     return false
+end
+
+-- Compatibility entry point; keep only one live cooldown priority list.
+function AC:UseRogueOffensiveCooldowns(spec, level, cp)
+    return self:UseRogueOffensiveCooldownsEnhanced(
+        spec, level, cp, UnitPower("player", 3))
 end
 
 -- =============================================
@@ -1609,7 +1584,7 @@ function AC:ManageRogueStealth()
             local targetHP = UnitHealth("target") / UnitHealthMax("target") * 100
             -- Stealth for opener advantage on fresh targets
             if targetHP > 95 then
-                self:CastSpell(S.Stealth, "player")
+                if not self:CastSpell(S.Stealth, "player") then return false end
                 RogueDebug("Stealthing for opener advantage")
                 return true
             end
@@ -1625,6 +1600,11 @@ end
 
 function AC:CastSpell(spellName, unit)
     unit = unit or "target"
+
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "ROGUE" and self.CoreCastSpell then
+        return self:CoreCastSpell(spellName, unit)
+    end
     
     -- Skip if the spell doesn't exist or has no valid target
     if not spellName or (unit ~= "player" and not UnitExists(unit)) then
@@ -1662,19 +1642,127 @@ function AC:CastSpell(spellName, unit)
         RogueDebug("CastSpell SKIPPED: Already casting " .. spellName)
         return false
     end
-    
-    -- Enhanced casting with multiple methods
-    local success = pcall(function()
-        CastSpellByName(spellName, unit)
-    end)
-    
-    if success then
-        RogueDebug("CastSpell SUCCESS: " .. spellName)
-        return true
-    else
-        RogueDebug("CastSpell FAILED: " .. spellName)
+
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        RogueDebug("CastSpell SKIPPED: Player is already casting/channeling")
         return false
     end
+
+    if SpellIsTargeting and SpellIsTargeting() then
+        RogueDebug("CastSpell SKIPPED: A previous ground spell is awaiting a click")
+        return false
+    end
+    
+    -- A successful pcall only proves that Lua accepted the API call. It does
+    -- not prove that the client started the spell. Verify the post-cast state
+    -- so an out-of-range/blocked cast cannot make the rotation return success
+    -- forever.
+    local beforeCooldown = self:GetSpellCooldown(spellName)
+    local beforeGlobalCooldown = self:GetSpellCooldown(61304)
+    local beforeCast = UnitCastingInfo("player")
+    local beforeChannel = UnitChannelInfo("player")
+    local inRange = true
+    if unit ~= "player" and IsSpellInRange then
+        local range = IsSpellInRange(spellName, unit)
+        inRange = range ~= 0
+    end
+    if not inRange then
+        RogueDebug("CastSpell FAILED: " .. spellName .. " - out of range")
+        return false
+    end
+
+    local hadTarget = UnitExists("target")
+    local targetChanged = unit ~= "player" and unit ~= "target"
+    local ok = pcall(function()
+        if unit == "player" then
+            CastSpellByName(spellName, true)
+        elseif unit == "target" then
+            CastSpellByName(spellName)
+        else
+            TargetUnit(unit)
+            if UnitExists("target") and UnitIsUnit("target", unit) then
+                CastSpellByName(spellName)
+            else
+                error("unable to target " .. tostring(unit))
+            end
+        end
+    end)
+
+    if targetChanged then
+        if hadTarget then TargetLastTarget() else ClearTarget() end
+    end
+
+    local afterCast = UnitCastingInfo("player")
+    local afterChannel = UnitChannelInfo("player")
+    local afterCooldown = self:GetSpellCooldown(spellName)
+    local afterGlobalCooldown = self:GetSpellCooldown(61304)
+    local started = (not beforeCast and afterCast) or (not beforeChannel and afterChannel)
+    local queued = IsCurrentSpell(spellName) and
+                   (afterCooldown > 0.05 or afterGlobalCooldown > beforeGlobalCooldown + 0.05)
+
+    if ok and (started or queued or afterCooldown > beforeCooldown + 0.05 or
+               afterGlobalCooldown > beforeGlobalCooldown + 0.05) then
+        RogueDebug("CastSpell SUCCESS: " .. spellName)
+        return true
+    end
+
+    RogueDebug("CastSpell FAILED: " .. spellName)
+    return false
+end
+
+function AC:IsRogueSpellReady(spellName)
+    return spellName and self:KnowsSpell(spellName) and self:IsUsableSpell(spellName) and
+           self:GetSpellCooldown(spellName) <= 0.1
+end
+
+function AC:GetRogueTalentRank(talentName)
+    if not talentName then return 0 end
+    for tab = 1, GetNumTalentTabs() do
+        for index = 1, GetNumTalents(tab) do
+            local name, _, _, _, rank = GetTalentInfo(tab, index)
+            if name == talentName then return rank or 0 end
+        end
+    end
+    return 0
+end
+
+function AC:HasRogueBleed(unit)
+    unit = unit or "target"
+    local bleedNames = {
+        ["Garrote"] = true, ["Rupture"] = true, ["Rend"] = true,
+        ["Deep Wounds"] = true, ["Rake"] = true, ["Rip"] = true,
+        ["Lacerate"] = true, ["Pounce Bleed"] = true, ["Piercing Shots"] = true
+    }
+    for index = 1, 40 do
+        local name = UnitDebuff(unit, index)
+        if not name then break end
+        if bleedNames[name] then return true end
+    end
+    return false
+end
+
+function AC:GetRogueDebuffStacks(unit, debuffName)
+    unit = unit or "target"
+    for index = 1, 40 do
+        local name, _, _, count = UnitDebuff(unit, index)
+        if not name then break end
+        if name == debuffName then return count or 0 end
+    end
+    return 0
+end
+
+function AC:HasTwoDaggersEquipped()
+    return self:HasMainHandDaggerEquipped() and self:HasDaggerEquipped(17)
+end
+
+function AC:HasDaggerEquipped(slot)
+    local itemLink = GetInventoryItemLink("player", slot)
+    local itemSubType = itemLink and select(7, GetItemInfo(itemLink))
+    return itemSubType == "Daggers" or itemSubType == "Dagger"
+end
+
+function AC:HasMainHandDaggerEquipped()
+    return self:HasDaggerEquipped(16)
 end
 
 -- Enhanced SnD casting with multiple fallback methods
@@ -1701,41 +1789,15 @@ function AC:CastSliceAndDice()
         return false
     end
     
-    -- Multiple casting attempts
+    if not self:KnowsSpell(S.SnD) or not self:IsUsableSpell(S.SnD) or
+       self:GetSpellCooldown(S.SnD) > 0.1 then
+        RogueDebug("SnD FAILED: spell is not known, usable, or ready")
+        return false
+    end
+
     RogueDebug("Attempting SnD cast - CP: " .. cp .. ", Energy: " .. energy)
-    
-    -- Method 1: Direct spell name
-    local success1 = pcall(function()
-        CastSpellByName("Slice and Dice")
-    end)
-    
-    if success1 then
-        RogueDebug("SnD SUCCESS (Method 1)")
-        return true
-    end
-    
-    -- Method 2: Spell ID
-    local success2 = pcall(function()
-        CastSpell(5171, BOOKTYPE_SPELL)
-    end)
-    
-    if success2 then
-        RogueDebug("SnD SUCCESS (Method 2)")
-        return true
-    end
-    
-    -- Method 3: Macro-style
-    local success3 = pcall(function()
-        RunMacroText("/cast Slice and Dice")
-    end)
-    
-    if success3 then
-        RogueDebug("SnD SUCCESS (Method 3)")
-        return true
-    end
-    
-    RogueDebug("SnD FAILED: All methods failed")
-    return false
+
+    return self:CastSpell(S.SnD, "player")
 end
 
 -- =============================================
@@ -1748,6 +1810,38 @@ function AC:AssassinationRotation(cp, energy, level, shouldUseAOE, enemies, shou
     local inGroup = IsInGroup()
     local rotationMode = self:GetLevelingRotationMode(level, inGroup)
     
+    -- Hunger for Blood can only be activated while a nearby target is bleeding.
+    -- Establish our own bleed when the group has not supplied one.
+    if self:KnowsSpell(S.HFB) and not self:HasRogueBleed("target") and cp >= 1 and
+       not self:IsRogueFastDyingTarget() and energy >= 25 and self:IsRogueSpellReady(S.Rupture) then
+        if self:CastSpell(S.Rupture, "target") then
+            RogueDebug("Rupture to enable Hunger for Blood")
+            return true
+        end
+    end
+
+    if self:KnowsSpell(S.HFB) and self:HasRogueBleed("target") and energy >= 15 then
+        local hasHFB = self:HasBuff("player", S.HFB)
+        local hfbTime = self:BuffTimeRemaining("player", S.HFB)
+        if (not hasHFB or (hfbTime > 0 and hfbTime <= 5)) and self:IsRogueSpellReady(S.HFB) then
+            if self:CastSpell(S.HFB, "player") then
+                RogueDebug(hasHFB and "Hunger for Blood refresh" or "Hunger for Blood application")
+                return true
+            end
+        end
+    end
+
+    local hasSnd = self:HasBuff("player", S.SnD)
+    local sndTime = self:BuffTimeRemaining("player", S.SnD)
+    local needsManualSnd = not hasSnd or (not self:HasCutToTheChase() and sndTime < 6)
+    if cp >= 1 and self:KnowsSpell(S.SnD) and needsManualSnd and
+       not self:IsRogueFastDyingTarget() and energy >= 25 then
+        if self:CastSliceAndDice() then
+            RogueDebug("Initial Slice and Dice (Assassination)")
+            return true
+        end
+    end
+
     -- Check if we should pool energy
     local shouldPool = false
     if cp >= 4 then
@@ -1763,30 +1857,6 @@ function AC:AssassinationRotation(cp, energy, level, shouldUseAOE, enemies, shou
     
     -- Threat-aware energy management (reduce DPS when high threat)
     local energyThreshold = shouldReduceThreat and 80 or self:GetEnergyThreshold("generator", level)
-    
-    -- ENHANCED HUNGER FOR BLOOD MANAGEMENT (Research-based)
-    if level >= 71 and self:KnowsSpell(S.HFB) and energy >= 15 then
-        local hasHFB = self:HasBuff("player", S.HFB)
-        local hfbTime = self:BuffTimeRemaining("player", S.HFB)
-        
-        -- Apply HFB if missing
-        if not hasHFB then
-            local success = self:CastSpell(S.HFB, "player")
-            if success then
-                RogueDebug("Hunger for Blood application (CRITICAL)")
-                return true
-            end
-        end
-        
-        -- RESEARCH-BASED: Refresh HFB at ~5 seconds remaining for optimal uptime
-        if self:ShouldUseAdvancedFeatures() and hasHFB and hfbTime <= 5 and hfbTime > 0 then
-            local success = self:CastSpell(S.HFB, "player")
-            if success then
-                RogueDebug("Hunger for Blood refresh (optimal timing)")
-                return true
-            end
-        end
-    end
     
     -- Enhanced AoE with improved calculations
     if level >= 66 and self:IsUsableSpell(S.FoK) then
@@ -1808,16 +1878,23 @@ function AC:AssassinationRotation(cp, energy, level, shouldUseAOE, enemies, shou
     
     -- ENHANCED FINISHER PRIORITY (Research-based optimization)
     if cp >= 4 or (cp >= 3 and self:IsRogueFastDyingTarget()) then
+        -- Cut to the Chase refreshes an existing Slice and Dice; establish it first.
+        if self:KnowsSpell(S.SnD) and not self:HasBuff("player", S.SnD) and energy >= 25 then
+            if self:CastSliceAndDice() then
+                RogueDebug("Initial Slice and Dice (Assassination)")
+                return true
+            end
+        end
+
         -- RESEARCH-BASED: Optimal Envenom usage for Assassination
         if level >= 62 and self:KnowsSpell(S.Envenom) and energy >= 35 then
-            local poisonStacks = select(4, UnitDebuff("target", S.DeadlyPoison)) or 0
-            local hasInstantPoison = self:HasDebuff("target", S.InstantPoison)
+            local poisonStacks = self:GetRogueDebuffStacks("target", S.DeadlyPoison)
             local complexity = self:GetRotationComplexity()
             
             -- Advanced: Check Cut to the Chase and poison stacks
             if complexity == "ADVANCED" and self:HasCutToTheChase() then
                 -- With Cut to the Chase: Use Envenom if we have poison stacks
-                if poisonStacks >= 1 or hasInstantPoison or cp >= 5 then
+                if poisonStacks >= 1 then
                     local success = self:CastSpell(S.Envenom, "target")
                     if success then
                         RogueDebug("Envenom (Cut to the Chase - " .. poisonStacks .. " stacks)")
@@ -1826,7 +1903,7 @@ function AC:AssassinationRotation(cp, energy, level, shouldUseAOE, enemies, shou
                 end
             elseif complexity ~= "BASIC" then
                 -- Without Cut to the Chase or simpler rotations: Still prioritize Envenom
-                if poisonStacks >= 1 or hasInstantPoison then
+                if poisonStacks >= 1 then
                     local success = self:CastSpell(S.Envenom, "target")
                     if success then
                         RogueDebug("Envenom (Assassination priority - " .. poisonStacks .. " stacks)")
@@ -1882,6 +1959,16 @@ function AC:CombatRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, sh
     local inGroup = IsInGroup()
     local rotationMode = self:GetLevelingRotationMode(level, inGroup)
     
+    -- Slice and Dice is cheaper than a builder, so maintain it before pooling.
+    local hasSnd = self:HasBuff("player", S.SnD)
+    local sndTime = self:BuffTimeRemaining("player", S.SnD)
+    if (not hasSnd or sndTime < 6) and not self:IsRogueFastDyingTarget() then
+        if self:CastSliceAndDice() then
+            RogueDebug("SnD refresh (Combat 100% uptime)")
+            return true
+        end
+    end
+
     -- Check if we should pool energy
     local shouldPool = false
     if cp >= 4 then
@@ -1897,19 +1984,6 @@ function AC:CombatRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, sh
     
     -- Threat-aware energy management (reduce DPS when high threat)
     local energyThreshold = shouldReduceThreat and 60 or self:GetEnergyThreshold("generator", level)
-    
-    -- CRITICAL: SnD maintenance (100% uptime for Combat)
-    local hasSnd = self:HasBuff("player", S.SnD)
-    local sndTime = self:BuffTimeRemaining("player", S.SnD)
-    
-    -- WotLK Meta: Refresh at 6 seconds, not 3
-    if (not hasSnd or sndTime < 6) and not self:IsRogueFastDyingTarget() then
-        local success = self:CastSliceAndDice()
-        if success then
-            RogueDebug("SnD refresh (Combat 100% uptime)")
-            return true
-        end
-    end
     
     -- Enhanced AoE with Combat's superior cleave potential
     if level >= 66 and self:IsUsableSpell(S.FoK) then
@@ -1934,9 +2008,9 @@ function AC:CombatRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, sh
     if cp >= 4 or (cp >= 3 and self:IsRogueFastDyingTarget()) then
         local armorPen = self:GetArmorPenetrationRating()
         
-        if armorPen < 1000 then
+        if armorPen < 1000 and not self:HasBuff("player", S.BladeFlurry) then
             -- Low ArP: Rupture priority for DoT damage
-            if level >= 20 and not self:HasDebuff("target", S.Rupture) and 
+            if self:KnowsSpell(S.Rupture) and not self:HasDebuff("target", S.Rupture) and
                not self:IsRogueFastDyingTarget() and energy >= 25 then
                 local success = self:CastSpell(S.Rupture, "target")
                 if success then
@@ -1946,17 +2020,8 @@ function AC:CombatRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, sh
             end
         end
         
-        -- High ArP or fallback: Eviscerate
-        if energy >= 35 and self:IsUsableSpell(S.Eviscerate) then
-            local success = self:CastSpell(S.Eviscerate, "target")
-            if success then
-                RogueDebug("Eviscerate (High ArP or fallback)")
-                return true
-            end
-        end
-        
         -- Expose Armor for group play
-        if IsInGroup() and energy >= 25 then
+        if IsInGroup() and self:KnowsSpell(S.ExposeArmor) and energy >= 25 then
             local targetClassification = UnitClassification("target")
             local isBoss = targetClassification == "worldboss" or 
                            targetClassification == "elite" or 
@@ -1972,6 +2037,15 @@ function AC:CombatRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, sh
                         return true
                     end
                 end
+            end
+        end
+
+        -- High ArP, Blade Flurry, or fallback: Eviscerate
+        if energy >= 35 and self:IsUsableSpell(S.Eviscerate) then
+            local success = self:CastSpell(S.Eviscerate, "target")
+            if success then
+                RogueDebug("Eviscerate (Combat finisher)")
+                return true
             end
         end
     end
@@ -1996,8 +2070,18 @@ function AC:SubtletyRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, 
     
     -- Honor Among Thieves passive CP generation awareness
     local hasHAT = self:HasHonorAmongThieves()
-    local cpThreshold = hasHAT and 3 or 4 -- Lower threshold with passive CP
+    local cpThreshold = 4
     
+    -- Maintain Slice and Dice before pooling for a more expensive builder.
+    local hasSnd = self:HasBuff("player", S.SnD)
+    local sndTime = self:BuffTimeRemaining("player", S.SnD)
+    if (not hasSnd or sndTime < 6) and not self:IsRogueFastDyingTarget() then
+        if self:CastSliceAndDice() then
+            RogueDebug("SnD refresh (Subtlety)")
+            return true
+        end
+    end
+
     -- Check if we should pool energy
     local shouldPool = false
     if cp >= cpThreshold then
@@ -2017,24 +2101,12 @@ function AC:SubtletyRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, 
     -- Shadow Dance burst phase
     if self:HasBuff("player", S.ShadowDance) then
         -- During Shadow Dance: spam Ambush
-        if energy >= 60 and self:KnowsSpell(S.Ambush) then
+        if energy >= 60 and self:IsBehindTarget() and self:KnowsSpell(S.Ambush) then
             local success = self:CastSpell(S.Ambush, "target")
             if success then
                 RogueDebug("Ambush (Shadow Dance burst)")
                 return true
             end
-        end
-    end
-    
-    -- SnD maintenance
-    local hasSnd = self:HasBuff("player", S.SnD)
-    local sndTime = self:BuffTimeRemaining("player", S.SnD)
-    
-    if (not hasSnd or sndTime < 6) and not self:IsRogueFastDyingTarget() then
-        local success = self:CastSliceAndDice()
-        if success then
-            RogueDebug("SnD refresh (Subtlety)")
-            return true
         end
     end
     
@@ -2059,12 +2131,11 @@ function AC:SubtletyRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, 
     
     -- Finishers with Honor Among Thieves awareness
     if cp >= cpThreshold or (cp >= 2 and self:IsRogueFastDyingTarget()) then
-        -- Hemorrhage finisher for debuff
-        if level >= 50 and not self:HasDebuff("target", S.Hemorrhage) and 
-           not self:IsRogueFastDyingTarget() and energy >= 35 then
-            local success = self:CastSpell(S.Hemorrhage, "target")
+        if self:KnowsSpell(S.Rupture) and not self:HasDebuff("target", S.Rupture) and
+           not self:IsRogueFastDyingTarget() and energy >= 25 then
+            local success = self:CastSpell(S.Rupture, "target")
             if success then
-                RogueDebug("Hemorrhage finisher (debuff)")
+                RogueDebug("Rupture (Subtlety finisher)")
                 return true
             end
         end
@@ -2079,6 +2150,15 @@ function AC:SubtletyRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, 
         end
     end
     
+    -- Hemorrhage is a builder and its physical-damage debuff should be maintained.
+    if cp <= 3 and self:KnowsSpell(S.Hemorrhage) and
+       not self:HasDebuff("target", S.Hemorrhage) and energy >= 35 then
+        if self:CastSpell(S.Hemorrhage, "target") then
+            RogueDebug("Hemorrhage builder (debuff)")
+            return true
+        end
+    end
+
     -- Builders with threat-aware and Honor Among Thieves energy management
     if energy >= energyThreshold then
         local generator = self:GetRogueBestGenerator("Subtlety", level, inMelee, energy)
@@ -2227,16 +2307,17 @@ function AC:RogueRotation()
     local targetIsElite = UnitClassification("target") == "elite" or 
                          UnitClassification("target") == "rareelite" or 
                          UnitClassification("target") == "worldboss"
-    self:UseRogueRacials(targetIsElite)
+    if self:UseRogueRacials(targetIsElite) then return true end
     
     -- Interrupt with better timing
-    if UnitCastingInfo("target") and energy >= 25 then
+    if (UnitCastingInfo("target") or UnitChannelInfo("target")) and energy >= 25 and
+       self:KnowsSpell(S.Kick) then
         local interrupted = false
         
         if self.TryInterrupt then
             interrupted = self:TryInterrupt(S.Kick, "target")
         else
-            if self:GetSpellCooldown(S.Kick) == 0 then
+            if self:IsRogueSpellReady(S.Kick) then
                 local success = self:CastSpell(S.Kick, "target")
                 if success then
                     interrupted = true
@@ -2259,7 +2340,7 @@ function AC:RogueRotation()
         end
         
         -- Premeditation for instant 2 CP (Subtlety)
-        if spec == "Subtlety" and level >= 20 and self:KnowsSpell(S.Premeditation) and cp == 0 then
+        if spec == "Subtlety" and self:KnowsSpell(S.Premeditation) and cp == 0 then
             local success = self:CastSpell(S.Premeditation, "target")
             if success then
                 RogueDebug("Premeditation opener (Subtlety)")
@@ -2274,7 +2355,16 @@ function AC:RogueRotation()
         
         -- Assassination: Mutilate for damage, Cheap Shot for control
         if spec == "Assassination" then
-            if level >= 50 and self:KnowsSpell(S.Mutilate) and energy >= 60 then
+            if self:KnowsSpell(S.HFB) and self:KnowsSpell(S.Garrote) and
+               energy >= 50 and (isEliteOrBoss or targetHP > 80) then
+                local success = self:CastSpell(S.Garrote, "target")
+                if success then
+                    RogueDebug("Garrote opener (enables Hunger for Blood)")
+                    return true
+                end
+            end
+
+            if self:KnowsSpell(S.Mutilate) and self:HasTwoDaggersEquipped() and energy >= 60 then
                 if not isEliteOrBoss or targetHP < 90 then
                     local success = self:CastSpell(S.Mutilate, "target")
                     if success then
@@ -2286,7 +2376,7 @@ function AC:RogueRotation()
         
         -- Combat: Garrote for bleed, Cheap Shot for stun lock
         elseif spec == "Combat" then
-            if level >= 48 and self:KnowsSpell(S.Garrote) and energy >= 50 then
+            if self:KnowsSpell(S.Garrote) and energy >= 50 then
                 if isEliteOrBoss or targetHP > 80 then
                     local success = self:CastSpell(S.Garrote, "target")
                     if success then
@@ -2298,7 +2388,7 @@ function AC:RogueRotation()
             
         -- Subtlety: Ambush from behind, Cheap Shot otherwise
         elseif spec == "Subtlety" then
-            if self:IsBehindTarget() and level >= 18 and self:KnowsSpell(S.Ambush) and energy >= 60 then
+            if self:KnowsSpell(S.Ambush) and energy >= 60 then
                 local success = self:CastSpell(S.Ambush, "target")
                 if success then
                     RogueDebug("Ambush opener (Subtlety burst)")
@@ -2308,7 +2398,7 @@ function AC:RogueRotation()
         end
         
         -- Default: Cheap Shot for control
-        if level >= 26 and self:KnowsSpell(S.CheapShot) and energy >= 60 then 
+        if self:KnowsSpell(S.CheapShot) and energy >= 60 then
             local success = self:CastSpell(S.CheapShot, "target")
             if success then
                 RogueDebug("Cheap Shot opener (control)")
@@ -2317,7 +2407,7 @@ function AC:RogueRotation()
         end
         
         -- Fallback to basic opener
-        if level >= 1 then 
+        if self:KnowsSpell(S.Sinister) then
             local success = self:CastSpell(S.Sinister, "target")
             if success then
                 RogueDebug("Sinister Strike opener")
@@ -2336,14 +2426,9 @@ function AC:RogueRotation()
         return true
     end
     
-    -- Fallback to regular cooldowns if enhanced didn't trigger
-    if self:UseRogueOffensiveCooldowns(spec, level, cp) then
-        return true
-    end
-    
     -- Target fleeing management
     if self:IsRogueTargetFleeing() and energy >= 15 then
-        if self:GetSpellCooldown(S.Sprint) == 0 then
+        if self:IsRogueSpellReady(S.Sprint) then
             local success = self:CastSpell(S.Sprint, "player")
             if success then
                 RogueDebug("Sprint to catch fleeing target")
@@ -2395,7 +2480,7 @@ function AC:CheckRogueBuffs(spec)
     end
     
     -- Conservative Sprint usage for travel
-    if not UnitAffectingCombat("player") and not IsMounted() and self:GetSpellCooldown(S.Sprint) == 0 then
+    if not UnitAffectingCombat("player") and not IsMounted() and self:IsRogueSpellReady(S.Sprint) then
         if self:Throttle("RogueSprintTravel", 180) then -- 3 minutes cooldown
             local inCity = IsResting()
             local moving = GetUnitSpeed("player") > 0
@@ -2495,9 +2580,9 @@ function AC:DiagnoseRogueIssues()
     
     -- Spec-specific issue detection
     if spec == "Assassination" then
-        if level >= 71 and not self:HasBuff("player", S.HFB) then
+        if self:KnowsSpell(S.HFB) and not self:HasBuff("player", S.HFB) then
             table.insert(issues, "CRITICAL: Hunger for Blood missing (major DPS loss)")
-            table.insert(recommendations, "Cast Hunger for Blood immediately for 100% uptime")
+            table.insert(recommendations, "Apply a bleed, then cast Hunger for Blood")
         end
         
         local hasCutToChase = self:HasCutToTheChase()
@@ -2594,7 +2679,7 @@ function AC:TestRogueRotation(scenario)
         
         self:Print("SnD Test Results:")
         self:Print("  Current SnD: " .. (hasSnd and ("Active (" .. string.format("%.1fs", sndTime) .. ")") or "Inactive"))
-        self:Print("  Should refresh (6s rule): " .. (not hasSnd or sndTime < 6 and "Yes" or "No"))
+        self:Print("  Should refresh (6s rule): " .. ((not hasSnd or sndTime < 6) and "Yes" or "No"))
         self:Print("  Can refresh: " .. (cp >= 1 and energy >= 25 and "Yes" or "No"))
         self:Print("  CP: " .. cp .. ", Energy: " .. energy)
         
@@ -2612,11 +2697,14 @@ function AC:TestRogueRotation(scenario)
         
         self:Print("Hunger for Blood Test:")
         self:Print("  Spec: " .. spec)
-        self:Print("  Level: " .. level .. " (requires 71+)")
+        self:Print("  Learned: " .. (self:KnowsSpell(S.HFB) and "Yes" or "No"))
+        self:Print("  Bleed available: " .. (self:HasRogueBleed("target") and "Yes" or "No"))
         self:Print("  Current HfB: " .. (hasHFB and "Active" or "MISSING"))
-        self:Print("  Should cast: " .. (spec == "Assassination" and level >= 71 and not hasHFB and "Yes" or "No"))
+        self:Print("  Should cast: " .. (spec == "Assassination" and self:KnowsSpell(S.HFB) and
+                   self:HasRogueBleed("target") and not hasHFB and "Yes" or "No"))
         
-        if spec == "Assassination" and level >= 71 and not hasHFB then
+        if spec == "Assassination" and self:KnowsSpell(S.HFB) and
+           self:HasRogueBleed("target") and not hasHFB then
             self:Print("  Attempting HfB cast...")
             local success = self:CastSpell(S.HFB, "player")
             self:Print("  Result: " .. (success and "SUCCESS" or "FAILED"))
@@ -2834,10 +2922,9 @@ function AC:ValidateRogueSetup()
     end
     
     -- WotLK Meta-specific validations
-    if spec == "Assassination" and level >= 71 then
-        if not self:KnowsSpell(S.HFB) then
-            table.insert(issues, "Hunger for Blood not learned (CRITICAL for Assassination)")
-        end
+    if spec == "Assassination" and self:GetRogueTalentRank("Hunger for Blood") > 0 and
+       not self:KnowsSpell(S.HFB) then
+        table.insert(issues, "Hunger for Blood talent is selected but its spell is unavailable")
     end
     
     if spec == "Combat" and level >= 10 then
@@ -2846,7 +2933,7 @@ function AC:ValidateRogueSetup()
         end
     end
     
-    if spec == "Subtlety" and level >= 80 then
+    if spec == "Subtlety" and level >= 60 then
         if not self:KnowsSpell(S.ShadowDance) then
             table.insert(issues, "Shadow Dance not learned (important for Subtlety)")
         end
@@ -2856,10 +2943,8 @@ function AC:ValidateRogueSetup()
     if level >= 10 then
         local cp = GetComboPoints("player", "target")
         local energy = UnitPower("player", 3)
-        if cp >= 1 and energy >= 25 then
-            local testResult = pcall(function()
-                CastSpell(5171, BOOKTYPE_SPELL)
-            end)
+        if cp >= 1 and energy >= 25 and self:KnowsSpell(S.SnD) and self:IsUsableSpell(S.SnD) then
+            local testResult = self:CastSliceAndDice()
             if not testResult then
                 table.insert(issues, "Spell casting test failed - spell ID method not working")
             end

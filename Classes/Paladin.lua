@@ -13,8 +13,8 @@ local S = {
     SealWisdom = "Seal of Wisdom",                  -- Level 30
     SealJustice = "Seal of Justice",                -- Level 16
     SealCommand = "Seal of Command",                -- Level 20 (talent)
-    SealVengeance = "Seal of Vengeance",            -- Level 22 (Alliance)
-    SealCorruption = "Seal of Corruption",          -- Level 22 (Horde)
+    SealVengeance = "Seal of Vengeance",            -- Level 64 (Alliance)
+    SealCorruption = "Seal of Corruption",          -- Level 66 (Horde)
     
     -- WotLK Judgement spells - can be cast with any active seal
     JudgementOfLight = "Judgement of Light",        -- Level 4 - healing effect
@@ -41,12 +41,12 @@ local S = {
     
     -- Retribution abilities (talents)
     DivineStorm = "Divine Storm",                   -- Level 60 (Ret talent)
-    TemplarVerdict = "Templar's Verdict",           -- Level 71 (Ret talent)
     
     -- Holy abilities
     HolyShock = "Holy Shock",                       -- Level 40 (Holy talent)
-    FlashOfLight = "Flash of Light",                -- Level 1 (baseline)
+    FlashOfLight = "Flash of Light",                -- Level 20 (baseline)
     HolyLight = "Holy Light",                       -- Level 1 (baseline)
+    BeaconOfLight = "Beacon of Light",              -- Holy talent
     LayOnHands = "Lay on Hands",                    -- Level 14 (baseline)
     
     -- AoE abilities
@@ -68,9 +68,14 @@ local S = {
     -- Cooldowns
     AvengingWrath = "Avenging Wrath",               -- Level 70
     DivinePlea = "Divine Plea",                     -- Level 71
+    DivineFavor = "Divine Favor",                   -- Holy talent
+    DivineIllumination = "Divine Illumination",     -- Holy talent
+    AuraMastery = "Aura Mastery",                   -- Holy talent
     
     -- Procs and Buffs
     ArtOfWar = "The Art of War",                    -- Retribution talent proc buff
+    InfusionOfLight = "Infusion of Light",          -- Holy talent proc buff
+    JudgementsOfThePure = "Judgements of the Pure", -- Holy talent buff
     
     -- Blessings (baseline)
     BlessingOfMight = "Blessing of Might",          -- Level 4
@@ -101,8 +106,8 @@ local SpellLevels = {
     [S.SealJustice] = 16,
     [S.SealLight] = 20,
     [S.SealCommand] = 20, -- Talent, but often taken by this level if Ret
-    [S.SealVengeance] = 22,
-    [S.SealCorruption] = 22,
+    [S.SealVengeance] = 64,
+    [S.SealCorruption] = 66,
     [S.SealWisdom] = 30,
     
     -- Judgement spells
@@ -122,8 +127,8 @@ local SpellLevels = {
     [S.AvengersShield] = 40,           -- PROTECTION TALENT (Requires 31 points in Protection)
     [S.HolyShield] = 30,               -- PROTECTION TALENT (Requires 21 points in Protection)
     [S.DivineStorm] = 60,              -- RETRIBUTION TALENT (Requires 51 points in Retribution)
-    [S.TemplarVerdict] = 999,          -- NOT A WOTLK SPELL - Kept as 999 to ensure it's not used
     [S.HolyShock] = 40,                -- HOLY TALENT (Requires 31 points in Holy)
+    [S.BeaconOfLight] = 60,            -- HOLY TALENT (Requires 51 points in Holy)
     
     -- High level abilities
     [S.ShieldOfRighteous] = 75,
@@ -132,7 +137,7 @@ local SpellLevels = {
     [S.SacredShield] = 80,
     
     -- Baseline utility
-    [S.FlashOfLight] = 1,
+    [S.FlashOfLight] = 20,
     [S.HolyLight] = 1,
     [S.DivineProtection] = 6,
     [S.Purify] = 8,
@@ -149,6 +154,9 @@ local SpellLevels = {
     [S.DivineSacrifice] = 30,
     [S.Cleanse] = 42,
     [S.HandOfSacrifice] = 46,
+    [S.DivineFavor] = 30,
+    [S.DivineIllumination] = 50,
+    [S.AuraMastery] = 20,
     
     -- Blessings
     [S.BlessingOfMight] = 4,
@@ -230,6 +238,26 @@ function AC:CastBlessingOnUnit(spellName, unit)
     if not spellName or not unit or not UnitExists(unit) then
         PaladinDebug("Invalid blessing target: " .. (unit or "nil"))
         return false
+    end
+
+    if not self:CanUsePaladinSpell(spellName) or not self:IsUsableSpell(spellName) or
+       self:GetSpellCooldown(spellName) > 0.1 then
+        PaladinDebug("Skipping unknown/unusable blessing: " .. spellName)
+        return false
+    end
+
+    -- Do not let a stale ground-target cursor make a blessing appear cast.
+    if SpellIsTargeting and SpellIsTargeting() then
+        PaladinDebug("Skipping blessing while another spell is awaiting a target")
+        return false
+    end
+
+    if unit ~= "player" and unit ~= "target" then
+        local rangeResult = IsSpellInRange(spellName, unit)
+        if rangeResult == 0 then
+            PaladinDebug("SKIPPED " .. spellName .. " - " .. unit .. " is out of range")
+            return false
+        end
     end
     
     -- Check what blessings the unit already has
@@ -393,6 +421,10 @@ function AC:CastBlessingOnUnit(spellName, unit)
     end
     
     -- Check if spell entered targeting mode (shouldn't happen for blessings on friendly target)
+    local castConfirmed = UnitCastingInfo("player") or UnitChannelInfo("player") or
+                          (SpellIsTargeting and SpellIsTargeting()) or
+                          self:GetSpellCooldown(spellName) > 0.05
+
     if SpellIsTargeting() then
         PaladinDebug("Spell entered targeting mode - applying to " .. unit)
         SpellTargetUnit(unit)
@@ -421,6 +453,15 @@ function AC:CastBlessingOnUnit(spellName, unit)
                 CastSpellByName(spellName)
             end
         end
+
+        castConfirmed = UnitCastingInfo("player") or UnitChannelInfo("player") or
+                        (SpellIsTargeting and SpellIsTargeting()) or
+                        self:GetSpellCooldown(spellName) > 0.05
+    end
+
+    if not castConfirmed then
+        PaladinDebug("Blessing cast did not start; returning failure")
+        return false
     end
     
     -- NEVER use CastSpellByName with a unit parameter in WotLK - it doesn't work!
@@ -481,6 +522,8 @@ function AC:ShouldUseBurstCooldowns(hasTarget, targetHP, enemies, inCombat)
     return false
 end
 
+AC.PaladinShouldUseBurstCooldowns = AC.ShouldUseBurstCooldowns
+
 -- =============================================
 -- UTILITY COOLDOWN MANAGEMENT
 -- =============================================
@@ -525,6 +568,148 @@ function AC:UseUtilityCooldowns()
     return false
 end
 
+function AC:GetPaladinHealingTarget()
+    local _, playerClass = UnitClass("player")
+    if playerClass ~= "PALADIN" then return nil, 1 end
+
+    local tankUnit = self:GetPaladinTankUnit()
+    local bestUnit, bestHealth, bestScore = "player", 1, -1
+    local units = {"player"}
+    local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
+    local count = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
+    for i = 1, count do
+        table.insert(units, prefix .. i)
+    end
+
+    for _, unit in ipairs(units) do
+        if UnitExists(unit) and UnitIsFriend("player", unit) and
+           not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
+            local maxHealth = UnitHealthMax(unit)
+            if maxHealth and maxHealth > 0 then
+                local health = UnitHealth(unit) / maxHealth
+                local inRange = unit == "player" or not self:CanUsePaladinSpell(S.HolyLight) or
+                                IsSpellInRange(S.HolyLight, unit) == 1
+                local score = (1 - health) * 100
+                if health < 0.95 and tankUnit and UnitIsUnit(unit, tankUnit) then
+                    score = score + 8
+                end
+                if inRange and score > bestScore then
+                    bestUnit, bestHealth = unit, health
+                    bestScore = score
+                end
+            end
+        end
+    end
+    return bestUnit, bestHealth
+end
+
+function AC:GetPaladinTankUnit()
+    if UnitExists("focus") and UnitIsFriend("player", "focus") and
+       not UnitIsDeadOrGhost("focus") then
+        return "focus"
+    end
+
+    for i = 1, 5 do
+        local unit = "maintank" .. i
+        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
+            return unit
+        end
+    end
+
+    local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
+    local count = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
+    local bestUnit, bestHealth = nil, 0
+    for i = 1, count do
+        local unit = prefix .. i
+        if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
+            local hasTankBuff = self:HasBuff(unit, S.RighteousFury) or
+                                self:HasBuff(unit, "Frost Presence") or
+                                self:HasBuff(unit, "Bear Form") or
+                                self:HasBuff(unit, "Dire Bear Form")
+            local maxHealth = UnitHealthMax(unit) or 0
+            if hasTankBuff then return unit end
+            if maxHealth > bestHealth then
+                bestUnit, bestHealth = unit, maxHealth
+            end
+        end
+    end
+    return bestUnit
+end
+
+function AC:PaladinEmergencyTriage()
+    local target, health = self:GetPaladinHealingTarget()
+    if not target or health >= 0.35 then return false end
+
+    if health < 0.15 and self:CastPaladinSpellEmergency(S.LayOnHands, target) then
+        return true
+    end
+    if health < 0.25 and self:IsPaladinSpellReady(S.DivineFavor) and
+       self:CastPaladinSpell(S.DivineFavor, "player") then
+        return true
+    end
+    if health < 0.35 and self:CastPaladinSpellEmergency(S.HolyShock, target) then
+        return true
+    end
+    return self:CastPaladinSpellEmergency(S.FlashOfLight, target)
+end
+
+function AC:PaladinSmartHeal()
+    local target, health = self:GetPaladinHealingTarget()
+    if not target or health >= 0.92 then return false end
+
+    if self:IsPlayerMovingCached() then
+        if self:CastPaladinSpell(S.HolyShock, target) then return true end
+        if self:HasBuff("player", S.InfusionOfLight) then
+            return self:CastPaladinSpell(S.FlashOfLight, target)
+        end
+        return false
+    end
+    if health < 0.55 and self:CastPaladinSpell(S.HolyShock, target) then
+        return true
+    end
+    if health < 0.70 and self:IsPaladinSpellReady(S.DivineIllumination) and
+       self:CastPaladinSpell(S.DivineIllumination, "player") then
+        return true
+    end
+    if health < 0.82 and self:CastPaladinSpell(S.HolyLight, target) then
+        return true
+    end
+    return self:CastPaladinSpell(S.FlashOfLight, target)
+end
+
+function AC:MaintainHolyPaladinBuffs(manaPercent)
+    local tankUnit = self:GetPaladinTankUnit()
+    local _, lowestHealth = self:GetPaladinHealingTarget()
+    if lowestHealth < 0.55 then return false end
+
+    if tankUnit and self:CanUsePaladinSpell(S.BeaconOfLight) and
+       (not self:HasBuff(tankUnit, S.BeaconOfLight) or
+        self:BuffTimeRemaining(tankUnit, S.BeaconOfLight) < 5) then
+        if self:CastPaladinSpell(S.BeaconOfLight, tankUnit) then return true end
+    end
+
+    if tankUnit and self:CanUsePaladinSpell(S.SacredShield) and
+       (not self:HasBuff(tankUnit, S.SacredShield) or
+        self:BuffTimeRemaining(tankUnit, S.SacredShield) < 4) then
+        if self:CastPaladinSpell(S.SacredShield, tankUnit) then return true end
+    end
+
+    if UnitExists("target") and UnitCanAttack("player", "target") and
+       (not self:HasBuff("player", S.JudgementsOfThePure) or
+        self:BuffTimeRemaining("player", S.JudgementsOfThePure) < 5) and
+       self:Throttle("HolyJudgementMaintenance", 20) then
+        if self:CastJudgement() then return true end
+    end
+
+    if manaPercent < 60 and lowestHealth > 0.75 and
+       self:IsPaladinSpellReady(S.DivinePlea) and
+       not self:HasBuff("player", S.DivinePlea) then
+        return self:CastPaladinSpell(S.DivinePlea, "player")
+    end
+
+    return false
+end
+
 -- =============================================
 -- ENHANCED SPELL CASTING WITH MOVEMENT CHECK AND DEBUG OVERRIDE
 -- =============================================
@@ -538,27 +723,29 @@ function AC:CastPaladinSpell(spellName, unit)
         PaladinDebug("FAILED to cast " .. (spellName or "unknown") .. " - invalid spell or target")
         return false
     end
+
+    -- Every branch, including blessings, must use the learned/usable gate.
+    -- Otherwise an unlearned blessing can return success after a harmless
+    -- CastSpellByName call and stall the rotation.
+    if not self:CanUsePaladinSpell(spellName) or not self:IsUsableSpell(spellName) or
+       self:GetSpellCooldown(spellName) > 0.1 then
+        PaladinDebug("SKIPPED " .. spellName .. " - spell is not known, usable, or ready")
+        return false
+    end
+
+    if SpellIsTargeting and SpellIsTargeting() then
+        PaladinDebug("SKIPPED " .. spellName .. " - another spell is awaiting a target")
+        return false
+    end
+
+    if unit ~= "player" and unit ~= "target" and IsSpellInRange(spellName, unit) == 0 then
+        PaladinDebug("SKIPPED " .. spellName .. " - " .. unit .. " is out of range")
+        return false
+    end
     
     -- Special handling for blessings on party/raid members
     if spellName:find("Blessing") and unit ~= "player" and unit ~= "target" then
-        -- Target the unit first, then cast
-        local currentTarget = UnitName("target")
-        TargetUnit(unit)
-        
-        -- Small delay to ensure target switch
-        if UnitName("target") == UnitName(unit) then
-            CastSpellByName(spellName)
-            PaladinDebug("Cast " .. spellName .. " on " .. (UnitName(unit) or unit) .. " (targeted first)")
-            
-            -- Restore previous target if we had one
-            if currentTarget then
-                TargetLastTarget()
-            end
-            return true
-        else
-            PaladinDebug("FAILED to target " .. (UnitName(unit) or unit) .. " for blessing")
-            return false
-        end
+        return self:CastBlessingOnUnit(spellName, unit)
     end
     
     -- REMOVED: Consecration is not ground-targeted in WotLK
@@ -602,6 +789,11 @@ function AC:CastPaladinSpell(spellName, unit)
         return false
     end
     
+    local beforeSpellCooldown = self:GetSpellCooldown(spellName)
+    local beforeGlobalCooldown = self:GetSpellCooldown(61304)
+    local beforeCast = UnitCastingInfo("player")
+    local beforeChannel = UnitChannelInfo("player")
+
     -- Actually cast the spell using the WoW API directly
     if unit == "player" then
         CastSpellByName(spellName)
@@ -633,7 +825,18 @@ function AC:CastPaladinSpell(spellName, unit)
             return false
         end
     end
-    
+
+    local afterSpellCooldown = self:GetSpellCooldown(spellName)
+    local afterGlobalCooldown = self:GetSpellCooldown(61304)
+    local started = (not beforeCast and UnitCastingInfo("player")) or
+                   (not beforeChannel and UnitChannelInfo("player"))
+    if not started and afterSpellCooldown <= beforeSpellCooldown + 0.05 and
+       afterGlobalCooldown <= beforeGlobalCooldown + 0.05 and
+       not (SpellIsTargeting and SpellIsTargeting()) then
+        PaladinDebug("Cast rejected by client: " .. spellName)
+        return false
+    end
+
     self.paladinLastSuccessfulCast = self.paladinLastSuccessfulCast or {}
     self.paladinLastSuccessfulCast[spellName] = GetTime()
 
@@ -647,14 +850,57 @@ function AC:CastPaladinSpellEmergency(spellName, unit)
     if not spellName then
         return false
     end
+
+    if unit ~= "player" and not UnitExists(unit) then
+        return false
+    end
+
+    if not self:CanUsePaladinSpell(spellName) or not self:IsUsableSpell(spellName) or
+       self:GetSpellCooldown(spellName) > 0.1 then
+        PaladinDebug("EMERGENCY skipped " .. spellName .. " - spell is not known, usable, or ready")
+        return false
+    end
+
+    if SpellIsTargeting and SpellIsTargeting() then
+        PaladinDebug("EMERGENCY skipped " .. spellName .. " - another spell is awaiting a target")
+        return false
+    end
+
+
+    if unit ~= "player" and unit ~= "target" and IsSpellInRange(spellName, unit) == 0 then
+        return false
+    end
     
+    local beforeSpellCooldown = self:GetSpellCooldown(spellName)
+    local beforeGlobalCooldown = self:GetSpellCooldown(61304)
+    local beforeCast = UnitCastingInfo("player")
+    local beforeChannel = UnitChannelInfo("player")
+
     -- For emergencies, skip most checks and just try to cast
+    local hadTarget = UnitExists("target")
+    local targetChanged = unit ~= "player" and unit ~= "target"
     if unit == "player" then
         CastSpellByName(spellName)
     else
         TargetUnit(unit) -- Ensure correct target for emergency heals on others
         CastSpellByName(spellName)
     end
+
+    if targetChanged then
+        if hadTarget then TargetLastTarget() else ClearTarget() end
+    end
+
+    local afterSpellCooldown = self:GetSpellCooldown(spellName)
+    local afterGlobalCooldown = self:GetSpellCooldown(61304)
+    local started = (not beforeCast and UnitCastingInfo("player")) or
+                   (not beforeChannel and UnitChannelInfo("player"))
+    if not started and afterSpellCooldown <= beforeSpellCooldown + 0.05 and
+       afterGlobalCooldown <= beforeGlobalCooldown + 0.05 and
+       not (SpellIsTargeting and SpellIsTargeting()) then
+        PaladinDebug("EMERGENCY cast did not start: " .. spellName)
+        return false
+    end
+
     PaladinDebug("EMERGENCY: Cast " .. spellName .. ( (unit and unit ~= "target" and unit ~= "player") and (" on " .. unit) or (unit == "player" and " (on self)" or "")))
     return true
 end
@@ -697,10 +943,15 @@ end
 
 -- Check for T10 2-piece set bonus (Lightsworn Battlegear)
 function AC:HasT10TwoSet()
-    -- Simple check - in a full implementation you'd check equipped gear
-    -- For now, assume players with high-end gear have the set
-    local level = UnitLevel("player")
-    return level >= 78 -- Rough approximation for ICC-level players
+    local setPieces = 0
+    for _, slot in ipairs({1, 3, 5, 7, 10}) do
+        local itemLink = GetInventoryItemLink("player", slot)
+        local itemName = itemLink and GetItemInfo(itemLink)
+        if itemName and string.find(itemName, "Lightsworn") then
+            setPieces = setPieces + 1
+        end
+    end
+    return setPieces >= 2
 end
 
 -- =============================================
@@ -927,10 +1178,12 @@ function AC:PaladinPull()
     -- Fallback: Ranged weapon for very low levels
     if level < 4 then
         if GetInventoryItemID("player", 18) then 
-            if not IsCurrentSpell("Auto Shot") and IsUsableSpell("Auto Shot") then
-                CastSpellByName("Auto Shot")
-                PaladinDebug("Pulling with ranged weapon")
-                return true
+            if not IsCurrentSpell("Auto Shot") and self:KnowsSpell("Auto Shot") and
+               self:IsUsableSpell("Auto Shot") then
+                if self:CastSpell("Auto Shot", "target") then
+                    PaladinDebug("Pulling with ranged weapon")
+                    return true
+                end
             end
         end
     end
@@ -997,8 +1250,7 @@ end
 
 function AC:IsProtectionNineSecondSpell(spellName)
     return spellName == S.HolyShield or spellName == S.Consecration or
-           spellName == S.HammerOfWrath or spellName == S.HolyWrath or
-           spellName == S.AvengersShield or spellName == "CAST_JUDGEMENT"
+           spellName == "CAST_JUDGEMENT"
 end
 
 function AC:GetProtectionNineSecondAbility(level, manaPercent, enemies, targetHP)
@@ -1042,7 +1294,10 @@ function AC:GetProtectionNineSecondAbility(level, manaPercent, enemies, targetHP
         return "CAST_JUDGEMENT", nil
     end
 
-    if (enemies >= 2 or targetHP > 40) and self:IsPaladinSpellReady(S.AvengersShield) then
+    -- Keep Avenger's Shield situational in combat so its bounce does not pull
+    -- unrelated packs or break crowd control on a routine single target.
+    if (enemies >= 2 or UnitCastingInfo("target") or UnitChannelInfo("target")) and
+       self:IsPaladinSpellReady(S.AvengersShield) then
         return S.AvengersShield, "target"
     end
 
@@ -1108,7 +1363,8 @@ function AC:Protection969Rotation(level, mana, manaPercent, enemies, hasTarget)
         return S.SacredShield, "player"
     end
 
-    if hasTarget and UnitCastingInfo("target") and self:ShouldInterruptSpell(UnitCastingInfo("target")) and
+    local targetCast = hasTarget and (UnitCastingInfo("target") or UnitChannelInfo("target"))
+    if targetCast and self:ShouldInterruptSpell(targetCast) and
        self:IsPaladinSpellReady(S.HammerOfJustice) then
         return S.HammerOfJustice, "target"
     end
@@ -1142,7 +1398,7 @@ function AC:Protection969Rotation(level, mana, manaPercent, enemies, hasTarget)
 end
 
 -- UPDATED: Combat rotation that prioritizes judgement usage and uses new CastPaladinSpell function
-function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent, enemies)
+function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent, enemies, inCombat)
     if spec == "Protection" then
         if self:HandleTankTargeting() then return true end
 
@@ -1200,23 +1456,14 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
             end
         end
     elseif spec == "Retribution" then
-        local complexity = self:GetRotationComplexity()
         local hasT10Set = self:HasT10TwoSet()
         local hasArtOfWar = self:HasArtOfWarProc()
-        
-        -- ENHANCED: 3.3.5a Research-based Retribution priority system
-        -- CRITICAL: Priority 1: Art of War proc for instant Exorcism (HUGE DPS gain)
-        if hasArtOfWar and self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) then
-            if self:CastPaladinSpell(S.Exorcism, "target") then return true end
-        end
-        
-        -- Priority 2: Offensive cooldowns (improved usage)
+
+        -- Align wings, trinkets, and racials on meaningful targets.
         if self:ShouldUseBurstCooldowns(hasTarget, targetHP, enemies, inCombat) then
-            -- Avenging Wrath (major DPS cooldown)
             if self:CanUsePaladinSpell(S.AvengingWrath) and self:IsUsableSpell(S.AvengingWrath) then
                 if self:CastPaladinSpell(S.AvengingWrath, "player") then return true end
             end
-            -- Use offensive trinkets and racials with burst
             if self:UseTrinkets() then
                 PaladinDebug("Used offensive trinket for burst")
                 return true
@@ -1225,48 +1472,59 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
                 return true
             end
         end
-        
-        -- Priority 3: Judgement (always highest priority for resource/debuff)
-        if self:CastJudgement() then return true end
-        
-        -- Priority 4: Hammer of Wrath (execute <20% OR during Avenging Wrath)
-        if (targetHP < 20 or self:HasBuff("player", S.AvengingWrath)) and 
-           self:CanUsePaladinSpell(S.HammerOfWrath) and self:IsUsableSpell(S.HammerOfWrath) then
-            if self:CastPaladinSpell(S.HammerOfWrath, "target") then return true end
+
+        if manaPercent < 45 and self:IsPaladinSpellReady(S.DivinePlea) and
+           not self:HasBuff("player", S.DivinePlea) then
+            if self:CastPaladinSpell(S.DivinePlea, "player") then return true end
         end
-        
-        -- CRITICAL FIX: Priority 5: Divine Storm (ALWAYS use when available, even single target)
-        -- Reason: T10 2-piece gives 40% chance to reset cooldown, making it highest priority
-        if self:CanUsePaladinSpell(S.DivineStorm) and self:IsUsableSpell(S.DivineStorm) then
-            if self:CastPaladinSpell(S.DivineStorm, "target") then return true end
+
+        local function castReady(spellName, unit)
+            return self:CanUsePaladinSpell(spellName) and self:IsUsableSpell(spellName) and
+                   self:CastPaladinSpell(spellName, unit or "target")
         end
-        
-        -- Priority 6: Crusader Strike (core ability, bread and butter)
-        if self:CanUsePaladinSpell(S.CrusaderStrike) and self:IsUsableSpell(S.CrusaderStrike) then
-            if self:CastPaladinSpell(S.CrusaderStrike, "target") then return true end
-        end
-        
-        -- Priority 7: Exorcism (filler, but only when stationary unless Art of War makes it instant)
-        if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 15 and not self:IsPlayerMovingCached() then
-            if self:CastPaladinSpell(S.Exorcism, "target") then return true end
-        end
-        
-        -- Priority 8: Consecration (positioning-dependent, improved range check)
-        if self:CanUsePaladinSpell(S.Consecration) and self:IsUsableSpell(S.Consecration) and 
-           manaPercent > 20 and not self:IsPlayerMovingCached() then
-            -- Improved range check: use spell range instead of interact distance
-            local inRange = IsSpellInRange(S.Consecration, "target") == 1
-            if inRange or not UnitExists("target") then -- Cast even without target if positioned
-                if self:CastPaladinSpell(S.Consecration, "player") then return true end
+        local function castConsecration()
+            if manaPercent <= 20 or not self:CanUsePaladinSpell(S.Consecration) or
+               not self:IsUsableSpell(S.Consecration) then return false end
+            if enemies >= 2 or CheckInteractDistance("target", 3) then
+                return self:CastPaladinSpell(S.Consecration, "player")
             end
+            return false
+        end
+        local function castHolyWrath()
+            return self:IsCurrentTargetDemonOrUndead() and castReady(S.HolyWrath, "player")
+        end
+        local function castExecute()
+            return targetHP < 20 and castReady(S.HammerOfWrath, "target")
+        end
+        local function castArtOfWar()
+            return hasArtOfWar and manaPercent > 15 and castReady(S.Exorcism, "target")
+        end
+
+        -- T10's Divine Storm reset is only prioritized when two real set pieces are equipped.
+        if hasT10Set and castReady(S.DivineStorm) then return true end
+
+        if enemies >= 3 then
+            if castReady(S.DivineStorm) then return true end
+            if castConsecration() then return true end
+            if castHolyWrath() then return true end
+            if castReady(S.CrusaderStrike) then return true end
+            if castExecute() then return true end
+            if self:CastJudgement() then return true end
+            if castArtOfWar() then return true end
+        else
+            if self:CastJudgement() then return true end
+            if castExecute() then return true end
+            if castReady(S.CrusaderStrike) then return true end
+            if castConsecration() then return true end
+            if castReady(S.DivineStorm) then return true end
+            if castArtOfWar() then return true end
+            if castHolyWrath() then return true end
         end
 
     elseif spec == "Holy" then -- SMART HEALING ENHANCED HOLY PALADIN
-        -- SMART HEALING PRIORITY 1: EMERGENCY TRIAGE
-        if self:EmergencyTriage() then return true end
-        
-        -- SMART HEALING PRIORITY 2: INTELLIGENT HEALING
-        if self:SmartHeal() then return true end
+        if self:PaladinEmergencyTriage() then return true end
+        if self:MaintainHolyPaladinBuffs(manaPercent) then return true end
+        if self:PaladinSmartHeal() then return true end
         
         -- PRIORITY 3: Offensive Holy when not healing
         if self:CanUsePaladinSpell(S.HolyShock) and self:IsUsableSpell(S.HolyShock) then -- Damage Holy Shock
@@ -1380,8 +1638,8 @@ function AC:PaladinRotation()
         end
     end
 
-    -- Protection should not spend tanking GCDs and target swaps on party blessings mid-combat.
-    if (not inCombat or spec ~= "Protection") and self:CheckPaladinBuffs(spec) then return true end
+    -- Normal blessing maintenance is out of combat; combat GCDs belong to the rotation.
+    if not inCombat and self:CheckPaladinBuffs(spec) then return true end
     
     if not inCombat then
         -- OOC Buffs (Auras, Seals)
@@ -1395,7 +1653,8 @@ function AC:PaladinRotation()
         local activeSealOOC = self:GetActiveSeal()
         local oocEnemies = hasTarget and math.max(enemies, 1) or 1
         local bestSealOOC = self:GetBestAvailableSeal(spec, level, manaPercent, "ooc", oocEnemies)
-        if (not activeSealOOC or (spec == "Protection" and bestSealOOC and activeSealOOC ~= bestSealOOC)) and
+        if (not activeSealOOC or ((spec == "Protection" or spec == "Retribution") and
+            bestSealOOC and activeSealOOC ~= bestSealOOC)) and
            self:Throttle("SealCheckOOC", 10) then
             local bestSeal = bestSealOOC
             if bestSeal and self:CanUsePaladinSpell(bestSeal) then
@@ -1423,6 +1682,9 @@ function AC:PaladinRotation()
         elseif spec == "Protection" and bestSeal and activeSeal ~= bestSeal then
             shouldSwitchSeal = (bestSeal == S.SealCommand and enemies >= 3) or
                                ((bestSeal == S.SealVengeance or bestSeal == S.SealCorruption) and enemies <= 2)
+        elseif spec == "Retribution" and bestSeal and activeSeal ~= bestSeal then
+            shouldSwitchSeal = (bestSeal == S.SealCommand and enemies >= 3) or
+                               ((bestSeal == S.SealVengeance or bestSeal == S.SealCorruption) and enemies <= 2)
         end
 
         if shouldSwitchSeal and self:Throttle("SealCheck", 5) then
@@ -1447,7 +1709,7 @@ function AC:PaladinRotation()
         local targetHP = UnitHealth("target") / UnitHealthMax("target") * 100
 
         -- Main DPS rotation FIRST - tanks need to be beasts with excellent DPS
-        local rotationResult = self:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent, enemies)
+        local rotationResult = self:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent, enemies, inCombat)
         if rotationResult then return true end
         
         return false
@@ -1493,9 +1755,7 @@ function AC:GetBestBlessingForUnit(unit, level)
 
     -- Check if we have reagents for Greater Blessings
     local symbolOfKings = GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0
-    local symbolOfDivinity = GetItemCount("Symbol of Divinity") > 0 or GetItemCount(21181) > 0
-    local hasGreaterReagents = symbolOfKings or symbolOfDivinity
-    local useGreater = level >= 60 and hasGreaterReagents
+    local useGreater = level >= 60 and symbolOfKings
     
     local bMight = useGreater and S.GreaterBlessingOfMight or S.BlessingOfMight
     local bWisdom = useGreater and S.GreaterBlessingOfWisdom or S.BlessingOfWisdom
@@ -1577,11 +1837,10 @@ function AC:CheckPaladinBuffs(spec) -- This is primarily for OOC party buffing
     
     -- Check blessing reagents
     local hasSymbolOfKings = GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0
-    local hasSymbolOfDivinity = GetItemCount("Symbol of Divinity") > 0 or GetItemCount(21181) > 0
     
-    if level >= 60 and not (hasSymbolOfKings or hasSymbolOfDivinity) then
+    if level >= 60 and not hasSymbolOfKings then
         if self:Throttle("ReagentWarning", 30) then
-            PaladinDebug("WARNING: No blessing reagents (Symbol of Kings/Divinity) - using basic blessings only")
+            PaladinDebug("WARNING: No Symbol of Kings - using basic blessings only")
         end
     end
 
@@ -1662,8 +1921,7 @@ function AC:CheckPaladinBuffs(spec) -- This is primarily for OOC party buffing
                    self:CanUsePaladinSpell(S.BlessingOfSanctuary) and
                    not self:HasBuff("player", S.BlessingOfSanctuary) and
                    not self:HasBuff("player", S.GreaterBlessingOfSanctuary) then
-                    local sanctuary = (level >= 60 and (GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0 or
-                                       GetItemCount("Symbol of Divinity") > 0 or GetItemCount(21181) > 0) and
+                    local sanctuary = (level >= 60 and (GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0) and
                                        self:CanUsePaladinSpell(S.GreaterBlessingOfSanctuary)) and
                                        S.GreaterBlessingOfSanctuary or S.BlessingOfSanctuary
                     if self:IsUsableSpell(sanctuary) and self:CastBlessingOnUnit(sanctuary, unit) then
@@ -2110,12 +2368,10 @@ function AC:SetupPaladinSlashCommands()
                 end
             elseif subcommand == "validate" then self:ValidatePaladinSetup()
             elseif subcommand == "reagents" then
-                local symbolOfKings = GetItemCount("Symbol of Kings") + GetItemCount(21177)
-                local symbolOfDivinity = GetItemCount("Symbol of Divinity") + GetItemCount(21181)
+                local symbolOfKings = GetItemCount(21177)
                 self:Print("BLESSING REAGENTS:")
                 self:Print(" Symbol of Kings: " .. symbolOfKings)
-                self:Print(" Symbol of Divinity: " .. symbolOfDivinity)
-                self:Print(" Can use Greater Blessings: " .. tostring(symbolOfKings > 0 or symbolOfDivinity > 0))
+                self:Print(" Can use Greater Blessings: " .. tostring(symbolOfKings > 0))
             elseif subcommand == "testbless" then
                 -- Test blessing on target
                 if not UnitExists("target") then
@@ -2171,9 +2427,7 @@ function AC:InitPaladinRotations()
     
     self.CheckPaladinBuffs = AC.CheckPaladinBuffs -- Ensure it's assigned for core to call if needed
     
-    self:Print("Paladin WotLK Rotations Initialized (vWithTalentLevelFix)")
-    self:Print("  Talent spell levels are now actual minimum character levels.")
-    self:Print("  Templar's Verdict remains 999 (Not a WotLK spell).")
+    self:Print("Paladin WotLK 3.3.5a rotations initialized")
 end
 
 -- =============================================
