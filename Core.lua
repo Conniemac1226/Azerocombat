@@ -4454,10 +4454,12 @@ function AC:OnUpdate()
         end
     end
     
-    -- Enhanced combat rotation execution
-    if (inCombat or hasTarget) and hasTarget then
+    -- Enhanced combat rotation execution. Paladins must keep their rotation
+    -- alive during brief target loss so seals and Holy healing can continue.
+    local canRunWithoutTarget = inCombat and class == "PALADIN"
+    if hasTarget or canRunWithoutTarget then
         -- Ensure auto-attack for melee classes
-        if class == "ROGUE" or class == "WARRIOR" or class == "PALADIN" or class == "DEATHKNIGHT" then
+        if hasTarget and (class == "ROGUE" or class == "WARRIOR" or class == "PALADIN" or class == "DEATHKNIGHT") then
             if not IsCurrentSpell("Attack") then
                 StartAttack()
             end

@@ -1055,8 +1055,8 @@ end
 
 -- Missing seals are a functional failure, not an optional buff optimization:
 -- Judgement and melee seal procs depend on one being active. Refresh without
--- the normal seal-switch throttle so an expiration in combat is repaired on
--- the next available GCD.
+-- the normal seal-switch throttle so an expiration is repaired on the next
+-- available GCD, whether combat is active or not.
 function AC:RefreshMissingPaladinSeal(spec, level, manaPercent, enemies)
     if self:GetActiveSeal() then return false end
 
@@ -1064,7 +1064,7 @@ function AC:RefreshMissingPaladinSeal(spec, level, manaPercent, enemies)
     if not bestSeal or not self:CanUsePaladinSpell(bestSeal) then return false end
 
     if self:CastPaladinSpell(bestSeal, "player") then
-        PaladinDebug("Restored missing seal in combat: " .. bestSeal)
+        PaladinDebug("Restored missing seal: " .. bestSeal)
         return true
     end
 
@@ -1962,6 +1962,12 @@ function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party bu
     local level = UnitLevel("player")
     local manaMax = UnitPowerMax("player", 0)
     local manaPercent = (manaMax > 0) and (UnitPower("player", 0) / manaMax * 100) or 100
+
+    -- Core runs this class-buff pass even when no hostile target exists. Keep
+    -- seal maintenance here as well as in PaladinRotation so a 30-minute seal
+    -- cannot remain expired between pulls.
+    if self:RefreshMissingPaladinSeal(spec, level, manaPercent, 1) then return true end
+
     if manaPercent < 30 then return false end -- Lowered mana requirement for more frequent blessing
     
     -- Check blessing reagents
