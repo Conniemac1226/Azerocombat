@@ -259,20 +259,172 @@ local function GetUnitBlessing(unit)
            state.first and state.first.blessingType or nil
 end
 
-local function UnitHasBuffByScan(unit, wantedBuff)
+local function GetUnitBuffByScan(unit, wantedBuff)
     if not unit or not wantedBuff or not UnitExists(unit) then return false end
 
     -- Name lookup is the most direct path on 3.3.5; retain the full scan for
     -- private-server clients that do not support named party aura queries.
-    local directName = UnitBuff(unit, wantedBuff)
-    if directName == wantedBuff then return true end
+    local directName, _, _, _, _, _, _, directCaster = UnitBuff(unit, wantedBuff)
+    if directName == wantedBuff then return directName, directCaster end
 
     for i = 1, 40 do
-        local buffName = UnitBuff(unit, i)
-        if buffName == wantedBuff then return true end
+        local buffName, _, _, _, _, _, _, caster = UnitBuff(unit, i)
+        if buffName == wantedBuff then return buffName, caster end
     end
 
+    return nil, nil
+end
+
+local function UnitHasBuffByScan(unit, wantedBuff)
+    return GetUnitBuffByScan(unit, wantedBuff) ~= nil
+end
+
+-- Battle Shout is short-lived compared with blessings, and playerbots often
+-- let it fall off between pulls. Once a unit has actually received a shout,
+-- remember the Warrior providing it so the Paladin does not replace a useful
+-- alternate blessing with Might during that temporary downtime.
+local BattleShoutReservations = {}
+local MightSignatureCache = {value = nil, checkedAt = 0}
+
+local function GetStableUnitKey(unit)
+    if not unit or not UnitExists(unit) then return nil end
+    local guid = UnitGUID(unit)
+    if guid then return guid end
+
+    local name, realm = UnitName(unit)
+    if not name then return nil end
+    return string.lower(name .. "-" .. (realm or ""))
+end
+
+local function AddCurrentWarriors(result)
+    local function addWarrior(unit)
+        if UnitExists(unit) and UnitIsConnected(unit) and select(2, UnitClass(unit)) == "WARRIOR" then
+            local key = GetStableUnitKey(unit)
+            if key then result[key] = true end
+        end
+    end
+
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do addWarrior("raid" .. i) end
+    else
+        addWarrior("player")
+        for i = 1, GetNumPartyMembers() do addWarrior("party" .. i) end
+    end
+end
+
+local function GetPaladinMightSignature()
+    local now = GetTime()
+    if MightSignatureCache.value and now - MightSignatureCache.checkedAt < 1 then
+        return MightSignatureCache.value
+    end
+
+    local knownRanks, highestRank = 0, ""
+    for tabIndex = 1, GetNumSpellTabs() do
+        local _, _, offset, numSpells = GetSpellTabInfo(tabIndex)
+        for spellIndex = offset + 1, offset + numSpells do
+            local spellName, rank = GetSpellName(spellIndex, BOOKTYPE_SPELL)
+            if spellName == S.BlessingOfMight then
+                knownRanks = knownRanks + 1
+                highestRank = rank or highestRank
+            end
+        end
+    end
+
+    local improvedMightRank = 0
+    for tabIndex = 1, 3 do
+        for talentIndex = 1, (GetNumTalents(tabIndex) or 0) do
+            local talentName, _, _, _, currentRank = GetTalentInfo(tabIndex, talentIndex)
+            if talentName == "Improved Blessing of Might" then
+                improvedMightRank = currentRank or 0
+                break
+            end
+        end
+    end
+
+    MightSignatureCache.value = table.concat(
+        {UnitLevel("player") or 0, knownRanks, highestRank, improvedMightRank}, "|"
+    )
+    MightSignatureCache.checkedAt = now
+    return MightSignatureCache.value
+end
+
+local function RememberBattleShoutReservation(unit, caster)
+    local targetKey = GetStableUnitKey(unit)
+    if not targetKey then return end
+
+    local providers = {}
+    local function addProvider(providerUnit)
+        if providerUnit and UnitExists(providerUnit) and UnitIsConnected(providerUnit) and
+           select(2, UnitClass(providerUnit)) == "WARRIOR" then
+            local providerKey = GetStableUnitKey(providerUnit)
+            if providerKey then providers[providerKey] = true end
+        end
+    end
+
+    addProvider(caster)
+    if not next(providers) then addProvider(unit) end
+    -- Some 3.3.5 private servers omit unitCaster for party auras. In that case
+    -- retain the reservation while any Warrior present when the shout was
+    -- observed remains in the group.
+    if not next(providers) then AddCurrentWarriors(providers) end
+    if not next(providers) then return end
+
+    BattleShoutReservations[targetKey] = {
+        providers = providers,
+        mightSignature = GetPaladinMightSignature(),
+    }
+end
+
+local function HasBattleShoutReservation(unit)
+    local targetKey = GetStableUnitKey(unit)
+    local reservation = targetKey and BattleShoutReservations[targetKey]
+    if not reservation then return false end
+
+    -- Learning a new rank, leveling, or changing Improved Might talents makes
+    -- the old provider decision stale. A currently active shout can establish
+    -- a new reservation immediately; otherwise Might is considered again.
+    if reservation.mightSignature ~= GetPaladinMightSignature() then
+        BattleShoutReservations[targetKey] = nil
+        return false
+    end
+
+    local currentWarriors = {}
+    AddCurrentWarriors(currentWarriors)
+    for providerKey in pairs(reservation.providers) do
+        if currentWarriors[providerKey] then
+            -- If the same Warrior has visibly switched to Commanding Shout,
+            -- it is no longer acting as this unit's attack-power provider.
+            local commandingShout, commandingCaster = GetUnitBuffByScan(unit, "Commanding Shout")
+            local commandingKey = commandingShout and GetStableUnitKey(commandingCaster)
+            if commandingKey and commandingKey == providerKey then
+                BattleShoutReservations[targetKey] = nil
+                return false
+            end
+            return true
+        end
+    end
+
+    BattleShoutReservations[targetKey] = nil
     return false
+end
+
+local function PruneBattleShoutReservations()
+    local currentUnits = {}
+    local function addUnit(unit)
+        local key = GetStableUnitKey(unit)
+        if key then currentUnits[key] = true end
+    end
+
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do addUnit("raid" .. i) end
+    else
+        addUnit("player")
+        for i = 1, GetNumPartyMembers() do addUnit("party" .. i) end
+    end
+
+    for targetKey in pairs(BattleShoutReservations) do
+        if not currentUnits[targetKey] then BattleShoutReservations[targetKey] = nil end
+    end
 end
 
 local PaladinAuras = {
@@ -342,20 +494,27 @@ end
 -- HELPER FUNCTIONS
 -- =============================================
 
--- Get spell index from spellbook (properly handles rank)
+-- Get the highest learned rank from the spellbook. WotLK keeps lower ranks in
+-- the book, so returning the first name match downranks blessings to rank 1.
 function AC:GetSpellIndex(spellName)
     if not spellName then return nil end
-    
-    local maxSpells = 500
+
+    local bestIndex, bestRank = nil, -1
     for tabIndex = 1, GetNumSpellTabs() do
         local _, _, offset, numSpells = GetSpellTabInfo(tabIndex)
         for i = offset + 1, offset + numSpells do
             local name, rank = GetSpellName(i, BOOKTYPE_SPELL)
             if name == spellName then
-                return i, BOOKTYPE_SPELL
+                local rankNumber = tonumber(string.match(rank or "", "(%d+)")) or 0
+                if not bestIndex or rankNumber >= bestRank then
+                    bestIndex = i
+                    bestRank = rankNumber
+                end
             end
         end
     end
+
+    if bestIndex then return bestIndex, BOOKTYPE_SPELL end
     return nil
 end
 
@@ -394,9 +553,14 @@ function AC:CastBlessingOnUnit(spellName, unit)
         PaladinDebug((UnitName(unit) or unit) .. " already has " .. existingTypeBlessing.name .. ", skipping")
         return false
     end
-    if requestedType == "Might" and UnitHasBuffByScan(unit, "Battle Shout") then
-        PaladinDebug((UnitName(unit) or unit) .. " has Battle Shout; skipping conflicting " .. spellName)
-        return false
+    if requestedType == "Might" then
+        local battleShout, battleShoutCaster = GetUnitBuffByScan(unit, "Battle Shout")
+        if battleShout then RememberBattleShoutReservation(unit, battleShoutCaster) end
+        if battleShout or HasBattleShoutReservation(unit) then
+            local reason = battleShout and "has Battle Shout" or "has a remembered Battle Shout provider"
+            PaladinDebug((UnitName(unit) or unit) .. " " .. reason .. "; skipping conflicting " .. spellName)
+            return false
+        end
     end
     
     -- Skip range check for self
@@ -1877,7 +2041,9 @@ function AC:GetBestBlessingForUnit(unit, level)
     if not class then return nil end
 
     local blessingState = GetUnitBlessingState(unit)
-    local hasBattleShout = UnitHasBuffByScan(unit, "Battle Shout")
+    local battleShout, battleShoutCaster = GetUnitBuffByScan(unit, "Battle Shout")
+    if battleShout then RememberBattleShoutReservation(unit, battleShoutCaster) end
+    local hasBattleShoutCoverage = battleShout ~= nil or HasBattleShoutReservation(unit)
 
     -- Check if we have reagents for Greater Blessings
     local symbolOfKings = GetItemCount("Symbol of Kings") > 0 or GetItemCount(21177) > 0
@@ -1928,7 +2094,7 @@ function AC:GetBestBlessingForUnit(unit, level)
         local blessing = spellsByType[blessingType]
         if blessing and self:CanUsePaladinSpell(blessing) then
             local covered = blessingState.byType[blessingType] or
-                            (blessingType == "Might" and hasBattleShout)
+                            (blessingType == "Might" and hasBattleShoutCoverage)
             if not covered then
                 return blessing
             end
@@ -1949,6 +2115,8 @@ function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party bu
     if not force and not self:Throttle("PaladinPartyBuffCheck", 3) then return false end
     if UnitAffectingCombat("player") then return false end
     if UnitChannelInfo("player") or UnitCastingInfo("player") then return false end
+
+    PruneBattleShoutReservations()
     
     -- Check if on GCD
     local gcdStart, gcdDuration = GetSpellCooldown("61304") -- GCD reference spell
