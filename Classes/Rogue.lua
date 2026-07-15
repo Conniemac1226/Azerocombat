@@ -2853,14 +2853,16 @@ function AC:InitRogueRotations()
     -- Register all rotation functions with enhanced error handling
     local function SafeRotation(rotationFunc)
         return function(self)
-            local success, err = pcall(rotationFunc, self)
+            local success, result = pcall(rotationFunc, self)
             if not success then
-                RogueDebug("Rotation error: " .. tostring(err))
+                RogueDebug("Rotation error: " .. tostring(result))
                 if not self.lastRotationError or GetTime() - self.lastRotationError > 10 then
                     self:Print("Rotation error detected - check debug log")
                     self.lastRotationError = GetTime()
                 end
+                return false
             end
+            return result == true
         end
     end
     

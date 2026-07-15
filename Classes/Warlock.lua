@@ -3128,10 +3128,10 @@ function AC:Warlock()
 
     -- Normal busy states are not rotation failures.
     if UnitCastingInfo("player") or UnitChannelInfo("player") then
-        return true
+        return "busy"
     end
     if self:IsGlobalCooldownActive() then
-        return true
+        return "busy"
     end
     
     local procs = self:UpdateWarlockProcs()
@@ -3216,7 +3216,7 @@ function AC:Warlock()
         end
     else
         if UnitCastingInfo("player") or UnitChannelInfo("player") or self:IsGlobalCooldownActive() then
-            return true
+            return "busy"
         end
         if self:Throttle("WarlockNoSpellSelected", 1.5) then
             WarlockDebug("No spell selected from rotation (idle tick)")

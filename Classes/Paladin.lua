@@ -2673,10 +2673,10 @@ function AC:InitPaladinRotations()
     self.rotations = self.rotations or {}
     if not self.rotations["PALADIN"] then self.rotations["PALADIN"] = {} end
     
-    self.rotations["PALADIN"]["Holy"] = function(s) s:PaladinRotation() end
-    self.rotations["PALADIN"]["Protection"] = function(s) s:PaladinRotation() end
-    self.rotations["PALADIN"]["Retribution"] = function(s) s:PaladinRotation() end
-    self.rotations["PALADIN"]["None"] = function(s) s:PaladinRotation() end
+    self.rotations["PALADIN"]["Holy"] = function(s) return s:PaladinRotation() end
+    self.rotations["PALADIN"]["Protection"] = function(s) return s:PaladinRotation() end
+    self.rotations["PALADIN"]["Retribution"] = function(s) return s:PaladinRotation() end
+    self.rotations["PALADIN"]["None"] = function(s) return s:PaladinRotation() end
     
     self.CheckPaladinBuffs = AC.CheckPaladinBuffs -- Ensure it's assigned for core to call if needed
     

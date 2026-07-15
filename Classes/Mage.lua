@@ -1294,7 +1294,7 @@ function AC:MageRotation()
     -- Channels cannot be interrupted by the rotation. Regular casts still
     -- allow Counterspell to fire below because it is off the normal cast path.
     if UnitChannelInfo("player") then
-        return true
+        return "busy"
     end
     
     -- Always maintain buffs (in and out of combat)
@@ -1346,7 +1346,7 @@ function AC:MageRotation()
     if not hasTarget then return false end
 
     if inCombat and self:TryMageInterrupt() then return true end
-    if UnitCastingInfo("player") then return true end
+    if UnitCastingInfo("player") then return "busy" end
 
     if inCombat and self:TryMageUtility() then return true end
     

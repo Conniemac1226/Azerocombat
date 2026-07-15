@@ -137,12 +137,21 @@ AC.ResourceStates = {}
 
 function AC:UpdateResourceState()
     local class = self:GetPlayerClass()
+    local health = UnitHealth("player") / UnitHealthMax("player") * 100
+    local mana = UnitPower("player", 0)
+    local energy = UnitPower("player", 3)
+    local combo = GetComboPoints("player", "target")
     local state = {
         timestamp = GetTime(),
-        health = UnitHealth("player") / UnitHealthMax("player") * 100,
-        primary = UnitPower("player", 0), -- Mana for most classes
-        secondary = UnitPower("player", 3), -- Energy for rogues
-        tertiary = GetComboPoints("player", "target"), -- Combo points for rogues
+        health = health,
+        mana = mana,
+        energy = energy,
+        combo = combo,
+        -- Retain the original generic fields for compatibility with external
+        -- consumers while the named fields support GetResourceTrend correctly.
+        primary = mana,
+        secondary = energy,
+        tertiary = combo,
     }
     
     self.ResourceStates[class] = state
@@ -251,39 +260,28 @@ end
 
 function AC:HasMajorCooldownsAvailable()
     local class = self:GetPlayerClass()
-    
+
     if class == "ROGUE" then
         local spec = self:GetPlayerSpec()
+        local function ready(spellName)
+            return self:KnowsSpell(spellName) and self:GetSpellCooldown(spellName) == 0
+        end
+
         if spec == "Assassination" then
-            return self:GetSpellCooldown("Vendetta") == 0 or self:GetSpellCooldown("Cold Blood") == 0
+            return ready("Cold Blood")
         elseif spec == "Combat" then
-            return self:GetSpellCooldown("Adrenaline Rush") == 0 or self:GetSpellCooldown("Killing Spree") == 0
+            return ready("Adrenaline Rush") or ready("Killing Spree")
         elseif spec == "Subtlety" then
-            return self:GetSpellCooldown("Shadow Dance") == 0 or self:GetSpellCooldown("Preparation") == 0
+            return ready("Shadow Dance") or ready("Preparation")
         end
     end
-    
+
     return false
 end
 
 -- =============================================
 -- GROUND AOE TARGETING SYSTEM (FIXED)
 -- =============================================
-
--- Global ground targeting system with improved channel tracking
-AC.groundAOELastCastTime = {}
-AC.groundAOEChannelEndTimes = {}  -- Track when channels are expected to end
-AC.groundAOESpellDurations = {
-    ["Rain of Fire"] = 8,     -- 8 second channel
-    ["Blizzard"] = 8,         -- 8 second channel
-    ["Hurricane"] = 10,       -- 10 second channel
-    ["Volley"] = 6,           -- 6 second channel
-    ["Launch Explosive Trap"] = 20, -- Server-side launched trap effect
-    ["Launch Immolation Trap"] = 15, -- Server-side launched trap effect
-    ["Flamestrike"] = 8,      -- Not channeled but has 8s effect
-    ["Consecration"] = 8,     -- Not channeled but has 8s effect
-    ["Death and Decay"] = 10  -- Not channeled but has 10s effect
-}
 
 -- FIXED: Much simpler IsChanneling function
 function AC:IsChanneling(spellName)
@@ -373,64 +371,70 @@ function AC:SafeCastGroundAOE(spellName)
     return true
 end
 
--- SIMPLIFIED: Remove the aggressive blocking
-function AC:IsBusyChanneling()
-    -- Only check the API - no fallback tracking that causes delays
-    return UnitChannelInfo and UnitChannelInfo("player") ~= nil
-end
-
--- Enhanced enemy count for AoE determination
+-- Count addressable enemies within a player-relative radius around a nearby
+-- unit. Stock 3.3.5 cannot measure the distance between two arbitrary units,
+-- so callers using another center (currently only melee-range "target") get a
+-- conservative approximation without unpositioned combat-log entries.
 function AC:GetEnemiesAtLocation(unit, radius)
-    -- Don't run this function too often - but return cached value instead of 0
     if not unit or not UnitExists(unit) then return 0 end
-    if not self:Throttle("EnemyCount"..unit, 0.5) then 
-        return self.lastLocationEnemyCount or 1 -- Return cached instead of 0
+    radius = radius or 30
+
+    self.locationEnemyCountCache = self.locationEnemyCountCache or {}
+    local cacheKey = tostring(unit) .. ":" .. tostring(radius)
+    if not self:Throttle("EnemyCountAtLocation_" .. cacheKey, 0.5) then
+        return self.locationEnemyCountCache[cacheKey] or 1
     end
-    
-    -- FIXED: Use the same robust logic as main GetEnemyCount()
+
     local count = 0
     local processedGUIDs = {}
-    radius = radius or 30
-    
-    -- METHOD 1: Check current target
-    if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target") then
-        local targetGUID = UnitGUID("target")
-        if targetGUID then
+
+    local function withinPlayerRadius(candidate)
+        if UnitIsUnit(candidate, unit) then return true end
+
+        local interactIndex
+        if radius <= 10 then
+            interactIndex = 3 -- Duel distance, approximately 10 yards.
+        elseif radius <= 11 then
+            interactIndex = 2 -- Trade distance, approximately 11 yards.
+        elseif radius <= 28 then
+            interactIndex = 1 -- Inspect distance, approximately 28 yards.
+        else
+            return true -- Unit tokens are the only safe evidence beyond 28 yd.
+        end
+
+        local ok, inRange = pcall(CheckInteractDistance, candidate, interactIndex)
+        return ok and inRange == true
+    end
+
+    local function addEnemy(candidate)
+        if not candidate or not UnitExists(candidate) or not UnitCanAttack("player", candidate) or
+           UnitIsDeadOrGhost(candidate) or not withinPlayerRadius(candidate) then
+            return
+        end
+
+        local guid = UnitGUID(candidate)
+        if guid and not processedGUIDs[guid] then
+            processedGUIDs[guid] = true
             count = count + 1
-            processedGUIDs[targetGUID] = true
         end
     end
-    
-    -- METHOD 2: Check party/raid member targets
-    local groupSize = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
-    local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
-    
-    for i = 1, groupSize do
-        local memberUnit = unitPrefix .. i
-        if UnitExists(memberUnit) then
-            local memberTarget = memberUnit .. "target"
-            if UnitExists(memberTarget) and UnitCanAttack("player", memberTarget) and not UnitIsDead(memberTarget) then
-                local targetGUID = UnitGUID(memberTarget)
-                if targetGUID and not processedGUIDs[targetGUID] then
-                    count = count + 1
-                    processedGUIDs[targetGUID] = true
-                end
-            end
-        end
+
+    addEnemy(unit)
+    addEnemy("target")
+    addEnemy("focus")
+    addEnemy("mouseover")
+
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do addEnemy("raid" .. i .. "target") end
+    else
+        for i = 1, GetNumPartyMembers() do addEnemy("party" .. i .. "target") end
     end
-    
-    -- METHOD 3: Check combat log enemies (recent)
-    if self.combatEnemies then
-        for guid, data in pairs(self.combatEnemies) do
-            if not processedGUIDs[guid] and GetTime() - data.lastSeen <= 2 then
-                count = count + 1
-                processedGUIDs[guid] = true
-            end
-        end
+
+    for i = 1, 40 do
+        addEnemy("nameplate" .. i)
     end
-    
-    -- Cache the result
-    self.lastLocationEnemyCount = count
+
+    self.locationEnemyCountCache[cacheKey] = count
     return count
 end
 
@@ -3131,23 +3135,12 @@ function AC:GetEnemyCount(range, silent)
     return count
 end
 
--- IMPROVED: Add a specific function to check if AOE should be used
 function AC:ShouldUseAOE()
     if self:IsSingleTargetMode() then
         return false
     end
 
-    local enemyCount = self:GetEnemyCount()
-    local threshold = 3  -- CHANGED: Be more conservative - only use AOE with 3+ enemies
-    
-    -- Check if we're in a dungeon or raid - but don't be overly aggressive
-    local inInstance, instanceType = IsInInstance()
-    if inInstance and (instanceType == "party" or instanceType == "raid") then
-        -- Only use AOE if we actually detect multiple enemies
-        return enemyCount >= threshold
-    end
-    
-    return enemyCount >= threshold
+    return self:GetEnemyCount() >= 3
 end
 
 function AC:GetTargetingMode()
@@ -3220,10 +3213,6 @@ function AC:BuffTimeRemaining(unit, spellName)
     return 0
 end
 
-function AC:GetPower(powerType)
-    return UnitPower("player", powerType or PowerType)
-end
-
 function AC:GetSpellCooldown(spellName)
     local start, duration = GetSpellCooldown(spellName)
     if start and duration then
@@ -3271,17 +3260,8 @@ function AC:IsUsableSpell(spellName)
         -- server spells.
         return not noMana
     end
-    if usable and not noMana then
-        return true
-    end
-
-    -- Only check if spell is usable (resources/stance/etc) - let caller handle cooldown
-    if not usable or noMana then
-        return false
-    end
-    
-    -- REMOVED: Cooldown check - callers handle this separately to avoid conflicts
-    return true  -- Usable (caller checks cooldown separately)
+    -- Cooldowns remain the caller's responsibility.
+    return (usable and not noMana) and true or false
 end
 
 -- Shared learned-spell/level gate for optional max-level features.  This is
@@ -3483,51 +3463,102 @@ end
 -- ENHANCED PERFORMANCE MONITORING
 -- =============================================
 
--- Track rotation performance
-AC.PerformanceMetrics = {
-    rotationCalls = 0,
-    successfulCasts = 0,
-    failedCasts = 0,
-    avgExecutionTime = 0,
-    lastResetTime = GetTime(),
-}
+local PERFORMANCE_WINDOW_SECONDS = 300
 
-function AC:TrackRotationPerformance(startTime, success)
+local function CreatePerformanceMetrics(now)
+    return {
+        rotationCalls = 0,
+        actions = 0,
+        busy = 0,
+        idle = 0,
+        errors = 0,
+        avgExecutionTimeMs = 0,
+        maxExecutionTimeMs = 0,
+        firstEvaluationTime = nil,
+        lastEvaluationTime = nil,
+        lastResetTime = now or GetTime(),
+    }
+end
+
+AC.PerformanceMetrics = CreatePerformanceMetrics(GetTime())
+
+function AC:GetPerformanceTimestamp()
+    if debugprofilestop then
+        return debugprofilestop()
+    end
+    return GetTime() * 1000
+end
+
+function AC:IsRotationBusy()
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return true
+    end
+
+    local start, duration = GetSpellCooldown(61304)
+    return start and duration and duration > 0 and
+           (start + duration - GetTime()) > 0.05
+end
+
+function AC:ResetPerformanceMetrics(now)
+    self.PerformanceMetrics = CreatePerformanceMetrics(now or GetTime())
+end
+
+function AC:TrackRotationPerformance(startTime, outcome)
+    local now = GetTime()
     local metrics = self.PerformanceMetrics
-    local executionTime = GetTime() - startTime
-    
+
+    -- Reset before recording so the current sample becomes the first entry in
+    -- the new window instead of being immediately discarded.
+    if not metrics or now - (metrics.lastResetTime or now) > PERFORMANCE_WINDOW_SECONDS then
+        self:ResetPerformanceMetrics(now)
+        metrics = self.PerformanceMetrics
+    end
+
+    local executionTimeMs = math.max(0, self:GetPerformanceTimestamp() - startTime)
     metrics.rotationCalls = metrics.rotationCalls + 1
-    
-    if success then
-        metrics.successfulCasts = metrics.successfulCasts + 1
+    metrics.firstEvaluationTime = metrics.firstEvaluationTime or now
+    metrics.lastEvaluationTime = now
+
+    if outcome == "action" or outcome == true then
+        metrics.actions = metrics.actions + 1
+    elseif outcome == "busy" then
+        metrics.busy = metrics.busy + 1
+    elseif outcome == "error" then
+        metrics.errors = metrics.errors + 1
     else
-        metrics.failedCasts = metrics.failedCasts + 1
+        metrics.idle = metrics.idle + 1
     end
-    
-    -- Update average execution time
-    metrics.avgExecutionTime = (metrics.avgExecutionTime + executionTime) / 2
-    
-    -- Reset metrics every 5 minutes
-    if GetTime() - metrics.lastResetTime > 300 then
-        metrics.rotationCalls = 0
-        metrics.successfulCasts = 0
-        metrics.failedCasts = 0
-        metrics.avgExecutionTime = 0
-        metrics.lastResetTime = GetTime()
-    end
+
+    -- Numerically stable running average with constant memory usage.
+    metrics.avgExecutionTimeMs = metrics.avgExecutionTimeMs +
+                                 (executionTimeMs - metrics.avgExecutionTimeMs) / metrics.rotationCalls
+    metrics.maxExecutionTimeMs = math.max(metrics.maxExecutionTimeMs, executionTimeMs)
 end
 
 function AC:GetPerformanceReport()
     local metrics = self.PerformanceMetrics
-    if metrics.rotationCalls == 0 then
-        return "No performance data available"
+    local now = GetTime()
+    if not metrics or metrics.rotationCalls == 0 or
+       now - (metrics.lastResetTime or now) > PERFORMANCE_WINDOW_SECONDS then
+        return "No performance data available in the current five-minute window"
     end
-    
-    local successRate = (metrics.successfulCasts / metrics.rotationCalls) * 100
-    
+
+    local evaluations = metrics.rotationCalls
+    local duration = math.max(0, (metrics.lastEvaluationTime or now) -
+                                 (metrics.firstEvaluationTime or now))
+    local evaluationsPerSecond = duration > 0 and math.max(0, evaluations - 1) / duration or 0
+    local function percent(value)
+        return value / evaluations * 100
+    end
+
     return string.format(
-        "Rotation Performance: %.1f%% success rate, %.3fs avg execution time, %d total calls",
-        successRate, metrics.avgExecutionTime, metrics.rotationCalls
+        "Rotation Performance: %d evaluations (%.1f/sec) | Actions: %d (%.1f%%), Busy/GCD: %d (%.1f%%), Idle: %d (%.1f%%), Errors: %d | Execution: %.2fms avg, %.2fms max",
+        evaluations, evaluationsPerSecond,
+        metrics.actions, percent(metrics.actions),
+        metrics.busy, percent(metrics.busy),
+        metrics.idle, percent(metrics.idle),
+        metrics.errors,
+        metrics.avgExecutionTimeMs, metrics.maxExecutionTimeMs
     )
 end
 
@@ -3951,14 +3982,10 @@ function AC:VerifyUtilsLoaded()
 end
 
 -- =============================================
--- FIXED GUI SYSTEM - ONLY Position Saving Changed, Everything Else Original
+-- GUI SYSTEM
 -- =============================================
 
--- =============================================
--- FIXED GUI SYSTEM - ONLY Position Saving Changed, Everything Else Original
--- =============================================
-
--- FIXED: Enhanced SaveFramePosition with validation - COPIED FROM CORE.LUA
+-- Save the main frame position with validation.
 function AC:SaveFramePosition()
     if not self.frame then 
         if self.debugMode then
@@ -4352,12 +4379,12 @@ end
 
 function AC:OnUpdate()
     if not self.enabled then return end
-    
-    local startTime = GetTime()
-    local success = false
-    
-    -- Update resource state for trend analysis
-    self:UpdateResourceState()
+
+    -- Resource trends do not need frame-rate sampling. Keep the public trend
+    -- API current without allocating a new state table on every rendered frame.
+    if self:Throttle("ResourceStateUpdate", 0.5) then
+        self:UpdateResourceState()
+    end
     
     -- Skip if channeling (simplified check)
     if UnitChannelInfo and UnitChannelInfo("player") then
@@ -4369,40 +4396,41 @@ function AC:OnUpdate()
     local spec = self:GetPlayerSpec()
     local inCombat = UnitAffectingCombat("player")
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target")
-    local combatPhase = self:GetCombatPhase()
-    
-    -- Enhanced auto-targeting
-    if inCombat and not hasTarget then
+    -- Maintain the shared combat timer without calculating an unused phase.
+    self:GetCombatTime()
+
+    -- Target acquisition is useful, but scanning all nameplates every rendered
+    -- frame is unnecessary. The first search remains immediate.
+    if inCombat and not hasTarget and self:Throttle("CoreAutoTargetSearch", 0.2) then
         local bestTarget, priority = self:FindBestTarget()
         if bestTarget and priority > 50 then
             TargetUnit(bestTarget)
             StartAttack()
             hasTarget = true
         end
-    end
-    
-    -- Standard auto-targeting fallback
-    if inCombat and not hasTarget then
-        if IsInGroup() then
-            for i = 1, 4 do
-                local unit = "party"..i.."target"
-                if UnitExists(unit) and UnitCanAttack("player", unit) then
-                    TargetUnit(unit)
-                    StartAttack()
-                    hasTarget = true
-                    break
+        -- Standard auto-targeting fallback
+        if not hasTarget then
+            if IsInGroup() then
+                for i = 1, 4 do
+                    local unit = "party"..i.."target"
+                    if UnitExists(unit) and UnitCanAttack("player", unit) then
+                        TargetUnit(unit)
+                        StartAttack()
+                        hasTarget = true
+                        break
+                    end
                 end
             end
-        end
-        
-        if not hasTarget then
-            for i = 1, 40 do
-                local unit = "nameplate"..i
-                if UnitExists(unit) and UnitCanAttack("player", unit) and UnitAffectingCombat(unit) then
-                    TargetUnit(unit)
-                    StartAttack()
-                    hasTarget = true
-                    break
+
+            if not hasTarget then
+                for i = 1, 40 do
+                    local unit = "nameplate"..i
+                    if UnitExists(unit) and UnitCanAttack("player", unit) and UnitAffectingCombat(unit) then
+                        TargetUnit(unit)
+                        StartAttack()
+                        hasTarget = true
+                        break
+                    end
                 end
             end
         end
@@ -4473,27 +4501,24 @@ function AC:OnUpdate()
         
         if self:ActionThrottle("rotation_" .. class .. "_" .. spec, rotationInterval) then
             if self.rotations[class] and self.rotations[class][spec] then
-                local rotationSuccess, errorMessage = pcall(function()
-                    self.rotations[class][spec](self)
+                local rotationWasBusy = self:IsRotationBusy()
+                local rotationStart = self:GetPerformanceTimestamp()
+                local rotationSuccess, rotationResult = pcall(function()
+                    return self.rotations[class][spec](self)
                 end)
-                
+
                 if rotationSuccess then
-                    success = true
+                    if (rotationResult == nil or rotationResult == false) and rotationWasBusy then
+                        rotationResult = "busy"
+                    end
+                    self:TrackRotationPerformance(rotationStart, rotationResult)
                 else
-                    self:Debug("Rotation error for " .. class .. " " .. spec .. ": " .. tostring(errorMessage))
+                    self:TrackRotationPerformance(rotationStart, "error")
+                    self:Debug("Rotation error for " .. class .. " " .. spec .. ": " .. tostring(rotationResult))
                 end
             end
         end
     end
-    
-    -- Track performance metrics
-    self:TrackRotationPerformance(startTime, success)
-end
-
--- Initialize rotations for all classes and specs
-function AC:InitRotations()
-    -- The individual rotation modules will register themselves with this function
-    -- Classes should use their own files to initialize and register their rotations
 end
 
 -- =============================================
@@ -4560,13 +4585,7 @@ function AC:OnEnable()
     
     -- STEP 7: Initialize performance tracking
     if not self.PerformanceMetrics then
-        self.PerformanceMetrics = {
-            rotationCalls = 0,
-            successfulCasts = 0,
-            failedCasts = 0,
-            avgExecutionTime = 0,
-            lastResetTime = GetTime(),
-        }
+        self:ResetPerformanceMetrics()
     end
     
     -- STEP 8: Setup enhanced spec detection (after core functions exist)
@@ -4614,18 +4633,15 @@ function AC:OnEnable()
         self:Print("No rotations found for " .. playerClass)
     end
     
-    -- STEP 11: Call the main InitRotations function
-    self:InitRotations()
-    
-    -- STEP 12: Debug: Print loaded rotations (only if debug mode)
+    -- STEP 11: Debug: Print loaded rotations (only if debug mode)
     if self.debugMode then
         self:DebugRotations()
     end
-    
-    -- STEP 13: Register events and main update loop
+
+    -- STEP 12: Register events and main update loop
     updateFrame:SetScript("OnUpdate", function() self:OnUpdate() end)
-    
-    -- STEP 14: Register for addon being loaded/disabled
+
+    -- STEP 13: Register for addon being loaded/disabled
     self:RegisterEvent("ADDON_LOADED", function(event, addonName)
         if addonName == AddonName then
             -- Hide error messages frame on load

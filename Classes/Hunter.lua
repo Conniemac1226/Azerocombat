@@ -2111,6 +2111,41 @@ function AC:HunterShouldMark(unit)
     return self:ShouldUseHuntersMark(unit)
 end
 
+function AC:HunterCanMisdirectTo(unit)
+    if not unit or not UnitExists(unit) or UnitIsDeadOrGhost(unit) or
+       not UnitIsFriend("player", unit) then
+        return false
+    end
+
+    -- Group unit tokens continue to exist when a member is offline or in a
+    -- different area. Do not temporarily target those units: failed target
+    -- restoration can leave the hunter without the hostile target.
+    if UnitIsConnected and not UnitIsConnected(unit) then
+        return false
+    end
+    if UnitIsVisible and not UnitIsVisible(unit) then
+        return false
+    end
+
+    -- Misdirection's own range result is authoritative when the client can
+    -- provide it. Some 3.3.5 private-server clients return nil for friendly
+    -- spells, so use conservative group/interact checks as fallbacks.
+    local ok, inRange = pcall(IsSpellInRange, S.Misdirection, unit)
+    if ok and inRange ~= nil then
+        return inRange == 1 or inRange == true
+    end
+
+    if UnitInRange then
+        ok, inRange = pcall(UnitInRange, unit)
+        if ok and inRange ~= nil then
+            return inRange == 1 or inRange == true
+        end
+    end
+
+    ok, inRange = pcall(CheckInteractDistance, unit, 1)
+    return ok and inRange == true
+end
+
 function AC:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies, inCombat)
     if not inCombat then return false end
 
@@ -2150,13 +2185,13 @@ function AC:HunterHandleUtility(spec, petStatus)
         local target = nil
         for i = 1, (GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()) do
             local unit = GetNumRaidMembers() > 0 and "raid"..i or "party"..i
-            if self:IsTank(unit) and UnitExists(unit) and not UnitIsDeadOrGhost(unit) then
+            if self:IsTank(unit) and self:HunterCanMisdirectTo(unit) then
                 target = unit
                 break
             end
         end
 
-        if not target and petStatus == "alive" then
+        if not target and petStatus == "alive" and self:HunterCanMisdirectTo("pet") then
             target = "pet"
         end
 
@@ -2615,7 +2650,7 @@ function AC:HunterRotation()
     end
 
     if UnitCastingInfo("player") then
-        return true
+        return "busy"
     end
 
     self:HandleAutoAttack()
@@ -2633,7 +2668,7 @@ function AC:HunterRotation()
         local channelSpell = UnitChannelInfo("player")
         if channelSpell == S.Volley then
             HunterDebug("Continuing Volley")
-            return true
+            return "busy"
         end
     end
 
@@ -2738,10 +2773,10 @@ function AC:InitHunterRotations()
     if not self.rotations then self.rotations = {} end
     self.rotations["HUNTER"] = {} 
     
-    self.rotations["HUNTER"]["Beast Mastery"] = function(s) s:HunterRotation() end
-    self.rotations["HUNTER"]["Marksmanship"] = function(s) s:HunterRotation() end
-    self.rotations["HUNTER"]["Survival"] = function(s) s:HunterRotation() end
-    self.rotations["HUNTER"]["None"] = function(s) s:HunterRotation() end
+    self.rotations["HUNTER"]["Beast Mastery"] = function(s) return s:HunterRotation() end
+    self.rotations["HUNTER"]["Marksmanship"] = function(s) return s:HunterRotation() end
+    self.rotations["HUNTER"]["Survival"] = function(s) return s:HunterRotation() end
+    self.rotations["HUNTER"]["None"] = function(s) return s:HunterRotation() end
     
     self:Print("Hunter rotations initialized (v12 - Research-Based).")
     HunterDebug("Hunter module active. Rotations based on Elitist Jerks theorycrafting for WotLK 3.3.5a.")
