@@ -3304,6 +3304,16 @@ function AC:GetProcTimeRemaining(procName)
     return math.max(0, self.azeroProcTracker[procName] - GetTime())
 end
 
+-- Cast on the player without changing the selected target. Some 3.3.5
+-- LibHealComm builds incorrectly treat CastSpellByName's Boolean self-cast
+-- argument as a unit token and pass it to UnitCanAssist. A macro conditional
+-- avoids that hook incompatibility while preserving native self-cast behavior.
+function AC:CastSpellOnSelf(spellName)
+    if not spellName or not RunMacroText then return false end
+    RunMacroText("/cast [target=player] " .. spellName)
+    return true
+end
+
 function AC:CastSpell(spellName, unit)
     unit = unit or "target"
     local customAvailable = self.IsCustomSpellAvailable and
@@ -3344,8 +3354,7 @@ function AC:CastSpell(spellName, unit)
             local targetChanged = unit ~= "player" and unit ~= "target"
             local castAccepted = pcall(function()
                 if unit == "player" then
-                    -- The second WotLK argument is a self-cast boolean, not a unit token.
-                    CastSpellByName(spellName, true)
+                    self:CastSpellOnSelf(spellName)
                 elseif unit == "target" then
                     CastSpellByName(spellName)
                 else

@@ -612,16 +612,23 @@ function AC:CastBlessingOnUnit(spellName, unit)
     
     local hadOriginalTarget = UnitExists("target")
     local targetWasUnit = hadOriginalTarget and UnitIsUnit("target", unit)
-    if not targetWasUnit then TargetUnit(unit) end
+    local targetChanged = unit ~= "player" and not targetWasUnit
+    if targetChanged then TargetUnit(unit) end
 
-    if not UnitExists("target") or not UnitIsUnit("target", unit) then
+    if unit ~= "player" and (not UnitExists("target") or not UnitIsUnit("target", unit)) then
         PaladinDebug("ERROR: Cannot target " .. unitName .. " for " .. spellName)
         return false
     end
 
     local beforeSpellCooldown = self:GetSpellCooldown(spellName)
     local beforeGlobalCooldown = self:GetSpellCooldown(61304)
-    CastSpell(spellIndex, bookType)
+    if unit == "player" then
+        -- A rankless name resolves to the highest learned rank. The shared
+        -- helper also avoids LibHealComm's broken Boolean self-cast hook.
+        self:CastSpellOnSelf(spellName)
+    else
+        CastSpell(spellIndex, bookType)
+    end
 
     if SpellIsTargeting and SpellIsTargeting() then
         SpellTargetUnit(unit)
@@ -631,7 +638,7 @@ function AC:CastBlessingOnUnit(spellName, unit)
                           self:GetSpellCooldown(spellName) > beforeSpellCooldown + 0.05 or
                           self:GetSpellCooldown(61304) > beforeGlobalCooldown + 0.05
 
-    if not targetWasUnit then
+    if targetChanged then
         if hadOriginalTarget then TargetLastTarget() else ClearTarget() end
     end
 
@@ -916,12 +923,18 @@ function AC:CastPaladinSpell(spellName, unit)
         return false
     end
 
-    -- Every branch, including blessings, must use the learned/usable gate.
-    -- Otherwise an unlearned blessing can return success after a harmless
-    -- CastSpellByName call and stall the rotation.
-    if not self:CanUsePaladinSpell(spellName) or not self:IsUsableSpell(spellName) or
-       self:GetSpellCooldown(spellName) > 0.1 then
-        PaladinDebug("SKIPPED " .. spellName .. " - spell is not known, usable, or ready")
+    -- Every branch, including blessings, must use the learned-spell gate.
+    -- Keep cooldown failures quiet: the rotation probes ready abilities often,
+    -- and a global cooldown is normal rather than an unknown-spell failure.
+    if not self:CanUsePaladinSpell(spellName) then
+        PaladinDebug("SKIPPED " .. spellName .. " - spell is not learned or available")
+        return false
+    end
+    if self:GetSpellCooldown(spellName) > 0.1 then
+        return false
+    end
+    if not self:IsUsableSpell(spellName) then
+        PaladinDebug("SKIPPED " .. spellName .. " - spell is unusable (mana or current conditions)")
         return false
     end
 
@@ -952,19 +965,6 @@ function AC:CastPaladinSpell(spellName, unit)
         end
     end
     
-    -- Check if spell is usable (this handles cooldown, mana, etc.)
-    if not self:IsUsableSpell(spellName) then
-        PaladinDebug("SKIPPED " .. spellName .. " - spell not usable (cooldown/mana/conditions not met)")
-        return false
-    end
-    
-    -- Double-check cooldown explicitly to prevent spam
-    local cooldownRemaining = self:GetSpellCooldown(spellName)
-    if cooldownRemaining > 0.1 then  -- Allow small tolerance for GCD
-        -- Don't spam the log with cooldown messages
-        return false
-    end
-    
     -- FIXED: Bypass the core CastSpell function that might have incorrect debug labels
     -- Do our own spell casting with proper Paladin debug messages
     
@@ -990,10 +990,14 @@ function AC:CastPaladinSpell(spellName, unit)
     local castTargetName = UnitName(unit) or unit
     if unit == "target" then
         CastSpellByName(spellName) -- Implicitly casts on current target
+    elseif unit == "player" then
+        -- Consecration, seals, auras, and self-heals must never replace the
+        -- hostile target with the player merely to cast on self.
+        self:CastSpellOnSelf(spellName)
     else
         -- CastSpellByName has no unit argument in 3.3.5. Explicitly target
-        -- self as well as party members; otherwise Holy Shock can damage the
-        -- hostile target instead of healing the player.
+        -- party/raid members; otherwise Holy Shock can damage the hostile
+        -- target instead of healing the requested ally.
         local hadOriginalTarget = UnitExists("target")
         local targetWasUnit = hadOriginalTarget and UnitIsUnit("target", unit)
         if not targetWasUnit then TargetUnit(unit) end
@@ -1071,25 +1075,31 @@ function AC:CastPaladinSpellEmergency(spellName, unit)
     local beforeCast = UnitCastingInfo("player")
     local beforeChannel = UnitChannelInfo("player")
 
-    -- For emergencies, keep validation minimal but still target the requested
-    -- unit explicitly. Self-heals must not become offensive Holy Shock casts.
-    local hadTarget = UnitExists("target")
-    local targetWasUnit = hadTarget and UnitIsUnit("target", unit)
-    if unit ~= "target" and not targetWasUnit then TargetUnit(unit) end
+    -- Self-casts use the native WotLK self-cast flag so emergency actions do
+    -- not disturb the hostile target. Only ally casts need a temporary target.
+    if unit == "player" then
+        self:CastSpellOnSelf(spellName)
+    elseif unit == "target" then
+        CastSpellByName(spellName)
+    else
+        local hadTarget = UnitExists("target")
+        local targetWasUnit = hadTarget and UnitIsUnit("target", unit)
+        if not targetWasUnit then TargetUnit(unit) end
 
-    if unit ~= "target" and (not UnitExists("target") or not UnitIsUnit("target", unit)) then
+        if not UnitExists("target") or not UnitIsUnit("target", unit) then
+            if not targetWasUnit then
+                if hadTarget then TargetLastTarget() else ClearTarget() end
+            end
+            PaladinDebug("EMERGENCY failed to target " .. unit .. " for " .. spellName)
+            return false
+        end
+
+        CastSpellByName(spellName)
+        if SpellIsTargeting and SpellIsTargeting() then SpellTargetUnit(unit) end
+
         if not targetWasUnit then
             if hadTarget then TargetLastTarget() else ClearTarget() end
         end
-        PaladinDebug("EMERGENCY failed to target " .. unit .. " for " .. spellName)
-        return false
-    end
-
-    CastSpellByName(spellName)
-    if SpellIsTargeting and SpellIsTargeting() then SpellTargetUnit(unit) end
-
-    if unit ~= "target" and not targetWasUnit then
-        if hadTarget then TargetLastTarget() else ClearTarget() end
     end
 
     local afterSpellCooldown = self:GetSpellCooldown(spellName)
@@ -1245,6 +1255,8 @@ function AC:CastJudgement()
     
     local level = UnitLevel("player")
     local manaPercent = (UnitPower("player", 0) / UnitPowerMax("player", 0)) * 100
+    local healthMax = UnitHealthMax("player")
+    local healthPercent = healthMax > 0 and (UnitHealth("player") / healthMax * 100) or 100
     local spec = self:GetPlayerSpec()
     
     if level < 4 then return false end
@@ -1260,11 +1272,16 @@ function AC:CastJudgement()
             bestJudgement = S.JudgementOfLight
         end
     else
-        -- DPS specs prioritize Light for survivability, then Wisdom for mana
-        if self:CanUsePaladinSpell(S.JudgementOfLight) then
+        -- Before Divine Plea, leveling Paladins need a larger mana reserve to
+        -- cover expensive abilities such as Consecration. Preserve Light as a
+        -- survivability override when health is genuinely low.
+        local wisdomThreshold = level < 71 and 75 or 60
+        if healthPercent < 50 and self:CanUsePaladinSpell(S.JudgementOfLight) then
             bestJudgement = S.JudgementOfLight
-        elseif manaPercent < 60 and level >= 12 and self:CanUsePaladinSpell(S.JudgementOfWisdom) then
+        elseif manaPercent < wisdomThreshold and level >= 12 and self:CanUsePaladinSpell(S.JudgementOfWisdom) then
             bestJudgement = S.JudgementOfWisdom
+        elseif self:CanUsePaladinSpell(S.JudgementOfLight) then
+            bestJudgement = S.JudgementOfLight
         end
     end
     
@@ -1508,8 +1525,15 @@ function AC:GetProtectionNineSecondAbility(level, manaPercent, enemies, targetHP
         return "CAST_JUDGEMENT", nil
     end
 
-    if self:IsPaladinSpellReady(S.Consecration) and (enemies >= 2 or manaPercent > 35) then
-        return S.Consecration, "player"
+    if self:IsPaladinSpellReady(S.Consecration) then
+        if level < 71 then
+            local manaFloor = enemies >= 2 and 35 or 60
+            if manaPercent > manaFloor and (enemies >= 2 or targetHP > 30) then
+                return S.Consecration, "player"
+            end
+        elseif enemies >= 2 or manaPercent > 35 then
+            return S.Consecration, "player"
+        end
     end
 
     if judgementToUse and self:IsPaladinSpellReady(judgementToUse) then
@@ -1705,9 +1729,20 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
                    self:CastPaladinSpell(spellName, unit or "target")
         end
         local function castConsecration()
-            if manaPercent <= 20 or not self:CanUsePaladinSpell(S.Consecration) or
+            if not self:CanUsePaladinSpell(S.Consecration) or
                not self:IsUsableSpell(S.Consecration) then return false end
-            if enemies >= 2 or CheckInteractDistance("target", 3) then
+
+            if enemies >= 2 then
+                local aoeManaFloor = level < 71 and 35 or 20
+                if manaPercent <= aoeManaFloor then return false end
+                return self:CastPaladinSpell(S.Consecration, "player")
+            end
+
+            -- Low-level single-target Consecration is expensive and rarely
+            -- pays back when the current mob is already close to dying.
+            local singleTargetManaFloor = level < 71 and 60 or 20
+            if manaPercent <= singleTargetManaFloor or targetHP <= 30 then return false end
+            if CheckInteractDistance("target", 3) then
                 return self:CastPaladinSpell(S.Consecration, "player")
             end
             return false
@@ -1771,7 +1806,7 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 20 then
             if self:CastPaladinSpell(S.Exorcism, "target") then return true end
         end
-        if enemies >= 2 and manaPercent > 45 and self:CanUsePaladinSpell(S.Consecration) and
+        if enemies >= 2 and manaPercent > 35 and self:CanUsePaladinSpell(S.Consecration) and
            self:IsUsableSpell(S.Consecration) then
             if self:CastPaladinSpell(S.Consecration, "player") then return true end
         end

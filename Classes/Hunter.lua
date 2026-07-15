@@ -1763,12 +1763,12 @@ function AC:HunterTryCast(spellName, unit, opts)
     local changedTarget = false
     local castAccepted = pcall(function()
         if unit == "player" then
-            -- The second CastSpellByName argument is a self-cast boolean on
-            -- the 3.3.5 client; it is not a unit token.
+            -- Keep self-casts from changing targets and from triggering old
+            -- LibHealComm builds' broken CastSpellByName self-cast hook.
             if castByRank then
                 CastSpell(castByRank, BOOKTYPE_SPELL)
             else
-                CastSpellByName(spellName, true)
+                self:CastSpellOnSelf(spellName)
             end
         elseif unit == "target" then
             if castByRank then

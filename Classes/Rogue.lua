@@ -1675,7 +1675,7 @@ function AC:CastSpell(spellName, unit)
     local targetChanged = unit ~= "player" and unit ~= "target"
     local ok = pcall(function()
         if unit == "player" then
-            CastSpellByName(spellName, true)
+            self:CastSpellOnSelf(spellName)
         elseif unit == "target" then
             CastSpellByName(spellName)
         else
