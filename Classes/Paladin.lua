@@ -907,6 +907,63 @@ end
 -- ENHANCED SPELL CASTING WITH MOVEMENT CHECK AND DEBUG OVERRIDE
 -- =============================================
 
+-- Consecration is centered on the player. Count only hostile units close
+-- enough to be hit instead of relying on the broad combat enemy count.
+function AC:GetEnemiesInConsecrationReach(maxNameplates)
+    maxNameplates = maxNameplates or 20
+    local count = 0
+    local processedGUIDs = {}
+    local raidMembers = GetNumRaidMembers()
+    local groupSize = raidMembers > 0 and raidMembers or GetNumPartyMembers()
+    local unitPrefix = raidMembers > 0 and "raid" or "party"
+
+    local function addUnitInReach(unit, requireCombat)
+        if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+            return
+        end
+        if requireCombat and not UnitAffectingCombat(unit) then
+            return
+        end
+
+        -- A confirmed melee-range unit is safely inside Consecration's
+        -- player-centered radius. IsInMeleeRange falls back to the WotLK
+        -- interaction-distance check for low-level Paladins without a learned
+        -- melee ability that supports IsSpellInRange.
+        if not self:IsInMeleeRange(unit) then
+            return
+        end
+
+        local guid = UnitGUID(unit) or unit
+        if processedGUIDs[guid] then
+            return
+        end
+
+        processedGUIDs[guid] = true
+        count = count + 1
+    end
+
+    -- The selected hostile is intentional even before combat begins. Other
+    -- detected units must already be in combat so Consecration does not pull
+    -- an incidental nearby pack.
+    addUnitInReach("target", false)
+    addUnitInReach("focus", true)
+    addUnitInReach("mouseover", true)
+
+    for i = 1, groupSize do
+        addUnitInReach(unitPrefix .. i .. "target", true)
+    end
+
+    for i = 1, maxNameplates do
+        addUnitInReach("nameplate" .. i, true)
+    end
+
+    return count
+end
+
+function AC:HasEnemyInConsecrationReach(maxNameplates)
+    return self:GetEnemiesInConsecrationReach(maxNameplates) >= 1
+end
+
 -- FIXED: Override CastSpell specifically for Paladin spells to include movement check
 function AC:CastPaladinSpell(spellName, unit)
     unit = unit or "target"
@@ -940,6 +997,15 @@ function AC:CastPaladinSpell(spellName, unit)
 
     if SpellIsTargeting and SpellIsTargeting() then
         PaladinDebug("SKIPPED " .. spellName .. " - another spell is awaiting a target")
+        return false
+    end
+
+    -- Consecration is an instant player-centered AoE in WotLK. Never spend its
+    -- mana or global cooldown unless a confirmed hostile is within hit reach.
+    if spellName == S.Consecration and not self:HasEnemyInConsecrationReach(20) then
+        if self:Throttle("PaladinConsecrationNoTargetDebug", 2.0) then
+            PaladinDebug("SKIPPED Consecration - no hostile mob within hit reach")
+        end
         return false
     end
 
@@ -1525,7 +1591,7 @@ function AC:GetProtectionNineSecondAbility(level, manaPercent, enemies, targetHP
         return "CAST_JUDGEMENT", nil
     end
 
-    if self:IsPaladinSpellReady(S.Consecration) then
+    if self:IsPaladinSpellReady(S.Consecration) and self:HasEnemyInConsecrationReach(20) then
         if level < 71 then
             local manaFloor = enemies >= 2 and 35 or 60
             if manaPercent > manaFloor and (enemies >= 2 or targetHP > 30) then
@@ -1730,7 +1796,8 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         end
         local function castConsecration()
             if not self:CanUsePaladinSpell(S.Consecration) or
-               not self:IsUsableSpell(S.Consecration) then return false end
+               not self:IsUsableSpell(S.Consecration) or
+               not self:HasEnemyInConsecrationReach(20) then return false end
 
             if enemies >= 2 then
                 local aoeManaFloor = level < 71 and 35 or 20
@@ -1793,7 +1860,8 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         end
         -- Holy only spends healing mana on Consecration when the AoE value is
         -- real and the mana pool is healthy.
-        if enemies >= 3 and manaPercent > 80 and self:CanUsePaladinSpell(S.Consecration) and
+        if enemies >= 3 and manaPercent > 80 and self:HasEnemyInConsecrationReach(20) and
+           self:CanUsePaladinSpell(S.Consecration) and
            self:IsUsableSpell(S.Consecration) then
              if self:CastPaladinSpell(S.Consecration, "player") then return true end
         end
@@ -1806,7 +1874,8 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 20 then
             if self:CastPaladinSpell(S.Exorcism, "target") then return true end
         end
-        if enemies >= 2 and manaPercent > 35 and self:CanUsePaladinSpell(S.Consecration) and
+        if enemies >= 2 and manaPercent > 35 and self:HasEnemyInConsecrationReach(20) and
+           self:CanUsePaladinSpell(S.Consecration) and
            self:IsUsableSpell(S.Consecration) then
             if self:CastPaladinSpell(S.Consecration, "player") then return true end
         end
@@ -1840,11 +1909,13 @@ function AC:PaladinRotation()
     
     if self.debugMode and self:Throttle("PaladinDebugOutput", 5) then -- Increased throttle to reduce spam
         local isMoving = self:IsPlayerMovingCached()
-        local consecReady = self:CanUsePaladinSpell(S.Consecration) and self:IsUsableSpell(S.Consecration) and self:GetSpellCooldown(S.Consecration) == 0
+        local consecAvailable = self:CanUsePaladinSpell(S.Consecration) and self:IsUsableSpell(S.Consecration) and self:GetSpellCooldown(S.Consecration) == 0
+        local consecInReach = self:HasEnemyInConsecrationReach(20)
+        local consecState = consecAvailable and (consecInReach and "RDY" or "OUT") or "CD"
         local hotrReady = self:CanUsePaladinSpell(S.HammerOfRighteous) and self:IsUsableSpell(S.HammerOfRighteous) and self:GetSpellCooldown(S.HammerOfRighteous) == 0
         local judgementCD = self:GetSpellCooldown(S.JudgementOfLight)
-        PaladinDebug(string.format("L%d %s|HP:%.0f%% MP:%.0f%%|E:%d|Judge:%.1fs HotR:%s Consec:%s", 
-                     level, spec, health, manaPercent, enemies, judgementCD, hotrReady and "RDY" or "CD", consecReady and "RDY" or "CD"))
+        PaladinDebug(string.format("L%d %s|HP:%.0f%% MP:%.0f%%|E:%d|Judge:%.1fs HotR:%s Consec:%s",
+                     level, spec, health, manaPercent, enemies, judgementCD, hotrReady and "RDY" or "CD", consecState))
     end
     
     if hasTarget and not IsCurrentSpell("Attack") then StartAttack() end
@@ -2568,9 +2639,12 @@ function AC:TestPaladinMovement()
     local speed = GetUnitSpeed and GetUnitSpeed("player") or "N/A"
     self:Print("IsPlayerMoving(): " .. tostring(isMoving) .. ", Cached: " .. tostring(isMovingCached) .. ", Speed: " .. tostring(speed))
     if UnitExists("target") and UnitCanAttack("player", "target") then
+        local hasEnemyInReach = self:HasEnemyInConsecrationReach(20)
         self:Print("Testing Consecration cast...")
         local result = self:CastPaladinSpell(S.Consecration, "player")
-        self:Print("  Consecration cast result: " .. tostring(result) .. (isMoving and " (Expected: false due to movement)" or " (Expected: depends on CD/mana)"))
+        self:Print("  Enemy in hit reach: " .. tostring(hasEnemyInReach))
+        self:Print("  Consecration cast result: " .. tostring(result) ..
+                   (hasEnemyInReach and " (Expected: depends on CD/mana)" or " (Expected: false, no mob in hit reach)"))
     else self:Print("Need a valid target to test Consecration") end
     self:Print("==============================")
 end
