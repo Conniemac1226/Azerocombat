@@ -192,6 +192,34 @@ local BlessingTypes = {
     [S.GreaterBlessingOfSanctuary] = "Sanctuary",
 }
 
+-- Long-duration and preparation buffs must wait until normal resting/travel
+-- has ended. Combat and emergency abilities are intentionally not included.
+local PaladinMaintenanceSpells = {
+    [S.SealRighteousness] = true,
+    [S.SealLight] = true,
+    [S.SealWisdom] = true,
+    [S.SealJustice] = true,
+    [S.SealCommand] = true,
+    [S.SealVengeance] = true,
+    [S.SealCorruption] = true,
+    [S.DevotionAura] = true,
+    [S.RetributionAura] = true,
+    [S.ConcentrationAura] = true,
+    [S.CrusaderAura] = true,
+    [S.FireResistanceAura] = true,
+    [S.FrostResistanceAura] = true,
+    [S.ShadowResistanceAura] = true,
+    [S.RighteousFury] = true,
+    [S.BeaconOfLight] = true,
+    [S.SacredShield] = true,
+    [S.DivinePlea] = true,
+    [S.HolyShield] = true,
+}
+
+local function IsPaladinMaintenanceSpell(spellName)
+    return PaladinMaintenanceSpells[spellName] or BlessingTypes[spellName] ~= nil
+end
+
 local PaladinDebug
 
 -- UnitBuff normally identifies the caster, but some 3.3.5 private-server
@@ -490,6 +518,47 @@ function AC:IsPlayerMovingCached()
     return self.movementCache.isMoving
 end
 
+-- Food and drink effects are normally exposed as player auras in WotLK, but
+-- some private-server clients report them as a cast or channel instead.
+function AC:IsPaladinEatingOrDrinking()
+    local function isFoodOrDrinkName(actionName)
+        if not actionName then return false end
+        local name = string.lower(actionName)
+        if name == "food" or name == "drink" or name == "refreshment" or
+           name == "eating" or name == "drinking" then
+            return true
+        end
+        return string.find(name, "food and drink", 1, true) ~= nil or
+               string.find(name, "eating", 1, true) ~= nil or
+               string.find(name, "drinking", 1, true) ~= nil
+    end
+
+    if isFoodOrDrinkName(UnitCastingInfo("player")) or
+       isFoodOrDrinkName(UnitChannelInfo("player")) then
+        return true
+    end
+
+    for i = 1, 40 do
+        local buffName = UnitBuff("player", i)
+        if not buffName then break end
+        if isFoodOrDrinkName(buffName) then
+            return true
+        end
+    end
+
+    return false
+end
+
+function AC:CanPerformPaladinMaintenance()
+    if IsMounted and IsMounted() then
+        return false, "mounted"
+    end
+    if self:IsPaladinEatingOrDrinking() then
+        return false, "eating or drinking"
+    end
+    return true, nil
+end
+
 -- =============================================
 -- HELPER FUNCTIONS
 -- =============================================
@@ -523,6 +592,14 @@ end
 function AC:CastBlessingOnUnit(spellName, unit)
     if not spellName or not unit or not UnitExists(unit) then
         PaladinDebug("Invalid blessing target: " .. (unit or "nil"))
+        return false
+    end
+
+    local canMaintain, maintenanceReason = self:CanPerformPaladinMaintenance()
+    if not canMaintain then
+        if self:Throttle("PaladinBlessingMaintenanceBlocked", 3.0) then
+            PaladinDebug("WAITING to cast blessings - player is " .. maintenanceReason)
+        end
         return false
     end
 
@@ -972,6 +1049,16 @@ function AC:CastPaladinSpell(spellName, unit)
     if not spellName or (unit ~= "player" and not UnitExists(unit)) then
         PaladinDebug("FAILED to cast " .. (spellName or "unknown") .. " - invalid spell or target")
         return false
+    end
+
+    if IsPaladinMaintenanceSpell(spellName) then
+        local canMaintain, maintenanceReason = self:CanPerformPaladinMaintenance()
+        if not canMaintain then
+            if self:Throttle("PaladinMaintenanceBlocked_" .. tostring(maintenanceReason), 3.0) then
+                PaladinDebug("WAITING to cast " .. spellName .. " - player is " .. maintenanceReason)
+            end
+            return false
+        end
     end
 
     local now = GetTime()
@@ -2221,6 +2308,7 @@ function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party bu
     if not force and not self:Throttle("PaladinPartyBuffCheck", 3) then return false end
     if UnitAffectingCombat("player") then return false end
     if UnitChannelInfo("player") or UnitCastingInfo("player") then return false end
+    if not self:CanPerformPaladinMaintenance() then return false end
 
     PruneBattleShoutReservations()
     
