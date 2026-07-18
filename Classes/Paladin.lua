@@ -220,6 +220,19 @@ local function IsPaladinMaintenanceSpell(spellName)
     return PaladinMaintenanceSpells[spellName] or BlessingTypes[spellName] ~= nil
 end
 
+local PaladinForbearanceSpells = {
+    [S.DivineShield] = true,
+    [S.DivineProtection] = true,
+    [S.LayOnHands] = true,
+    [S.HandOfProtection] = true,
+}
+
+local function IsPaladinForbearanceBlocked(self, spellName, unit)
+    if not PaladinForbearanceSpells[spellName] then return false end
+    unit = unit or "player"
+    return UnitExists(unit) and self:HasDebuff(unit, "Forbearance")
+end
+
 local PaladinDebug
 
 -- UnitBuff normally identifies the caster, but some 3.3.5 private-server
@@ -1051,6 +1064,13 @@ function AC:CastPaladinSpell(spellName, unit)
         return false
     end
 
+    if IsPaladinForbearanceBlocked(self, spellName, unit) then
+        if self:Throttle("PaladinForbearanceBlocked_" .. spellName, 2.0) then
+            PaladinDebug("SKIPPED " .. spellName .. " - " .. unit .. " has Forbearance")
+        end
+        return false
+    end
+
     if IsPaladinMaintenanceSpell(spellName) then
         local canMaintain, maintenanceReason = self:CanPerformPaladinMaintenance()
         if not canMaintain then
@@ -1087,13 +1107,21 @@ function AC:CastPaladinSpell(spellName, unit)
         return false
     end
 
-    -- Consecration is an instant player-centered AoE in WotLK. Never spend its
-    -- mana or global cooldown unless a confirmed hostile is within hit reach.
-    if spellName == S.Consecration and not self:HasEnemyInConsecrationReach(20) then
-        if self:Throttle("PaladinConsecrationNoTargetDebug", 2.0) then
-            PaladinDebug("SKIPPED Consecration - no hostile mob within hit reach")
+    -- Consecration remains where it was placed. Wait until the tank has stopped
+    -- moving the pack, then confirm that at least one hostile will be hit.
+    if spellName == S.Consecration then
+        if self:IsPlayerMovingCached() then
+            if self:Throttle("PaladinConsecrationMovingDebug", 2.0) then
+                PaladinDebug("SKIPPED Consecration - player is moving")
+            end
+            return false
         end
-        return false
+        if not self:HasEnemyInConsecrationReach(20) then
+            if self:Throttle("PaladinConsecrationNoTargetDebug", 2.0) then
+                PaladinDebug("SKIPPED Consecration - no hostile mob within hit reach")
+            end
+            return false
+        end
     end
 
     if unit ~= "player" and unit ~= "target" and IsSpellInRange(spellName, unit) == 0 then
@@ -1207,6 +1235,37 @@ function AC:CastPaladinSpellEmergency(spellName, unit)
         return false
     end
 
+    local targetKey = UnitGUID(unit) or unit
+    local retryKey = spellName .. ":" .. tostring(targetKey)
+    local now = GetTime()
+    if self.paladinEmergencyRetryUntil and
+       (self.paladinEmergencyRetryUntil[retryKey] or 0) > now then
+        return false
+    end
+
+    if IsPaladinForbearanceBlocked(self, spellName, unit) then
+        if self:Throttle("PaladinEmergencyForbearance_" .. spellName, 2.0) then
+            PaladinDebug("EMERGENCY skipped " .. spellName .. " - " .. unit .. " has Forbearance")
+        end
+        return false
+    end
+
+    -- IsUsableSpell can remain true for a cast-time heal while movement makes
+    -- the client reject it. Respect the spell's base cast time, while allowing
+    -- the Paladin procs that make Flash of Light instant.
+    if self:IsPlayerMovingCached() then
+        local castTime = select(7, GetSpellInfo(spellName)) or 0
+        local instantFlash = spellName == S.FlashOfLight and
+                             (self:HasBuff("player", S.ArtOfWar) or
+                              self:HasBuff("player", S.InfusionOfLight))
+        if castTime > 0 and not instantFlash then
+            if self:Throttle("PaladinEmergencyMoving_" .. spellName, 2.0) then
+                PaladinDebug("EMERGENCY skipped " .. spellName .. " - player is moving")
+            end
+            return false
+        end
+    end
+
     if not self:CanUsePaladinSpell(spellName) or not self:IsUsableSpell(spellName) or
        self:GetSpellCooldown(spellName) > 0.1 then
         PaladinDebug("EMERGENCY skipped " .. spellName .. " - spell is not known, usable, or ready")
@@ -1263,6 +1322,8 @@ function AC:CastPaladinSpellEmergency(spellName, unit)
        afterGlobalCooldown <= beforeGlobalCooldown + 0.05 and
        not (SpellIsTargeting and SpellIsTargeting()) then
         PaladinDebug("EMERGENCY cast did not start: " .. spellName)
+        self.paladinEmergencyRetryUntil = self.paladinEmergencyRetryUntil or {}
+        self.paladinEmergencyRetryUntil[retryKey] = GetTime() + 1.0
         return false
     end
 
@@ -1678,7 +1739,8 @@ function AC:GetProtectionNineSecondAbility(level, manaPercent, enemies, targetHP
         return "CAST_JUDGEMENT", nil
     end
 
-    if self:IsPaladinSpellReady(S.Consecration) and self:HasEnemyInConsecrationReach(20) then
+    if self:IsPaladinSpellReady(S.Consecration) and not self:IsPlayerMovingCached() and
+       self:HasEnemyInConsecrationReach(20) then
         if level < 71 then
             local manaFloor = enemies >= 2 and 35 or 60
             if manaPercent > manaFloor and (enemies >= 2 or targetHP > 30) then
@@ -1884,6 +1946,7 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         local function castConsecration()
             if not self:CanUsePaladinSpell(S.Consecration) or
                not self:IsUsableSpell(S.Consecration) or
+               self:IsPlayerMovingCached() or
                not self:HasEnemyInConsecrationReach(20) then return false end
 
             if enemies >= 2 then
@@ -1947,7 +2010,8 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         end
         -- Holy only spends healing mana on Consecration when the AoE value is
         -- real and the mana pool is healthy.
-        if enemies >= 3 and manaPercent > 80 and self:HasEnemyInConsecrationReach(20) and
+        if enemies >= 3 and manaPercent > 80 and not self:IsPlayerMovingCached() and
+           self:HasEnemyInConsecrationReach(20) and
            self:CanUsePaladinSpell(S.Consecration) and
            self:IsUsableSpell(S.Consecration) then
              if self:CastPaladinSpell(S.Consecration, "player") then return true end
@@ -1961,7 +2025,8 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
         if self:CanUsePaladinSpell(S.Exorcism) and self:IsUsableSpell(S.Exorcism) and manaPercent > 20 then
             if self:CastPaladinSpell(S.Exorcism, "target") then return true end
         end
-        if enemies >= 2 and manaPercent > 35 and self:HasEnemyInConsecrationReach(20) and
+        if enemies >= 2 and manaPercent > 35 and not self:IsPlayerMovingCached() and
+           self:HasEnemyInConsecrationReach(20) and
            self:CanUsePaladinSpell(S.Consecration) and
            self:IsUsableSpell(S.Consecration) then
             if self:CastPaladinSpell(S.Consecration, "player") then return true end
@@ -1998,7 +2063,7 @@ function AC:PaladinRotation()
         local isMoving = self:IsPlayerMovingCached()
         local consecAvailable = self:CanUsePaladinSpell(S.Consecration) and self:IsUsableSpell(S.Consecration) and self:GetSpellCooldown(S.Consecration) == 0
         local consecInReach = self:HasEnemyInConsecrationReach(20)
-        local consecState = consecAvailable and (consecInReach and "RDY" or "OUT") or "CD"
+        local consecState = consecAvailable and (isMoving and "MOV" or (consecInReach and "RDY" or "OUT")) or "CD"
         local hotrReady = self:CanUsePaladinSpell(S.HammerOfRighteous) and self:IsUsableSpell(S.HammerOfRighteous) and self:GetSpellCooldown(S.HammerOfRighteous) == 0
         local judgementCD = self:GetSpellCooldown(S.JudgementOfLight)
         PaladinDebug(string.format("L%d %s|HP:%.0f%% MP:%.0f%%|E:%d|Judge:%.1fs HotR:%s Consec:%s",
@@ -2007,8 +2072,9 @@ function AC:PaladinRotation()
     
     if hasTarget and not IsCurrentSpell("Attack") then StartAttack() end
     
-    -- Emergency Lifeblood (Herbalism profession ability) at 50% health
-    if inCombat and self:UseLifeblood() then return true end
+    -- Lifeblood is useful sustain, but it must not consume the decision tick
+    -- that should be used for a critical Paladin lifesaving cooldown.
+    if inCombat and health >= 30 and self:UseLifeblood() then return true end
     
     if inCombat and not hasTarget then
         if self:FindAndSetTarget() then
@@ -2018,35 +2084,63 @@ function AC:PaladinRotation()
     
     -- Enhanced emergency response system
     if health < 30 then
-        -- Use health potions in emergency
+        local hasForbearance = self:HasDebuff("player", "Forbearance")
+        local layOnHandsReady = self:IsPaladinSpellReady(S.LayOnHands) and
+                                not IsPaladinForbearanceBlocked(self, S.LayOnHands, "player")
+
+        if self.debugMode and self:Throttle("PaladinEmergencyState", 1.0) then
+            PaladinDebug(string.format("Emergency state | HP:%.0f%% Spec:%s Moving:%s Forbearance:%s LoH:%s",
+                health, tostring(spec), self:IsPlayerMovingCached() and "Y" or "N",
+                hasForbearance and "Y" or "N", layOnHandsReady and "RDY" or "NO"))
+        end
+
+        -- Reserve Lay on Hands as the first critical-health action. Protection
+        -- and non-Protection Paladins both need the heal before another
+        -- Forbearance ability can lock it out.
+        local layOnHandsAttemptFailed = false
+        if health < 20 and layOnHandsReady then
+            PaladinDebug("Critical health - attempting Lay on Hands first")
+            if self:CastPaladinSpellEmergency(S.LayOnHands, "player") then
+                return true
+            end
+            layOnHandsAttemptFailed = true
+        end
+
+        -- Potions are off the spell GCD. Record the use but continue through
+        -- the same decision so an unavailable LoH can still fall back to an
+        -- immunity without losing another rotation tick.
+        local usedHealthPotion = false
         if self.UseHealthPotion and self:UseHealthPotion(30) then
             PaladinDebug("Used health potion at " .. string.format("%.0f", health) .. "% health")
-            return true
+            usedHealthPotion = true
         end
-        
-        -- Use defensive trinkets and racials in emergency
+
+        -- Do not apply Forbearance in advance while a ready Lay on Hands is
+        -- being reserved for the 20% threshold. If LoH is unavailable or its
+        -- critical cast was rejected, fall through to the strongest immunity.
+        local reserveLayOnHands = layOnHandsReady and health >= 20
+        if not reserveLayOnHands or layOnHandsAttemptFailed then
+            if health < 15 and spec ~= "Protection" and
+               self:IsPaladinSpellReady(S.DivineShield) and
+               not IsPaladinForbearanceBlocked(self, S.DivineShield, "player") then
+                if self:CastPaladinSpellEmergency(S.DivineShield, "player") then return true end
+            end
+
+            if self:IsPaladinSpellReady(S.DivineProtection) and
+               not IsPaladinForbearanceBlocked(self, S.DivineProtection, "player") then
+                if self:CastPaladinSpellEmergency(S.DivineProtection, "player") then return true end
+            end
+        end
+
+        if usedHealthPotion then return true end
+
+        -- Lower-priority emergency tools must never delay LoH or an immunity.
+        if inCombat and self:UseLifeblood() then return true end
         if self:UseTrinkets() then
             PaladinDebug("Used defensive trinket")
             return true
         end
-        if self:UsePaladinRacials(false) then
-            return true
-        end
-        
-        -- Emergency healing and protection
-        if health < 15 then
-            if spec == "Protection" and self:CanUsePaladinSpell(S.LayOnHands) and self:IsUsableSpell(S.LayOnHands) then
-                if self:CastPaladinSpellEmergency(S.LayOnHands, "player") then return true end
-            elseif spec ~= "Protection" and self:CanUsePaladinSpell(S.DivineShield) and self:IsUsableSpell(S.DivineShield) then
-                if self:CastPaladinSpellEmergency(S.DivineShield, "player") then return true end
-            elseif self:CanUsePaladinSpell(S.LayOnHands) and self:IsUsableSpell(S.LayOnHands) then
-                if self:CastPaladinSpellEmergency(S.LayOnHands, "player") then return true end
-            end
-        elseif health < 25 then
-            if self:CanUsePaladinSpell(S.DivineProtection) and self:IsUsableSpell(S.DivineProtection) then
-                if self:CastPaladinSpellEmergency(S.DivineProtection, "player") then return true end
-            end
-        end
+        if self:UsePaladinRacials(false) then return true end
     end
     
     if spec == "Protection" and level >= 16 and self:CanUsePaladinSpell(S.RighteousFury) and
@@ -2732,7 +2826,8 @@ function AC:TestPaladinMovement()
         local result = self:CastPaladinSpell(S.Consecration, "player")
         self:Print("  Enemy in hit reach: " .. tostring(hasEnemyInReach))
         self:Print("  Consecration cast result: " .. tostring(result) ..
-                   (hasEnemyInReach and " (Expected: depends on CD/mana)" or " (Expected: false, no mob in hit reach)"))
+                   (isMoving and " (Expected: false, player is moving)" or
+                    (hasEnemyInReach and " (Expected: depends on CD/mana)" or " (Expected: false, no mob in hit reach)")))
     else self:Print("Need a valid target to test Consecration") end
     self:Print("==============================")
 end
