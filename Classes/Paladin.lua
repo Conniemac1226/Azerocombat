@@ -284,10 +284,24 @@ local function GetUnitBlessingState(unit)
     local guid = UnitGUID(unit)
     local cached = guid and OwnBlessingCasts[guid]
     if cached then
-        if cached.expiresAt <= GetTime() or not state.byType[cached.blessingType] then
+        local cachedEntry = state.byType[cached.blessingType]
+        local casterIsPlayer = cachedEntry and cachedEntry.caster and
+                               (cachedEntry.caster == "player" or
+                                (UnitExists(cachedEntry.caster) and UnitIsUnit(cachedEntry.caster, "player")))
+        local casterIsKnownOther = cachedEntry and cachedEntry.caster and not casterIsPlayer
+        local expirationChanged = cachedEntry and tonumber(cachedEntry.expirationTime) and
+                                  tonumber(cached.expiresAt) and
+                                  math.abs(cachedEntry.expirationTime - cached.expiresAt) > 2
+        local blessingChanged = cachedEntry and cached.name ~= cachedEntry.name
+
+        -- A different caster, rank/type name, or freshly reset expiration means
+        -- another Paladin replaced our old blessing. Do not claim ownership of
+        -- that aura merely because it has the same blessing type.
+        if cached.expiresAt <= GetTime() or not cachedEntry or casterIsKnownOther or
+           blessingChanged or expirationChanged then
             OwnBlessingCasts[guid] = nil
         elseif not state.own then
-            state.own = state.byType[cached.blessingType]
+            state.own = cachedEntry
         end
     end
 
@@ -482,11 +496,29 @@ local function GetPlayerPaladinAura()
     local ownAura = nil
     local casterlessAura = nil
     local activeAuras = {}
+
+    -- Paladin auras occupy the stance bar. This is authoritative for the
+    -- player's own selected aura and does not depend on unreliable aura-caster
+    -- fields or on whether another Paladin supplies the same buff.
+    local stanceReliable = false
+    if GetNumShapeshiftForms and GetShapeshiftFormInfo then
+        local formCount = GetNumShapeshiftForms() or 0
+        stanceReliable = formCount > 0
+        for i = 1, formCount do
+            local _, formName, isActive = GetShapeshiftFormInfo(i)
+            if isActive and PaladinAuras[formName] then
+                ownAura = formName
+                break
+            end
+        end
+    end
+
     for i = 1, 40 do
         local buffName, _, _, _, _, _, _, caster = UnitBuff("player", i)
         if PaladinAuras[buffName] then
             activeAuras[buffName] = true
-            if caster == "player" or (caster and UnitExists(caster) and UnitIsUnit(caster, "player")) then
+            if not stanceReliable and
+               (caster == "player" or (caster and UnitExists(caster) and UnitIsUnit(caster, "player"))) then
                 ownAura = ownAura or buffName
             end
             -- Some private-server clients omit the caster field. Preserve a
@@ -494,7 +526,58 @@ local function GetPlayerPaladinAura()
             if not caster then casterlessAura = casterlessAura or buffName end
         end
     end
-    return ownAura or casterlessAura, activeAuras
+    -- Keep casterless auras separate. In a multi-Paladin group they may belong
+    -- to somebody else; ManagePaladinAuras reconciles them with its own cast
+    -- memory before deciding that this Paladin is the provider.
+    return ownAura, activeAuras, casterlessAura, stanceReliable
+end
+
+-- A Paladin outside aura range may not place its aura on the player even
+-- though it has already chosen a group assignment. Inspect every other
+-- Paladin's own buffs so we do not select the same aura while separated.
+local function AddOtherPaladinAuraCoverage(activeAuras)
+    local function scanPaladin(unit)
+        if not UnitExists(unit) or UnitIsUnit(unit, "player") or
+           select(2, UnitClass(unit)) ~= "PALADIN" then
+            return
+        end
+
+        local ownAuraFound = false
+        local casterlessAuras, casterlessCount = {}, 0
+        for i = 1, 40 do
+            local buffName, _, _, _, _, _, _, caster = UnitBuff(unit, i)
+            if not buffName then break end
+            if PaladinAuras[buffName] then
+                local unitName = UnitName(unit)
+                local shortCaster = type(caster) == "string" and string.match(caster, "^[^-]+") or nil
+                local casterIsUnit = caster and
+                                     (caster == unit or
+                                      (UnitExists(caster) and UnitIsUnit(caster, unit)) or
+                                      (unitName and (caster == unitName or shortCaster == unitName)))
+                if casterIsUnit then
+                    activeAuras[buffName] = true
+                    ownAuraFound = true
+                elseif not caster and not casterlessAuras[buffName] then
+                    casterlessAuras[buffName] = true
+                    casterlessCount = casterlessCount + 1
+                end
+            end
+        end
+
+        -- When this private server omits aura casters, a single Paladin aura
+        -- on that Paladin is unambiguous: it must be the aura it activated.
+        if not ownAuraFound and casterlessCount == 1 then
+            for aura in pairs(casterlessAuras) do
+                activeAuras[aura] = true
+            end
+        end
+    end
+
+    if GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do scanPaladin("raid" .. i) end
+    else
+        for i = 1, GetNumPartyMembers() do scanPaladin("party" .. i) end
+    end
 end
 
 -- FIXED: Debug function with correct class label
@@ -2295,7 +2378,10 @@ end
 local function GetPaladinRosterPosition()
     local paladins, seen = {}, {}
     local function addPaladin(unit)
-        if not UnitExists(unit) or not UnitIsConnected(unit) or select(2, UnitClass(unit)) ~= "PALADIN" then
+        -- Some playerbot cores do not report UnitIsConnected consistently for
+        -- bot-controlled party members. Unit existence and class are enough
+        -- for stable aura/blessing coordination.
+        if not UnitExists(unit) or select(2, UnitClass(unit)) ~= "PALADIN" then
             return
         end
         local guid = UnitGUID(unit) or unit
@@ -2313,13 +2399,18 @@ local function GetPaladinRosterPosition()
     end
 
     table.sort(paladins, function(a, b) return a.key < b.key end)
+    local signatureParts = {}
+    for _, paladin in ipairs(paladins) do
+        table.insert(signatureParts, paladin.key)
+    end
+    local rosterSignature = table.concat(signatureParts, ";")
     local playerGUID = UnitGUID("player")
     for index, paladin in ipairs(paladins) do
         if paladin.guid == playerGUID or UnitIsUnit(paladin.unit, "player") then
-            return index, #paladins
+            return index, #paladins, rosterSignature
         end
     end
-    return 1, math.max(1, #paladins)
+    return 1, math.max(1, #paladins), rosterSignature
 end
 
 function AC:GetBestBlessingForUnit(unit, level)
@@ -2424,6 +2515,11 @@ function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party bu
     -- cannot remain expired between pulls.
     if self:RefreshMissingPaladinSeal(spec, level, manaPercent, 1) then return true end
 
+    -- The core invokes CheckPaladinBuffs while idle even when no hostile target
+    -- exists. Keep aura coordination on this targetless maintenance path rather
+    -- than relying solely on PaladinRotation, which normally requires a target.
+    if self.ManagePaladinAuras and self:ManagePaladinAuras(spec) then return true end
+
     if manaPercent < 30 then return false end -- Lowered mana requirement for more frequent blessing
     
     -- Check blessing reagents
@@ -2513,13 +2609,16 @@ function AC:CheckPaladinBuffs(spec, force) -- This is primarily for OOC party bu
                             verifyFrame:SetScript("OnUpdate", function(frame, elapsed)
                                 frame.elapsed = frame.elapsed + elapsed
                                 if frame.elapsed > 1.5 then  -- Wait a bit longer
-                                    -- Check for ANY blessing, not just the specific one
-                                    local hasAnyBless, blessName = AC:HasAnyBlessing(frame.unit)
-                                    if hasAnyBless then
-                                        PaladinDebug("✓ Blessing confirmed on " .. (UnitName(frame.unit) or frame.unit) .. ": " .. (blessName or "unknown"))
+                                    local expectedType = BlessingTypes[frame.blessing]
+                                    local blessingState = GetUnitBlessingState(frame.unit)
+                                    local appliedBlessing = expectedType and blessingState.byType[expectedType]
+                                    if appliedBlessing then
+                                        PaladinDebug("✓ Blessing confirmed on " .. (UnitName(frame.unit) or frame.unit) .. ": " .. appliedBlessing.name)
                                     else
-                                        -- List all buffs on the unit for debugging
-                                        PaladinDebug("✗ NO blessing detected on " .. (UnitName(frame.unit) or frame.unit) .. " after 1.5s")
+                                        -- Another Paladin's different blessing is not
+                                        -- confirmation that our requested cast landed.
+                                        PaladinDebug("✗ Expected " .. frame.blessing .. " was not detected on " ..
+                                                      (UnitName(frame.unit) or frame.unit) .. " after 1.5s")
                                         PaladinDebug("  Current buffs on " .. (UnitName(frame.unit) or frame.unit) .. ":")
                                         for i = 1, 40 do
                                             local buffName = UnitBuff(frame.unit, i)
@@ -2569,82 +2668,97 @@ end
 -- AURA MANAGEMENT SYSTEM
 -- =============================================
 
--- Get best aura for current situation
-function AC:GetBestAura(spec, inGroup, inCombat, enemies)
-    local level = UnitLevel("player")
-    
-    -- Protection: Prioritize survivability
+local function GetPaladinAuraPriority(spec)
     if spec == "Protection" then
-        -- Devotion Aura is the safe default for tanking, especially when improved.
-        if self:CanUsePaladinSpell(S.DevotionAura) then
-            return S.DevotionAura
-        end
-        if level >= 16 and self:CanUsePaladinSpell(S.RetributionAura) then
-            return S.RetributionAura
-        end
-    
-    -- Holy: Prioritize mana efficiency and casting
+        return {S.DevotionAura, S.RetributionAura, S.ConcentrationAura}
     elseif spec == "Holy" then
-        -- Concentration Aura remains useful between pulls and avoids spending a
-        -- healing GCD to correct the aura after combat begins.
-        if level >= 22 and self:CanUsePaladinSpell(S.ConcentrationAura) then
-            return S.ConcentrationAura
-        end
-        -- Devotion Aura as fallback
-        if self:CanUsePaladinSpell(S.DevotionAura) then
-            return S.DevotionAura
-        end
-    
-    -- Retribution: Prioritize damage
+        return {S.ConcentrationAura, S.DevotionAura, S.RetributionAura}
     elseif spec == "Retribution" then
-        if level >= 16 and self:CanUsePaladinSpell(S.RetributionAura) then
-            return S.RetributionAura
-        end
-        -- Devotion Aura as fallback
-        if self:CanUsePaladinSpell(S.DevotionAura) then
-            return S.DevotionAura
+        return {S.RetributionAura, S.DevotionAura, S.ConcentrationAura}
+    end
+    return {S.DevotionAura, S.RetributionAura, S.ConcentrationAura}
+end
+
+-- Select the spec-preferred aura unless another Paladin already supplies it.
+-- In that case, contribute the highest-priority useful aura that is missing.
+function AC:GetBestAura(spec, inGroup, inCombat, enemies, activeAuras, currentAura)
+    activeAuras = activeAuras or {}
+
+    for _, aura in ipairs(GetPaladinAuraPriority(spec)) do
+        if self:CanUsePaladinSpell(aura) and
+           (aura == currentAura or not activeAuras[aura]) then
+            return aura
         end
     end
-    
-    -- Default fallback
-    if self:CanUsePaladinSpell(S.DevotionAura) then
-        return S.DevotionAura
+
+    -- All standard auras are already covered. Preserve a deliberate current
+    -- aura rather than replacing it with a duplicate.
+    if currentAura and self:CanUsePaladinSpell(currentAura) then
+        return currentAura
     end
-    
     return nil
 end
 
 -- Manage aura uptime
 function AC:ManagePaladinAuras(spec)
-    if not self:Throttle("PaladinAuraManagement", 10) then return false end -- Increased throttle
-    
+    local _, paladinCount, rosterSignature = GetPaladinRosterPosition()
+    local rosterChanged = self.paladinAuraRosterSignature ~= rosterSignature
+    if rosterChanged then
+        self.paladinAuraRosterSignature = rosterSignature
+        self.paladinManagedAura = nil
+    elseif not self:Throttle("PaladinAuraManagement", 10) then
+        return false
+    end
+
     local inGroup = (GetNumPartyMembers() > 0 or GetNumRaidMembers() > 0)
     local inCombat = UnitAffectingCombat("player")
     local enemies = self:GetEnemyCount()
-    
-    local currentAura, activeAuras = GetPlayerPaladinAura()
-    local hasAnyAura = currentAura ~= nil
-    local bestAura = self:GetBestAura(spec, inGroup, inCombat, enemies)
 
-    -- Do not duplicate the same aura when another paladin already supplies it.
-    if bestAura and activeAuras[bestAura] then return false end
+    local observedOwnAura, activeAuras, casterlessAura, stanceReliable = GetPlayerPaladinAura()
+    AddOtherPaladinAuraCoverage(activeAuras)
+    local currentAura = observedOwnAura
+
+    -- Some private servers omit the caster field. Trust a casterless aura as
+    -- ours when solo, or when it matches an aura this Paladin successfully
+    -- activated. Otherwise treat it as group coverage from another Paladin.
+    if not currentAura and not stanceReliable and self.paladinManagedAura and
+       activeAuras[self.paladinManagedAura] then
+        currentAura = self.paladinManagedAura
+    elseif not currentAura and not stanceReliable and paladinCount <= 1 then
+        currentAura = casterlessAura
+    end
+
+    local hasAnyAura = currentAura ~= nil
+    local bestAura = self:GetBestAura(spec, inGroup, inCombat, enemies, activeAuras, currentAura)
+
+    if self.debugMode then
+        local coverage = {}
+        for aura in pairs(activeAuras) do table.insert(coverage, aura) end
+        table.sort(coverage)
+        PaladinDebug("Aura state | Own:" .. (currentAura or "None") ..
+                     " Best:" .. (bestAura or "None") ..
+                     " Paladins:" .. paladinCount ..
+                     " Covered:" .. (#coverage > 0 and table.concat(coverage, ", ") or "None"))
+    end
 
     -- Only switch auras if we have none or the spec's normal aura is wrong.
     if not hasAnyAura then
         if bestAura and self:CastPaladinSpell(bestAura, "player") then
+            self.paladinManagedAura = bestAura
             PaladinDebug("Activated " .. bestAura .. " (no aura was active)")
             return true
         end
     else
         if bestAura and currentAura ~= bestAura then
-            -- Preserve deliberate travel/resistance choices. Otherwise Ret and
-            -- Holy should not remain in Devotion Aura for an entire encounter.
-            if currentAura == S.FireResistanceAura or currentAura == S.FrostResistanceAura or
-               currentAura == S.ShadowResistanceAura or
-               (currentAura == S.CrusaderAura and IsMounted and IsMounted()) then
+            -- Preserve Crusader Aura only while it is serving its travel
+            -- purpose. Resistance auras are not permanent manual overrides;
+            -- without encounter-specific damage detection they must yield to
+            -- the coordinated spec/group aura.
+            if currentAura == S.CrusaderAura and IsMounted and IsMounted() then
                 return false
             end
             if self:CastPaladinSpell(bestAura, "player") then
+                self.paladinManagedAura = bestAura
                 PaladinDebug("Switched from " .. currentAura .. " to " .. bestAura)
                 return true
             end
