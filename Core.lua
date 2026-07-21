@@ -30,7 +30,7 @@ local defaults = {
             y = -100
         },
         egtEnabled = false,  -- Add this line
-        autofarmEnabled = false,  -- Add autofarm state
+        autofarmEnabled = false,  -- Mirrors the AzerothAutofarm window state
         targetingMode = "auto",
         feralRoleMode = "auto",
         debugWindowEnabled = false,  -- Debug window state
@@ -47,26 +47,70 @@ local defaults = {
 -- Core frame for updates
 local updateFrame = CreateFrame("Frame")
 
--- Helper function to run slash commands
-function RunSlashCmd(cmd)
-    local slash, rest = cmd:match("^(%S+)%s*(.-)$")
-    if slash then
-        slash = string.lower(slash)
-        -- Try to find the slash command
-        for name, func in pairs(SlashCmdList) do
-            local i = 1
-            while true do
-                local slashCmd = _G["SLASH_"..name..i]
-                if not slashCmd then break end
-                if slashCmd == slash then
-                    func(rest)
-                    return true
-                end
-                i = i + 1
-            end
+-- Keep the AF checkbox synchronized with the AzerothAutofarm main window.
+-- Its slash command is a toggle, so "show" and "hide" arguments cannot set
+-- a reliable state.
+function AC:GetAutofarmFrame()
+    local autofarm = _G.AzerothAutofarm
+    return _G.AzerothAutofarmFrame or (autofarm and autofarm.mainFrame)
+end
+
+function AC:UpdateAutofarmCheckbox()
+    local frame = self:GetAutofarmFrame()
+    local isShown = frame and frame:IsShown() and true or false
+
+    if self.autofarmCheck then
+        self.autofarmCheck:SetChecked(isShown)
+    end
+    if self.db and self.db.profile then
+        self.db.profile.autofarmEnabled = isShown
+    end
+
+    return isShown
+end
+
+function AC:SetupAutofarmSync()
+    local frame = self:GetAutofarmFrame()
+    if not frame then
+        self:UpdateAutofarmCheckbox()
+        return false
+    end
+
+    if self.autofarmSyncFrame ~= frame then
+        frame:HookScript("OnShow", function()
+            AC:UpdateAutofarmCheckbox()
+        end)
+        frame:HookScript("OnHide", function()
+            AC:UpdateAutofarmCheckbox()
+        end)
+        self.autofarmSyncFrame = frame
+    end
+
+    self:UpdateAutofarmCheckbox()
+    return true
+end
+
+function AC:SetAutofarmWindowShown(shouldShow)
+    local frame = self:GetAutofarmFrame()
+    if not frame then
+        self:UpdateAutofarmCheckbox()
+        return false
+    end
+
+    shouldShow = shouldShow and true or false
+    local isShown = frame:IsShown() and true or false
+    if isShown ~= shouldShow then
+        local autofarm = _G.AzerothAutofarm
+        if autofarm and autofarm.Toggle then
+            autofarm:Toggle()
+        elseif shouldShow then
+            frame:Show()
+        else
+            frame:Hide()
         end
     end
-    return false
+
+    return self:UpdateAutofarmCheckbox() == shouldShow
 end
 
 -- Enhanced throttle system to prevent function spam
@@ -4237,18 +4281,13 @@ function AC:CreateUI()
     local autofarmCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
     autofarmCheck:SetSize(20, 20)
     autofarmCheck:SetPoint("TOPLEFT", egtCheck, "BOTTOMLEFT", 0, 5)
-    autofarmCheck:SetChecked(self.db.profile.autofarmEnabled or false) -- Load saved state
+    autofarmCheck:SetChecked(false)
     autofarmCheck:SetScript("OnClick", function(self)
-        local isChecked = self:GetChecked()
-        AC.db.profile.autofarmEnabled = isChecked -- Save state
-        if isChecked then
-            -- Show autofarm using /autofarm show command
-            RunSlashCmd("/autofarm show")
-            AC:Print("Autofarm enabled")
+        local shouldShow = self:GetChecked() and true or false
+        if AC:SetAutofarmWindowShown(shouldShow) then
+            AC:Print(shouldShow and "Autofarm window opened" or "Autofarm window closed")
         else
-            -- Hide autofarm using /autofarm hide command
-            RunSlashCmd("/autofarm hide")
-            AC:Print("Autofarm disabled")
+            AC:Print("AzerothAutofarm is not loaded")
         end
     end)
 
@@ -4263,6 +4302,7 @@ function AC:CreateUI()
     self.egtLabel = egtLabel
     self.autofarmCheck = autofarmCheck
     self.autofarmLabel = autofarmLabel
+    self:SetupAutofarmSync()
 
     -- Title
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -4859,12 +4899,6 @@ function AC:OnEnable()
     if self.db.profile.egtEnabled and self.egtCheck then
         self.egtCheck:SetChecked(true)
         SendChatMessage(".toggle on", "SAY")
-    end
-    
-    -- Restore Autofarm state
-    if self.db.profile.autofarmEnabled and self.autofarmCheck then
-        self.autofarmCheck:SetChecked(true)
-        RunSlashCmd("/autofarm show")
     end
     
     -- Restore debug window state
