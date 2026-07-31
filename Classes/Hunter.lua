@@ -1054,6 +1054,65 @@ function AC:PetNeedsMending()
     return false
 end
 
+function AC:TryMendPet()
+    if not UnitExists("pet") or UnitIsDeadOrGhost("pet") or
+       not self:HunterSpellAvailable(S.MendPet) then
+        return false
+    end
+
+    -- Mend Pet implicitly targets the active pet in WotLK. Sending it through
+    -- the shared unit caster would temporarily select "pet" and then rely on
+    -- TargetLastTarget(), which can leave the hostile target unset.
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then
+        return false
+    end
+
+    local spellCooldown = self:GetSpellCooldown(S.MendPet)
+    local globalCooldown = self:GetSpellCooldown(61304)
+    if spellCooldown > 0.05 or globalCooldown > 0.05 then
+        HunterDebugThrottled(
+            "MendPetCooldown",
+            2.0,
+            string.format("Mend Pet waiting: cooldown %.1fs, GCD %.1fs", spellCooldown, globalCooldown)
+        )
+        return false
+    end
+
+    local usable, noMana = IsUsableSpell(S.MendPet)
+    if not usable or noMana then
+        HunterDebugThrottled("MendPetUnusable", 2.0, "Mend Pet waiting: spell is not usable")
+        return false
+    end
+
+    -- Friendly-spell range APIs may return nil on private-server clients. A
+    -- definite out-of-range result is authoritative; nil is allowed through.
+    local rangeOK, inRange = pcall(IsSpellInRange, S.MendPet, "pet")
+    if rangeOK and inRange ~= nil and inRange ~= 1 and inRange ~= true then
+        HunterDebugThrottled("MendPetRange", 2.0, "Mend Pet waiting: pet is out of range")
+        return false
+    end
+
+    if SpellIsTargeting and SpellIsTargeting() then
+        return false
+    end
+
+    if not self:ActionThrottle("MendPetAttempt", 1.0) then
+        return false
+    end
+
+    -- Cast directly without TargetUnit("pet"). WoW cast requests do not return
+    -- acceptance, so consume this rotation tick after a protected submission
+    -- and let the cooldown/aura state confirm it on the next update.
+    local requested = pcall(CastSpellByName, S.MendPet)
+    if not requested then
+        HunterDebugThrottled("MendPetRequestFailed", 2.0, "Mend Pet request raised a client error")
+        return false
+    end
+
+    HunterDebug("Mend Pet requested (hostile target preserved)")
+    return true
+end
+
 function AC:ManagePet(inCombat)
     -- Reduced throttle for critical pet management
     if not Throttle("PetManagement", 0.5) then return false end 
@@ -1125,11 +1184,8 @@ function AC:ManagePet(inCombat)
 
         if not inCombat and self:FeedHunterPetIfNeeded() then return true end
         
-        if self:PetNeedsMending() and self:IsUsableSpell(S.MendPet) then 
-            HunterDebug("Mending Pet"); 
-            if self:CastSpell(S.MendPet, "pet") then
-                return true
-            end
+        if self:PetNeedsMending() and self:TryMendPet() then
+            return true
         end
         
         -- Manage pet stance intelligently
