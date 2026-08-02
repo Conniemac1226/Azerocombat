@@ -820,7 +820,8 @@ function AC:SendPetToAttack(targetUnit)
         return false
     end
     
-    -- Use PetAttack() API to send pet to target
+    -- Keep the explicit unit here for solo smart-target selection. The
+    -- current-target path below uses the no-argument WotLK-compatible form.
     PetAttack(targetUnit)
     HunterDebug("Pet sent to attack: " .. UnitName(targetUnit))
     return true
@@ -829,11 +830,20 @@ end
 function AC:EnsurePetAttackingCurrentTarget()
     if not UnitExists("pet") or UnitIsDeadOrGhost("pet") then return false end
     if not UnitExists("target") or UnitIsDeadOrGhost("target") or not UnitCanAttack("player", "target") then return false end
-    if UnitExists("pettarget") and UnitIsUnit("pettarget", "target") then return false end
-    if not Throttle("HunterPetAttackCurrentTarget", 0.2) then return false end
+    local petHasCurrentTarget = UnitExists("pettarget") and UnitIsUnit("pettarget", "target")
 
-    PetAttack("target")
-    HunterDebug("Pet attack issued on current target: " .. (UnitName("target") or "Unknown"))
+    -- A pet can retain pettarget while its attack/movement command has been
+    -- lost. Reissue the command periodically instead of assuming matching
+    -- unit tokens prove that the pet is actually engaging the mob.
+    local throttleKey = petHasCurrentTarget and "HunterPetAttackRefresh" or "HunterPetAttackCurrentTarget"
+    local throttleInterval = petHasCurrentTarget and 1.5 or 0.2
+    if not Throttle(throttleKey, throttleInterval) then return false end
+
+    PetAttack()
+    local actionText = petHasCurrentTarget and
+        "Pet attack refreshed on current target: " or
+        "Pet attack issued on current target: "
+    HunterDebug(actionText .. (UnitName("target") or "Unknown"))
     return true
 end
 
@@ -2066,7 +2076,7 @@ function AC:HandleAutoAttack()
         end
 
         HunterDebugThrottled("AutoShotRejected", 2.0, "Auto Shot request raised a client error")
-    elseif autoShotActive then
+    elseif (rangeState == "melee" or rangeState == "deadzone") and autoShotActive then
         -- Stop the ranged repeat when the target enters close range so the
         -- melee branch is clean.
         if (state.autoShotRequestUntil or 0) <= now then
@@ -2076,6 +2086,12 @@ function AC:HandleAutoAttack()
                 HunterDebugThrottled("AutoShotStopped", 2.0, "Auto Shot stopped outside ranged distance")
             end
         end
+    elseif rangeState == "outofrange" then
+        -- Keep Auto Shot enabled while the target is temporarily out of
+        -- range. Tab-targeting and unit-token updates can briefly report this
+        -- state; toggling Auto Shot off here makes the next ranged handoff
+        -- unreliable and can leave the hunter idle until another shot fires.
+        HunterDebugThrottled("AutoShotOutOfRange", 2.0, "Auto Shot waiting: target out of range (repeat preserved)")
     else
         HunterDebugThrottled("AutoShotRange", 2.0, "Auto Shot waiting: range state=" .. tostring(rangeState))
     end
