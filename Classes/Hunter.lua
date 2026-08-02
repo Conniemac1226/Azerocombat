@@ -1894,8 +1894,11 @@ function AC:InitializeHunterState()
         lockAndLoadActive = false,
         lockAndLoadShots = 0,
         petDeadPending = false,
+        autoShotTargetGUID = nil,
+        autoShotRequestUntil = 0,
     }
     self.hunterState.lockAndLoadShots = self.hunterState.lockAndLoadShots or 0
+    self.hunterState.autoShotRequestUntil = self.hunterState.autoShotRequestUntil or 0
     return self.hunterState
 end
 
@@ -1987,7 +1990,11 @@ function AC:IsHunterAutoShotActive()
     if IsAutoRepeatSpell then
         local ok, active = pcall(IsAutoRepeatSpell, S.AutoShot)
         if ok and active ~= nil then
-            return active and true or false
+            -- WotLK/private-server clients may return 1/0 instead of a Lua
+            -- boolean.  In Lua, numeric 0 is truthy, so `active and true`
+            -- incorrectly reported an inactive Auto Shot as active and the
+            -- rotation then skipped the cast forever.
+            return active == true or active == 1
         end
     end
 
@@ -2015,9 +2022,25 @@ function AC:HandleAutoAttack()
 
     local rangeState = self:GetHunterRangeState("target")
     local autoShotActive = self:IsHunterAutoShotActive()
+    local state = self:InitializeHunterState()
+    local now = GetTime()
+    local targetGUID = UnitGUID("target")
+
+    -- CastSpellByName() does not synchronously update IsAutoRepeatSpell on
+    -- every 3.3.5 client.  Avoid sending a second toggle while the first
+    -- request is still being reflected by the client/server.
+    if state.autoShotTargetGUID ~= targetGUID then
+        state.autoShotTargetGUID = targetGUID
+        state.autoShotRequestUntil = 0
+    end
 
     if rangeState == "ranged" then
         if autoShotActive then
+            state.autoShotRequestUntil = 0
+            return false
+        end
+
+        if (state.autoShotRequestUntil or 0) > now then
             return false
         end
 
@@ -2034,28 +2057,25 @@ function AC:HandleAutoAttack()
             return false
         end
 
-        CastSpellByName(S.AutoShot)
-        if self:IsHunterAutoShotActive() then
+        local requested = pcall(CastSpellByName, S.AutoShot)
+        if requested then
+            state.autoShotRequestUntil = now + 0.75
             StartAttack()
-            HunterDebugThrottled("AutoShotStarted", 2.0, "Auto Shot started")
+            HunterDebugThrottled("AutoShotRequested", 2.0, "Auto Shot requested")
             return true
         end
 
-        -- If this client exposes neither repeat-state API, the cast request
-        -- itself is the only confirmation available. Treat it as consumed so
-        -- successive ticks do not repeatedly toggle Auto Shot.
-        if not IsAutoRepeatSpell and not IsCurrentSpell then
-            StartAttack()
-            HunterDebugThrottled("AutoShotRequested", 2.0, "Auto Shot requested (no client repeat-state API)")
-            return true
-        end
-
-        HunterDebugThrottled("AutoShotRejected", 2.0, "Auto Shot request was not accepted by the client")
+        HunterDebugThrottled("AutoShotRejected", 2.0, "Auto Shot request raised a client error")
     elseif autoShotActive then
         -- Stop the ranged repeat when the target enters close range so the
         -- melee branch is clean.
-        CastSpellByName(S.AutoShot)
-        HunterDebugThrottled("AutoShotStopped", 2.0, "Auto Shot stopped outside ranged distance")
+        if (state.autoShotRequestUntil or 0) <= now then
+            local stopped = pcall(CastSpellByName, S.AutoShot)
+            if stopped then
+                state.autoShotRequestUntil = now + 0.75
+                HunterDebugThrottled("AutoShotStopped", 2.0, "Auto Shot stopped outside ranged distance")
+            end
+        end
     else
         HunterDebugThrottled("AutoShotRange", 2.0, "Auto Shot waiting: range state=" .. tostring(rangeState))
     end
@@ -2420,8 +2440,12 @@ function AC:HunterBeastMasteryRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    if enemies >= 2 and self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
-        HunterDebug("BM: Multi-Shot")
+    -- BM can use Multi-Shot as a single-target filler when Aspect of the
+    -- Viper is available; HunterManaGate handles the mana fallback for lower
+    -- level characters who have not learned Viper yet.  Keep the MM/SV
+    -- rotations' stricter multi-target behavior unchanged.
+    if self:HunterManaGate(manaPercent, 28) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+        HunterDebug(enemies >= 2 and "BM: Multi-Shot (AoE)" or "BM: Multi-Shot (single target)")
         return true
     end
 
