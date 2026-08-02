@@ -2722,6 +2722,19 @@ function AC:HunterRotation()
         end
     end
 
+    -- Give a mana potion one chance before falling back to Aspect of the
+    -- Viper. Never drink while Viper is active: Viper is the recovery state,
+    -- while Hawk/Dragonhawk is the only state where a combat mana potion is
+    -- useful for preserving ranged damage.
+    local hasViper = self:HasBuff("player", S.AspectViper)
+    local hasDPSAspect = self:HasBuff("player", S.AspectDragonhawk) or
+                         self:HasBuff("player", S.AspectHawk)
+    if inCombat and not hasViper and hasDPSAspect and manaPercent < 25 and
+       self.UseManaPotion and self:UseManaPotion(25) then
+        HunterDebug("Mana potion before Aspect of the Viper")
+        return true
+    end
+
     if self:ManageAspects(spec, inCombat, manaPercent) then
         return true
     end
