@@ -25,7 +25,6 @@ local S = { -- Spells
     
     -- Pet Management
     CallPet = "Call Pet", RevivePet = "Revive Pet", MendPet = "Mend Pet",
-    FeedPet = "Feed Pet",
     
     -- Misc
     HuntersMark = "Hunter's Mark", Misdirection = "Misdirection", FeignDeath = "Feign Death",
@@ -126,72 +125,6 @@ local function HunterDebugThrottled(key, interval, msg)
     if Throttle("HunterDebug_" .. key, interval) then
         HunterDebug(msg)
     end
-end
-
--- Pet happiness check for better pet management
-function AC:GetPetHappiness()
-    if not UnitExists("pet") then return nil end
-    local happiness, damagePercentage, loyaltyRate = GetPetHappiness()
-    return happiness, damagePercentage, loyaltyRate
-end
-
--- Check if pet needs feeding
-function AC:PetNeedsFeeding()
-    local happiness = self:GetPetHappiness()
-    -- Happiness levels: 1 = Unhappy, 2 = Content, 3 = Happy
-    return happiness and happiness < 3
-end
-
-function AC:FindHunterPetFood()
-    local petLevel = UnitLevel("pet") or UnitLevel("player") or 1
-    local fallback = nil
-
-    for bag = 0, 4 do
-        for slot = 1, GetContainerNumSlots(bag) do
-            local itemLink = GetContainerItemLink(bag, slot)
-            if itemLink then
-                local itemName, _, _, itemLevel, requiredLevel, itemClass, itemSubClass = GetItemInfo(itemLink)
-                local isFood = itemClass == "Consumable" and itemSubClass and itemSubClass:find("Food")
-                if itemName and isFood then
-                    local foodLevel = math.max(itemLevel or 0, requiredLevel or 0)
-                    fallback = fallback or { bag = bag, slot = slot, name = itemName }
-
-                    -- Food more than 15 levels below the pet gives reduced or
-                    -- no useful happiness. Prefer a level-appropriate item,
-                    -- while retaining a fallback for clients with incomplete
-                    -- item-level data. The client performs the final diet check.
-                    if foodLevel == 0 or foodLevel >= math.max(1, petLevel - 15) then
-                        return bag, slot, itemName
-                    end
-                end
-            end
-        end
-    end
-
-    if fallback then
-        return fallback.bag, fallback.slot, fallback.name
-    end
-    return nil
-end
-
-function AC:FeedHunterPetIfNeeded()
-    if UnitAffectingCombat("player") or self:IsPlayerMoving() or self:IsChanneling() then return false end
-    if not self:PetNeedsFeeding() or not self:HunterSpellAvailable(S.FeedPet) then return false end
-    if not Throttle("HunterFeedPet", 5.0) then return false end
-
-    local bag, slot, itemName = self:FindHunterPetFood()
-    if not bag then
-        HunterDebugThrottled("NoPetFood", 10.0, "Pet needs feeding but no suitable food was found")
-        return false
-    end
-
-    local usable, noMana = IsUsableSpell(S.FeedPet)
-    if not usable or noMana then return false end
-
-    if not self:CastSpell(S.FeedPet, "pet") then return false end
-    UseContainerItem(bag, slot)
-    HunterDebug("Feeding pet with " .. itemName)
-    return true
 end
 
 -- Get pet focus/energy
@@ -1192,8 +1125,6 @@ function AC:ManagePet(inCombat)
         -- Emergency stance management (highest priority)
         if self:EmergencyPetPassive() then return true end
 
-        if not inCombat and self:FeedHunterPetIfNeeded() then return true end
-        
         if self:PetNeedsMending() and self:TryMendPet() then
             return true
         end
