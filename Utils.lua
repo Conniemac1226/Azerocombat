@@ -280,83 +280,170 @@ function AC:HasItem(itemName)
     return false
 end
 
--- All healing potions by potency (strongest to weakest)
-local healingPotions = {
-    -- WotLK (verified 3.3.5)
-    "Runic Healing Potion",        -- 2700-4500 HP (best WotLK)
-    "Resurgent Healing Potion",    -- 1500-2500 HP
-    "Powerful Rejuvenation Potion", -- 2475-4125 HP+MP
-    "Endless Healing Potion",     -- 2700-4500 HP (arena usable)
-    "Crazy Alchemist's Potion",    -- Random effect (alchemist only)
-    -- TBC
-    "Mad Alchemist's Potion",      -- 1500-2500 HP
-    "Volatile Healing Potion",     -- 2080-2720 HP
-    "Super Healing Potion",        -- 1500-2500 HP
-    "Whomping Healing Potion",     -- 350-550 HP (instant)
-    -- Classic
-    "Major Healing Potion",        -- 1050-1750 HP
-    "Superior Healing Potion",     -- 700-900 HP
-    "Greater Healing Potion",      -- 455-585 HP
-    "Healing Potion",              -- 140-180 HP
-    "Lesser Healing Potion",       -- 70-90 HP
-    "Minor Healing Potion",        -- 70-90 HP
-    -- Special/Quest
-    "Combat Healing Potion",       -- 350-550 HP (instant)
-    "Live Action Potion",          -- 600 HP (instant)
-    "Night Dragon's Breath",       -- 394-638 HP (quest reward)
-    "Whipper Root Tuber",          -- 300-500 HP (quest reward)
-    "Crystal Restore",             -- 500-700 HP (health/mana)
-    "Major Rejuvenation Potion"    -- 900-1500 HP (health/mana)
-}
-
--- All mana potions by potency (strongest to weakest) (verified 3.3.5)
-local manaPotions = {
-    -- WotLK
-    "Runic Mana Potion",           -- 4200-4400 MP (best WotLK)
-    "Powerful Rejuvenation Potion", -- 2475-4125 HP+MP
-    "Icy Mana Potion",             -- 1800-3000 MP (WotLK mid-tier)
-    "Endless Mana Potion",         -- 400-600 MP (arena usable)
-    "Crazy Alchemist's Potion",    -- Random effect (alchemist only)
-    -- TBC
-    "Mad Alchemist's Potion",      -- 1500-2500 MP
-    "Volatile Mana Potion",        -- 1200-2400 MP
-    "Super Mana Potion",           -- 1800-3000 MP
-    "Master Mana Potion",          -- 1800-3000 MP
-    "Whomping Mana Potion",        -- 650-850 MP (instant)
-    -- Classic
-    "Major Mana Potion",           -- 1350-2250 MP
-    "Superior Mana Potion",        -- 900-1500 MP  
-    "Greater Mana Potion",         -- 700-900 MP
-    "Mana Potion",                 -- 280-360 MP
-    "Lesser Mana Potion",          -- 140-180 MP
-    "Minor Mana Potion",           -- 140-180 MP
-    -- Special/Quest
-    "Combat Mana Potion",          -- 350-550 MP (instant)
-    "Live Action Potion",          -- 600 MP (instant)
-    "Sagefin Tuber",               -- 300-500 MP (quest reward)
-    "Crystal Restore",             -- 500-700 MP (health/mana)
-    "Major Rejuvenation Potion"    -- 900-1500 MP (health/mana)
-}
-
-local function IsGlobalCooldownActive()
-    local ok, gcdStart, gcdDuration = pcall(GetSpellCooldown, 61304)
-    if not ok or not gcdStart then
-        ok, gcdStart, gcdDuration = pcall(GetSpellCooldown, "61304")
+local function GetPotionEntry(entry)
+    if type(entry) == "table" then
+        return entry.name, entry
     end
 
-    if gcdStart and gcdDuration and gcdDuration > 0 then
-        return (gcdStart + gcdDuration - GetTime()) > 0.1
-    end
-
-    return false
+    return entry, {}
 end
+
+-- Health-restoring consumables available from Vanilla through WotLK. Dangerous
+-- sleep/stat-penalty potions are retained for completeness but never auto-used
+-- during combat. Non-potion restoratives are marked so they can still be used
+-- while the shared potion cooldown is active.
+local healingPotions = {
+    "Runic Healing Injector",
+    "Runic Healing Potion",
+    "Crazy Alchemist's Potion",
+    "Powerful Rejuvenation Potion",
+    "Endless Healing Potion",
+    "Resurgent Healing Potion",
+    "Noth's Special Brew",
+    "Healing Potion Injector",
+    "Super Rejuvenation Potion",
+    "Mad Alchemist's Potion",
+    "Super Healing Potion",
+    "Auchenai Healing Potion",
+    "Cenarion Healing Salve",
+    "Bottled Nethergon Vapor",
+    "Argent Healing Potion",
+    "Major Combat Healing Potion",
+    "Volatile Healing Potion",
+    "Crystal Healing Potion",
+    "Red Ogre Brew Special",
+    "Red Ogre Brew",
+    "Major Rejuvenation Potion",
+    "Major Healing Potion",
+    "Wildvine Potion",
+    "Superior Healing Potion",
+    "Superior Healing Draught",
+    "Major Healing Draught",
+    "Greater Healing Potion",
+    "Combat Healing Potion",
+    "Discolored Healing Potion",
+    "Healing Potion",
+    "Minor Rejuvenation Potion",
+    "Lesser Healing Potion",
+    "Minor Healing Potion",
+    "Rulkster's Secret Sauce",
+    { name = "Fel Regeneration Potion", outOfCombatOnly = true },
+    { name = "Potion of Nightmares", outOfCombatOnly = true },
+    { name = "Major Dreamless Sleep Potion", outOfCombatOnly = true },
+    { name = "Greater Dreamless Sleep Potion", outOfCombatOnly = true },
+    { name = "Dreamless Sleep Potion", outOfCombatOnly = true },
+    { name = "Night Dragon's Breath", sharesPotionCooldown = false, fallbackCooldown = 120 },
+    { name = "Whipper Root Tuber", sharesPotionCooldown = false, fallbackCooldown = 120 },
+    { name = "Crystal Restore", sharesPotionCooldown = false, fallbackCooldown = 120 }
+}
+
+-- Mana-restoring consumables available from Vanilla through WotLK.
+local manaPotions = {
+    "Runic Mana Injector",
+    "Runic Mana Potion",
+    "Crazy Alchemist's Potion",
+    "Powerful Rejuvenation Potion",
+    "Endless Mana Potion",
+    "Mana Potion Injector",
+    "Super Rejuvenation Potion",
+    "Mad Alchemist's Potion",
+    "Super Mana Potion",
+    "Auchenai Mana Potion",
+    "Cenarion Mana Salve",
+    "Bottled Nethergon Energy",
+    "Argent Mana Potion",
+    "Major Combat Mana Potion",
+    "Icy Mana Potion",
+    "Unstable Mana Potion",
+    "Crystal Mana Potion",
+    "Blue Ogre Brew Special",
+    "Blue Ogre Brew",
+    "Major Rejuvenation Potion",
+    "Major Mana Potion",
+    "Wildvine Potion",
+    "Superior Mana Potion",
+    "Superior Mana Draught",
+    "Major Mana Draught",
+    "Greater Mana Potion",
+    "Combat Mana Potion",
+    "Mana Potion",
+    "Minor Rejuvenation Potion",
+    "Lesser Mana Potion",
+    "Minor Mana Potion",
+    "Rulkster's Brain Juice",
+    { name = "Fel Mana Potion", outOfCombatOnly = true },
+    { name = "Potion of Nightmares", outOfCombatOnly = true },
+    { name = "Major Dreamless Sleep Potion", outOfCombatOnly = true },
+    { name = "Greater Dreamless Sleep Potion", outOfCombatOnly = true },
+    { name = "Dreamless Sleep Potion", outOfCombatOnly = true },
+    { name = "Night Dragon's Breath", sharesPotionCooldown = false, fallbackCooldown = 120 },
+    { name = "Crystal Restore", sharesPotionCooldown = false, fallbackCooldown = 120 }
+}
 
 local potionCooldownUntil = 0
 local potionCombatLocked = false
 local POTION_COOLDOWN_FALLBACK = 61
+local POTION_CONFIRM_TIMEOUT = 0.8
+local POTION_RETRY_DELAY = 3
+local pendingPotionUse = nil
+local potionRequestRetryUntil = 0
+local itemCooldownUntil = {}
+local itemRetryUntil = {}
 
-local function UsesCombatPotionLockout(itemName)
-    return itemName and string.find(string.lower(itemName), "potion", 1, true) ~= nil
+-- Capture the exact end of combat so the WotLK post-combat potion cooldown is
+-- not extended merely because the next rotation check happened later.
+local potionCooldownWatcher = CreateFrame("Frame")
+potionCooldownWatcher:RegisterEvent("PLAYER_REGEN_ENABLED")
+potionCooldownWatcher:SetScript("OnEvent", function()
+    if potionCombatLocked then
+        potionCombatLocked = false
+        potionCooldownUntil = math.max(
+            potionCooldownUntil or 0,
+            GetTime() + POTION_COOLDOWN_FALLBACK
+        )
+    end
+end)
+
+local function GetCooldownRemaining(start, duration)
+    if not start or not duration or duration <= 0 then
+        return 0
+    end
+
+    return math.max(0, start + duration - GetTime())
+end
+
+local function GetBagCooldownRemaining(bag, slot)
+    if not GetContainerItemCooldown then
+        return 0
+    end
+
+    local ok, start, duration = pcall(GetContainerItemCooldown, bag, slot)
+    if not ok then
+        return 0
+    end
+
+    return GetCooldownRemaining(start, duration)
+end
+
+local function GetItemCooldownRemaining(itemID, itemName)
+    if not GetItemCooldown then
+        return 0
+    end
+
+    local ok, start, duration = pcall(GetItemCooldown, itemID or itemName)
+    if not ok then
+        return 0
+    end
+
+    return GetCooldownRemaining(start, duration)
+end
+
+local function GetItemID(itemLink)
+    return itemLink and tonumber(string.match(itemLink, "item:(%d+)")) or nil
+end
+
+local function GetPotionKey(itemID, itemName)
+    return tostring(itemID or itemName)
 end
 
 local function GetPotionLockoutRemaining()
@@ -364,6 +451,8 @@ local function GetPotionLockoutRemaining()
 
     if potionCombatLocked and not UnitAffectingCombat("player") then
         potionCombatLocked = false
+        -- In WotLK the shared potion cooldown begins when combat ends.
+        potionCooldownUntil = math.max(potionCooldownUntil or 0, now + POTION_COOLDOWN_FALLBACK)
     end
 
     if potionCombatLocked and UnitAffectingCombat("player") then
@@ -377,27 +466,70 @@ local function GetPotionLockoutRemaining()
     return 0
 end
 
-local function StartPotionLockout(itemName)
-    potionCooldownUntil = math.max(potionCooldownUntil or 0, GetTime() + POTION_COOLDOWN_FALLBACK)
+local function StartPotionLockout(pending, observedCooldown)
+    local now = GetTime()
+    local fallback = pending.options.fallbackCooldown or POTION_COOLDOWN_FALLBACK
+    itemCooldownUntil[pending.key] = math.max(
+        itemCooldownUntil[pending.key] or 0,
+        now + math.max(observedCooldown or 0, fallback)
+    )
 
-    -- WotLK allows one potion while in combat. Some 3.3.5 servers do not expose
-    -- that lockout through bag cooldown APIs, so track it locally to prevent spam.
-    if UsesCombatPotionLockout(itemName) and UnitAffectingCombat("player") then
+    if pending.options.sharesPotionCooldown == false then
+        return
+    end
+
+    if UnitAffectingCombat("player") then
         potionCombatLocked = true
+    else
+        potionCooldownUntil = math.max(
+            potionCooldownUntil or 0,
+            now + math.max(observedCooldown or 0, POTION_COOLDOWN_FALLBACK)
+        )
     end
 end
 
-local function UsePotionFromBag(itemName, bag, slot)
+local function ResolvePendingPotionUse()
+    if not pendingPotionUse then
+        return "none"
+    end
+
+    local pending = pendingPotionUse
+    local postLink = GetContainerItemLink(pending.bag, pending.slot)
+    local postCount = select(2, GetContainerItemInfo(pending.bag, pending.slot)) or 0
+    local bagRemaining = GetBagCooldownRemaining(pending.bag, pending.slot)
+    local itemRemaining = GetItemCooldownRemaining(pending.itemID, pending.itemName)
+    local observedCooldown = math.max(bagRemaining, itemRemaining)
+    local consumed = pending.preLink and
+        (not postLink or postLink ~= pending.preLink or postCount < pending.preCount)
+
+    if consumed or observedCooldown > 0.1 then
+        StartPotionLockout(pending, observedCooldown)
+        pendingPotionUse = nil
+        return "confirmed"
+    end
+
+    if GetTime() - pending.submittedAt < POTION_CONFIRM_TIMEOUT then
+        return "pending"
+    end
+
+    -- A successful pcall only means Lua accepted the protected call. If neither
+    -- the stack nor cooldown changed, the client rejected the use request.
+    potionRequestRetryUntil = GetTime() + POTION_RETRY_DELAY
+    itemRetryUntil[pending.key] = potionRequestRetryUntil
+    pendingPotionUse = nil
+    return "rejected"
+end
+
+local function UsePotionFromBag(itemName, bag, slot, options)
+    options = options or {}
+
     if not bag or not slot then
         return false, "missing_slot"
     end
 
-    local function isOnCooldown(start, duration)
-        if not start or not duration or duration <= 0 then
-            return false
-        end
-
-        return (start + duration - GetTime()) > 0.1
+    local pendingState = ResolvePendingPotionUse()
+    if pendingState ~= "none" then
+        return false, pendingState
     end
 
     local _, _, locked = GetContainerItemInfo(bag, slot)
@@ -405,69 +537,80 @@ local function UsePotionFromBag(itemName, bag, slot)
         return false, "locked"
     end
 
-    if IsGlobalCooldownActive() then
-        return false, "gcd"
+    if options.outOfCombatOnly and UnitAffectingCombat("player") then
+        return false, "not_usable"
     end
 
-    if GetPotionLockoutRemaining() > 0 then
+    if options.sharesPotionCooldown ~= false and GetPotionLockoutRemaining() > 0 then
         return false, "cooldown"
     end
 
-    local bagStart, bagDuration = GetContainerItemCooldown and select(1, GetContainerItemCooldown(bag, slot))
-    if isOnCooldown(bagStart, bagDuration) then
-        potionCooldownUntil = math.max(potionCooldownUntil or 0, bagStart + bagDuration)
+    local preLink = GetContainerItemLink(bag, slot)
+    local itemID = GetItemID(preLink)
+    local key = GetPotionKey(itemID, itemName)
+    local now = GetTime()
+    if potionRequestRetryUntil > now then
+        return false, "retry"
+    end
+
+    if (itemCooldownUntil[key] or 0) > now then
         return false, "cooldown"
     end
 
-    local itemStart, itemDuration = GetItemCooldown and select(1, GetItemCooldown(itemName))
-    if isOnCooldown(itemStart, itemDuration) then
-        potionCooldownUntil = math.max(potionCooldownUntil or 0, itemStart + itemDuration)
+    if (itemRetryUntil[key] or 0) > now then
+        return false, "retry"
+    end
+
+    local bagRemaining = GetBagCooldownRemaining(bag, slot)
+    local itemRemaining = GetItemCooldownRemaining(itemID, itemName)
+    local observedCooldown = math.max(bagRemaining, itemRemaining)
+    if observedCooldown > 0.1 then
+        itemCooldownUntil[key] = math.max(itemCooldownUntil[key] or 0, now + observedCooldown)
+        if options.sharesPotionCooldown ~= false then
+            potionCooldownUntil = math.max(potionCooldownUntil or 0, now + observedCooldown)
+        end
         return false, "cooldown"
     end
 
-    local usable = IsUsableItem and IsUsableItem(itemName)
+    local usable = IsUsableItem and IsUsableItem(itemID or itemName)
     if usable == false then
         return false, "not_usable"
     end
 
-    local preLink = GetContainerItemLink(bag, slot)
     local preCount = select(2, GetContainerItemInfo(bag, slot)) or 1
 
     local ok = pcall(UseContainerItem, bag, slot)
     if not ok then
+        potionRequestRetryUntil = GetTime() + POTION_RETRY_DELAY
         return false, "blocked"
     end
 
-    StartPotionLockout(itemName)
+    pendingPotionUse = {
+        itemName = itemName,
+        itemID = itemID,
+        key = key,
+        bag = bag,
+        slot = slot,
+        preLink = preLink,
+        preCount = preCount,
+        submittedAt = GetTime(),
+        options = options
+    }
 
-    local function didUseStartCooldownOrConsume()
-        local postLink = GetContainerItemLink(bag, slot)
-        local postCount = select(2, GetContainerItemInfo(bag, slot)) or 0
-        if preLink and (not postLink or postLink ~= preLink or postCount < preCount) then
-            return true
-        end
-
-        bagStart, bagDuration = GetContainerItemCooldown and select(1, GetContainerItemCooldown(bag, slot))
-        if isOnCooldown(bagStart, bagDuration) then
-            return true
-        end
-
-        itemStart, itemDuration = GetItemCooldown and select(1, GetItemCooldown(itemName))
-        if isOnCooldown(itemStart, itemDuration) then
-            return true
-        end
-
-        return false
+    -- Bag counts and cooldowns often update on the next frame. AceTimer polls the
+    -- request even if the restored resource rises above its trigger threshold.
+    if AC.ScheduleTimer then
+        AC:ScheduleTimer(ResolvePendingPotionUse, 0.1)
+        AC:ScheduleTimer(ResolvePendingPotionUse, POTION_CONFIRM_TIMEOUT + 0.1)
     end
 
-    if didUseStartCooldownOrConsume() then
+    if ResolvePendingPotionUse() == "confirmed" then
         return true, "used"
     end
 
-    -- Bag/item cooldown updates can lag or be absent on WotLK private servers.
-    -- The protected call succeeded, so assume the client accepted the potion
-    -- attempt and rely on the local lockout rather than retrying every tick.
-    return true, "used_assumed"
+    -- Consume only this rotation tick while waiting for asynchronous bag/cooldown
+    -- updates. The shared lockout is not started until use is confirmed.
+    return true, "submitted"
 end
 
 -- All offensive potions (damage/stats boosting) (verified 3.3.5)
@@ -481,7 +624,6 @@ local offensivePotions = {
     "Haste Potion",                -- Haste increase
     "Insane Strength Potion",      -- Strength increase
     "Heroic Potion",               -- All stats increase
-    "Bloodlust Brooch",            -- Attack power
 }
 
 -- All defensive potions (armor/resistance boosting) (verified 3.3.5)
@@ -584,13 +726,18 @@ local utilityPotions = {
     "Greater Invisibility Potion", -- Invisibility
     "Potion of Invisibility",      -- Invisibility
     "Living Action Potion",        -- Remove stun/snare
-    "Dreamless Sleep Potion",      -- Put enemy to sleep
+    "Dreamless Sleep Potion",      -- Puts the player to sleep while restoring resources
     "Shrinking Violet",            -- Reduce size
     "Growth Potion",               -- Increase size
 }
 
 -- Healing potion usage (improved with throttling and cooldown checks)
 function AC:UseHealthPotion(threshold)
+    local pendingState = ResolvePendingPotionUse()
+    if pendingState ~= "none" then
+        return false, pendingState
+    end
+
     threshold = threshold or 30  -- Default to 30% health
     
     local healthPercent = self:GetPlayerHealthPercent()
@@ -611,23 +758,32 @@ function AC:UseHealthPotion(threshold)
         return false, "throttle"
     end
     
-    for _, potion in ipairs(healingPotions) do
+    local lastReason = nil
+    for _, entry in ipairs(healingPotions) do
+        local potion, options = GetPotionEntry(entry)
         local hasItem, bag, slot = self:HasItem(potion)
         if hasItem then
             if self.debugMode then
                 self:Debug("Health potion candidate found: " .. potion)
             end
-            local used, reason = UsePotionFromBag(potion, bag, slot)
+            local used, reason = UsePotionFromBag(potion, bag, slot, options)
             if used then
-                self:Print("Using " .. potion)
+                if reason == "used" then
+                    self:Print("Using " .. potion)
+                elseif self.debugMode then
+                    self:Debug("Health potion request submitted: " .. potion)
+                end
                 return true, potion
             end
+
+            lastReason = reason
 
             if self.debugMode then
                 self:Debug("Health potion " .. potion .. " unavailable: " .. tostring(reason))
             end
 
-            if reason ~= "not_usable" and reason ~= "missing_slot" then
+            if reason == "pending" or reason == "rejected" or
+               reason == "locked" or reason == "blocked" then
                 return false, reason
             end
         end
@@ -636,11 +792,16 @@ function AC:UseHealthPotion(threshold)
     if self.debugMode then
         self:Debug("No health potions available or all on cooldown")
     end
-    return false, "missing_item"
+    return false, lastReason or "missing_item"
 end
 
 -- Mana potion usage (improved with throttling and cooldown checks)
 function AC:UseManaPotion(threshold)
+    local pendingState = ResolvePendingPotionUse()
+    if pendingState ~= "none" then
+        return false, pendingState
+    end
+
     threshold = threshold or 20  -- Default to 20% mana
     
     local maxMana = UnitPowerMax("player", 0)
@@ -662,20 +823,29 @@ function AC:UseManaPotion(threshold)
         return false, "throttle"
     end
     
-    for _, potion in ipairs(manaPotions) do
+    local lastReason = nil
+    for _, entry in ipairs(manaPotions) do
+        local potion, options = GetPotionEntry(entry)
         local hasItem, bag, slot = self:HasItem(potion)
         if hasItem then
-            local used, reason = UsePotionFromBag(potion, bag, slot)
+            local used, reason = UsePotionFromBag(potion, bag, slot, options)
             if used then
-                self:Print("Using " .. potion)
+                if reason == "used" then
+                    self:Print("Using " .. potion)
+                elseif self.debugMode then
+                    self:Debug("Mana potion request submitted: " .. potion)
+                end
                 return true, potion
             end
+
+            lastReason = reason
 
             if self.debugMode then
                 self:Debug("Mana potion " .. potion .. " unavailable: " .. tostring(reason))
             end
 
-            if reason ~= "not_usable" and reason ~= "missing_slot" then
+            if reason == "pending" or reason == "rejected" or
+               reason == "locked" or reason == "blocked" then
                 return false, reason
             end
         end
@@ -684,11 +854,16 @@ function AC:UseManaPotion(threshold)
     if self.debugMode then
         self:Debug("No mana potions available or all on cooldown")
     end
-    return false, "missing_item"
+    return false, lastReason or "missing_item"
 end
 
 -- Combo healing/mana potions (improved with throttling and cooldown checks)
 function AC:UseComboPotion(healthThreshold, manaThreshold)
+    local pendingState = ResolvePendingPotionUse()
+    if pendingState ~= "none" then
+        return false, pendingState
+    end
+
     healthThreshold = healthThreshold or 30
     manaThreshold = manaThreshold or 20
     
@@ -716,25 +891,38 @@ function AC:UseComboPotion(healthThreshold, manaThreshold)
     -- Use combo potions that heal both health and mana
     local comboPotions = {
         "Crazy Alchemist's Potion",
+        "Powerful Rejuvenation Potion",
+        "Super Rejuvenation Potion",
         "Mad Alchemist's Potion",
-        "Crystal Restore",
-        "Major Rejuvenation Potion"
+        "Major Rejuvenation Potion",
+        "Minor Rejuvenation Potion",
+        "Wildvine Potion",
+        { name = "Crystal Restore", sharesPotionCooldown = false, fallbackCooldown = 120 }
     }
-    
-    for _, potion in ipairs(comboPotions) do
+
+    local lastReason = nil
+    for _, entry in ipairs(comboPotions) do
+        local potion, options = GetPotionEntry(entry)
         local hasItem, bag, slot = self:HasItem(potion)
         if hasItem then
-            local used, reason = UsePotionFromBag(potion, bag, slot)
+            local used, reason = UsePotionFromBag(potion, bag, slot, options)
             if used then
-                self:Print("Using " .. potion .. " (combo)")
+                if reason == "used" then
+                    self:Print("Using " .. potion .. " (combo)")
+                elseif self.debugMode then
+                    self:Debug("Combo potion request submitted: " .. potion)
+                end
                 return true, potion
             end
+
+            lastReason = reason
 
             if self.debugMode then
                 self:Debug("Combo potion " .. potion .. " unavailable: " .. tostring(reason))
             end
 
-            if reason ~= "not_usable" and reason ~= "missing_slot" then
+            if reason == "pending" or reason == "rejected" or
+               reason == "locked" or reason == "blocked" then
                 return false, reason
             end
         end
@@ -743,11 +931,16 @@ function AC:UseComboPotion(healthThreshold, manaThreshold)
     if self.debugMode then
         self:Debug("No combo potions available or all on cooldown")
     end
-    return false, "missing_item"
+    return false, lastReason or "missing_item"
 end
 
 -- Use offensive potions (improved with throttling and cooldown checks)
 function AC:UseOffensivePotion(buffsActive)
+    local pendingState = ResolvePendingPotionUse()
+    if pendingState ~= "none" then
+        return false, pendingState
+    end
+
     if not buffsActive then
         return false, "no_buffs"
     end
@@ -766,7 +959,11 @@ function AC:UseOffensivePotion(buffsActive)
         if hasItem then
             local used, reason = UsePotionFromBag(potion, bag, slot)
             if used then
-                self:Print("Using " .. potion)
+                if reason == "used" then
+                    self:Print("Using " .. potion)
+                elseif self.debugMode then
+                    self:Debug("Offensive potion request submitted: " .. potion)
+                end
                 return true, potion
             end
 
@@ -788,6 +985,11 @@ end
 
 -- Use defensive potions (improved with throttling and cooldown checks)
 function AC:UseDefensivePotion(dangerLevel)
+    local pendingState = ResolvePendingPotionUse()
+    if pendingState ~= "none" then
+        return false, pendingState
+    end
+
     dangerLevel = dangerLevel or 2  -- 1: low threat, 2: moderate, 3: high
     
     local healthPercent = self:GetPlayerHealthPercent()
@@ -809,7 +1011,11 @@ function AC:UseDefensivePotion(dangerLevel)
         if hasItem then
             local used, reason = UsePotionFromBag(potion, bag, slot)
             if used then
-                self:Print("Using " .. potion)
+                if reason == "used" then
+                    self:Print("Using " .. potion)
+                elseif self.debugMode then
+                    self:Debug("Defensive potion request submitted: " .. potion)
+                end
                 return true, potion
             end
 
@@ -831,6 +1037,11 @@ end
 
 -- Use utility potions
 function AC:UseUtilityPotion(situation)
+    local pendingState = ResolvePendingPotionUse()
+    if pendingState ~= "none" then
+        return false, pendingState
+    end
+
     local potionMap = {
         ["speed"] = "Speed Potion",
         ["freedom"] = "Free Action Potion",
@@ -849,7 +1060,11 @@ function AC:UseUtilityPotion(situation)
         if hasItem then
             local used, reason = UsePotionFromBag(potion, bag, slot)
             if used then
-                self:Print("Using " .. potion)
+                if reason == "used" then
+                    self:Print("Using " .. potion)
+                elseif self.debugMode then
+                    self:Debug("Utility potion request submitted: " .. potion)
+                end
                 return true, potion
             end
 
