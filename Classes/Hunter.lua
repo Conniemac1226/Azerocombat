@@ -1837,9 +1837,22 @@ function AC:InitializeHunterState()
         petDeadPending = false,
         autoShotTargetGUID = nil,
         autoShotRequestUntil = 0,
+        autoShotEligibleSince = 0,
+        autoShotVerifiedTargetGUID = nil,
+        lastAutoShotEventAt = 0,
+        autoShotRecoveryPhase = nil,
+        autoShotRecoveryAttempts = 0,
+        autoShotRecoveryProbeAt = 0,
+        autoShotRecoverySuppressed = false,
+        autoShotStartAttempts = 0,
     }
     self.hunterState.lockAndLoadShots = self.hunterState.lockAndLoadShots or 0
     self.hunterState.autoShotRequestUntil = self.hunterState.autoShotRequestUntil or 0
+    self.hunterState.autoShotEligibleSince = self.hunterState.autoShotEligibleSince or 0
+    self.hunterState.lastAutoShotEventAt = self.hunterState.lastAutoShotEventAt or 0
+    self.hunterState.autoShotRecoveryAttempts = self.hunterState.autoShotRecoveryAttempts or 0
+    self.hunterState.autoShotRecoveryProbeAt = self.hunterState.autoShotRecoveryProbeAt or 0
+    self.hunterState.autoShotStartAttempts = self.hunterState.autoShotStartAttempts or 0
     return self.hunterState
 end
 
@@ -1851,11 +1864,38 @@ function AC:HandleClassCombatLog(...)
     local timestamp, subevent, sourceGUID, sourceName, sourceFlags, destGUID, destName, destFlags = ...
     local petGUID = UnitGUID("pet")
     local playerGUID = UnitGUID("player")
+    local spellID = select(9, ...)
+    local spellName = select(10, ...)
 
     if playerGUID and sourceGUID == playerGUID and subevent == "SPELL_CAST_SUCCESS" then
-        local spellName = select(10, ...)
         if spellName == S.KillCommand then
             state.lastKillCommandCast = GetTime()
+        end
+    end
+
+    -- Auto Shot is normally reported as RANGE_DAMAGE/RANGE_MISSED. Accept the
+    -- SPELL variants as well because some 3.3.5 private-server cores emit those
+    -- for ranged auto-repeat attacks. A hit or miss is authoritative proof that
+    -- Auto Shot is actually firing at this target; the client repeat flag alone
+    -- is not target-specific and can remain stale across target changes.
+    local isAutoShotResult = subevent == "RANGE_DAMAGE" or subevent == "RANGE_MISSED" or
+                             subevent == "SPELL_DAMAGE" or subevent == "SPELL_MISSED"
+    local isAutoShot = spellID == 75 or spellName == S.AutoShot
+    if playerGUID and sourceGUID == playerGUID and isAutoShotResult and isAutoShot then
+        local now = GetTime()
+        state.lastAutoShotEventAt = now
+        if destGUID and destGUID == state.autoShotTargetGUID then
+            state.autoShotVerifiedTargetGUID = destGUID
+            state.autoShotRecoveryPhase = nil
+            state.autoShotRecoveryAttempts = 0
+            state.autoShotRecoverySuppressed = false
+            state.autoShotStartAttempts = 0
+            state.autoShotRequestUntil = 0
+            HunterDebugThrottled(
+                "AutoShotVerified",
+                2.0,
+                "Auto Shot verified on current target: " .. tostring(destName or "Unknown")
+            )
         end
     end
 
@@ -1956,6 +1996,20 @@ function AC:IsHunterAutoShotActive()
     return false
 end
 
+local function GetHunterAutoShotWatchdogDelay()
+    local rangedSpeed = 3.0
+    if UnitRangedDamage then
+        local ok, speed = pcall(UnitRangedDamage, "player")
+        if ok and type(speed) == "number" and speed > 0 and speed < 10 then
+            rangedSpeed = speed
+        end
+    end
+
+    -- Allow one complete ranged swing plus client/server latency before
+    -- declaring an unverified target handoff stale.
+    return math.max(2.25, math.min(5.0, rangedSpeed + 0.75))
+end
+
 function AC:HandleAutoAttack()
     if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then
         return false
@@ -1966,51 +2020,180 @@ function AC:HandleAutoAttack()
     local state = self:InitializeHunterState()
     local now = GetTime()
     local targetGUID = UnitGUID("target")
+    local targetName = UnitName("target") or "Unknown"
+    local targetChanged = state.autoShotTargetGUID ~= targetGUID
 
     -- CastSpellByName() does not synchronously update IsAutoRepeatSpell on
     -- every 3.3.5 client.  Avoid sending a second toggle while the first
     -- request is still being reflected by the client/server.
-    if state.autoShotTargetGUID ~= targetGUID then
+    if targetChanged then
         state.autoShotTargetGUID = targetGUID
         state.autoShotRequestUntil = 0
+        state.autoShotEligibleSince = now
+        state.autoShotVerifiedTargetGUID = nil
+        state.autoShotRecoveryPhase = nil
+        state.autoShotRecoveryAttempts = 0
+        state.autoShotRecoveryProbeAt = 0
+        state.autoShotRecoverySuppressed = false
+        state.autoShotStartAttempts = 0
+        HunterDebugThrottled(
+            "AutoShotTargetHandoff",
+            1.0,
+            "Auto Shot target handoff: " .. targetName ..
+            " (client active=" .. tostring(autoShotActive) .. "); awaiting shot confirmation"
+        )
     end
 
     if rangeState == "ranged" then
-        if autoShotActive then
-            state.autoShotRequestUntil = 0
-            return false
-        end
+        local watchdogDelay = GetHunterAutoShotWatchdogDelay()
+        local castingOrChanneling = UnitCastingInfo("player") or UnitChannelInfo("player")
+        local moving = self:IsPlayerMoving()
 
-        if (state.autoShotRequestUntil or 0) > now then
-            return false
-        end
+        local function requestAutoShot(reason)
+            if castingOrChanneling then
+                HunterDebugThrottled("AutoShotCasting", 2.0, "Auto Shot waiting: player is casting/channeling")
+                return false
+            end
 
-        -- Auto Shot is an auto-repeat attack, not a normal GCD spell. Do not
-        -- send it through HunterCanCast/IsUsableSpell, which can report false
-        -- while the weapon swing timer or another spell is active.
-        if not self:HunterSpellAvailable(S.AutoShot) then
-            HunterDebugThrottled("AutoShotUnavailable", 2.0, "Auto Shot skipped: spell is not known")
-            return false
-        end
+            if not self:HunterSpellAvailable(S.AutoShot) then
+                HunterDebugThrottled("AutoShotUnavailable", 2.0, "Auto Shot skipped: spell is not known")
+                return false
+            end
 
-        if UnitCastingInfo("player") or UnitChannelInfo("player") then
-            HunterDebugThrottled("AutoShotCasting", 2.0, "Auto Shot waiting: player is casting/channeling")
-            return false
-        end
+            local requested = pcall(CastSpellByName, S.AutoShot)
+            if not requested then
+                HunterDebugThrottled("AutoShotRejected", 2.0, "Auto Shot request raised a client error")
+                return false
+            end
 
-        local requested = pcall(CastSpellByName, S.AutoShot)
-        if requested then
-            state.autoShotRequestUntil = now + 0.75
+            state.autoShotStartAttempts = (state.autoShotStartAttempts or 0) + 1
+            local retryDelay = math.min(2.5, 0.75 + (state.autoShotStartAttempts - 1) * 0.5)
+            state.autoShotRequestUntil = now + retryDelay
+            state.autoShotEligibleSince = now
+            state.autoShotRecoveryPhase = "verify"
             StartAttack()
-            HunterDebugThrottled("AutoShotRequested", 2.0, "Auto Shot requested")
+            HunterDebugThrottled("AutoShotRequested", 1.0, reason or "Auto Shot requested")
             return true
         end
 
-        HunterDebugThrottled("AutoShotRejected", 2.0, "Auto Shot request raised a client error")
-    elseif (rangeState == "melee" or rangeState == "deadzone") and autoShotActive then
+        -- A shot result on this target is stronger evidence than a transient
+        -- false value from a private-server repeat-state API. Give it one swing
+        -- of grace before deciding the repeat really stopped.
+        if state.autoShotVerifiedTargetGUID == targetGUID then
+            if autoShotActive then
+                state.autoShotRequestUntil = 0
+                state.autoShotStartAttempts = 0
+                return false
+            end
+
+            if now - (state.lastAutoShotEventAt or 0) < watchdogDelay then
+                return false
+            end
+
+            state.autoShotVerifiedTargetGUID = nil
+            state.autoShotEligibleSince = now
+        end
+
+        -- A watchdog probe sends exactly one toggle. If the repeat was truly
+        -- active, it stops and the next pass starts it again. If the API was a
+        -- false positive and Auto Shot was actually stopped, the same toggle
+        -- starts it; in that case the next pass sees it active and does not send
+        -- a second toggle. Combat-log confirmation settles either outcome.
+        if state.autoShotRecoveryPhase == "probe" then
+            if now - (state.autoShotRecoveryProbeAt or 0) < 0.2 then
+                return false
+            end
+
+            autoShotActive = self:IsHunterAutoShotActive()
+            if not autoShotActive then
+                return requestAutoShot("Auto Shot restart requested after stale repeat state")
+            end
+
+            state.autoShotRecoveryPhase = "verify"
+            state.autoShotRequestUntil = 0
+            state.autoShotEligibleSince = now
+            HunterDebugThrottled(
+                "AutoShotProbeActive",
+                2.0,
+                "Auto Shot watchdog probe left repeat active; awaiting shot confirmation"
+            )
+            return false
+        end
+
+        autoShotActive = self:IsHunterAutoShotActive()
+        if not autoShotActive then
+            if (state.autoShotRequestUntil or 0) > now then
+                return false
+            end
+
+            return requestAutoShot(
+                state.autoShotRecoveryAttempts > 0 and
+                "Auto Shot restart requested" or
+                "Auto Shot requested"
+            )
+        end
+
+        state.autoShotRequestUntil = 0
+        state.autoShotStartAttempts = 0
+
+        -- Moving or casting can legitimately prevent a ranged swing. Pause the
+        -- watchdog until the hunter is continuously able to fire again.
+        if moving or castingOrChanneling then
+            state.autoShotEligibleSince = now
+            return false
+        end
+
+        if not state.autoShotEligibleSince or state.autoShotEligibleSince <= 0 then
+            state.autoShotEligibleSince = now
+            return false
+        end
+
+        if now - state.autoShotEligibleSince < watchdogDelay then
+            return false
+        end
+
+        if state.autoShotRecoveryAttempts >= 2 then
+            if not state.autoShotRecoverySuppressed then
+                state.autoShotRecoverySuppressed = true
+                HunterDebug(
+                    "Auto Shot still unverified on " .. targetName ..
+                    " after two recovery attempts; suppressing further toggles for this target"
+                )
+            end
+            return false
+        end
+
+        local probed = pcall(CastSpellByName, S.AutoShot)
+        if not probed then
+            HunterDebugThrottled("AutoShotRecoveryError", 2.0, "Auto Shot watchdog probe raised a client error")
+            state.autoShotEligibleSince = now
+            return false
+        end
+
+        state.autoShotRecoveryAttempts = state.autoShotRecoveryAttempts + 1
+        state.autoShotRecoveryPhase = "probe"
+        state.autoShotRecoveryProbeAt = now
+        state.autoShotRequestUntil = now + 0.75
+        state.autoShotEligibleSince = now
+        HunterDebug(
+            string.format(
+                "Auto Shot watchdog: client reported active but no shot was seen on %s for %.1fs; recovery probe %d/2",
+                targetName,
+                watchdogDelay,
+                state.autoShotRecoveryAttempts
+            )
+        )
+        return true
+
+    elseif rangeState == "melee" or rangeState == "deadzone" then
         -- Stop the ranged repeat when the target enters close range so the
         -- melee branch is clean.
-        if (state.autoShotRequestUntil or 0) <= now then
+        state.autoShotVerifiedTargetGUID = nil
+        state.autoShotRecoveryPhase = nil
+        state.autoShotRecoveryAttempts = 0
+        state.autoShotRecoverySuppressed = false
+        state.autoShotEligibleSince = now
+        if autoShotActive and (state.autoShotRequestUntil or 0) <= now then
             local stopped = pcall(CastSpellByName, S.AutoShot)
             if stopped then
                 state.autoShotRequestUntil = now + 0.75
@@ -2022,8 +2205,14 @@ function AC:HandleAutoAttack()
         -- range. Tab-targeting and unit-token updates can briefly report this
         -- state; toggling Auto Shot off here makes the next ranged handoff
         -- unreliable and can leave the hunter idle until another shot fires.
+        state.autoShotVerifiedTargetGUID = nil
+        state.autoShotRecoveryPhase = nil
+        state.autoShotRecoveryAttempts = 0
+        state.autoShotRecoverySuppressed = false
+        state.autoShotEligibleSince = now
         HunterDebugThrottled("AutoShotOutOfRange", 2.0, "Auto Shot waiting: target out of range (repeat preserved)")
     else
+        state.autoShotEligibleSince = now
         HunterDebugThrottled("AutoShotRange", 2.0, "Auto Shot waiting: range state=" .. tostring(rangeState))
     end
 
@@ -2788,7 +2977,7 @@ function AC:HunterRotation()
     end
 
     self:HandleAutoAttack()
-    HunterDebugThrottled("AutoAttackFallback", 2.0, "Auto-attack fallback")
+    HunterDebugThrottled("AutoAttackFallback", 2.0, "No priority shot cast; Auto Shot maintenance checked")
     return false
 end
 
