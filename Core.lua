@@ -1091,11 +1091,75 @@ function AC:IsTankSpec(unit)
 end
 
 function AC:IsAutoTargetSwitchAllowed()
-    if not self:IsTankSpec() then
-        return true
+    -- Preserve manual target control in raids.  Do not make this depend on
+    -- stance/form-based tank detection: that state can briefly be false while
+    -- changing stance and would otherwise reopen automatic target switching.
+    return self:GetGroupSize() <= 5
+end
+
+-- Start melee auto-attack without sending StartAttack() every rendered frame
+-- while a 3.3.5 client is still updating IsCurrentSpell().  A target handoff
+-- gets one immediate request and one bounded retry; confirmation, a queued
+-- Warrior next-swing attack, or a new target resets the state.
+function AC:EnsureMeleeAutoAttack(unit)
+    unit = unit or "target"
+
+    self.meleeAutoAttackState = self.meleeAutoAttackState or {
+        targetGUID = nil,
+        lastRequestAt = 0,
+        attempts = 0,
+        suppressed = false,
+    }
+    local state = self.meleeAutoAttackState
+
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or
+       UnitIsDeadOrGhost(unit) or not UnitIsUnit(unit, "target") then
+        state.targetGUID = nil
+        state.lastRequestAt = 0
+        state.attempts = 0
+        state.suppressed = false
+        return false
     end
 
-    return self:GetGroupSize() <= 5
+    local targetGUID = UnitGUID(unit)
+    if state.targetGUID ~= targetGUID then
+        state.targetGUID = targetGUID
+        state.lastRequestAt = 0
+        state.attempts = 0
+        state.suppressed = false
+    end
+
+    local _, class = UnitClass("player")
+    local warriorSwingQueued = class == "WARRIOR" and
+        (IsCurrentSpell("Heroic Strike") or IsCurrentSpell("Cleave"))
+    if IsCurrentSpell("Attack") or warriorSwingQueued then
+        state.lastRequestAt = 0
+        state.attempts = 0
+        state.suppressed = false
+        return false
+    end
+
+    if state.suppressed then
+        return false
+    end
+
+    local now = GetTime()
+    if state.lastRequestAt > 0 and now - state.lastRequestAt < 1.0 then
+        return false
+    end
+
+    if state.attempts >= 2 then
+        state.suppressed = true
+        if self.debugMode then
+            self:Debug("Melee auto-attack remained unconfirmed; suppressing retries until target or attack state changes")
+        end
+        return false
+    end
+
+    StartAttack()
+    state.lastRequestAt = now
+    state.attempts = state.attempts + 1
+    return true
 end
 
 function AC:GetTankAbilitiesForUnit(unit)
@@ -1589,9 +1653,7 @@ function AC:UpdateTankTargeting()
         if bestTarget then
             local oldTarget = UnitExists("target") and UnitName("target") or "None"
             TargetUnit(bestTarget)
-            if not IsCurrentSpell("Attack") then
-                StartAttack()
-            end
+            self:EnsureMeleeAutoAttack("target")
             self:Debug("Tank target switch: " .. oldTarget .. " -> " .. (UnitName("target") or "Unknown") .. " (Priority: " .. priority .. ")")
             self:MarkAsOurTarget(UnitGUID("target"))
             if switchReason == "proactive_threat" then
@@ -1641,9 +1703,7 @@ function AC:HandleTankTargeting()
             end
 
             TargetUnit(threatLoss.lostTarget)
-            if not IsCurrentSpell("Attack") then
-                StartAttack()
-            end
+            self:EnsureMeleeAutoAttack("target")
             self.lastTargetSwitch = GetTime()
             self:MarkAsOurTarget(UnitGUID("target"))
             return true
@@ -1701,9 +1761,7 @@ function AC:HandleTauntedLooseMobGapClosing()
             TargetUnit(meleeTarget)
             self.lastTargetSwitch = GetTime()
             self:MarkAsOurTarget(UnitGUID("target"))
-            if not IsCurrentSpell("Attack") then
-                StartAttack()
-            end
+            self:EnsureMeleeAutoAttack("target")
             self:Debug("Taunted ranged mob timed out; returned to melee target " .. (UnitName("target") or "Unknown"))
             return true
         end
@@ -1747,9 +1805,7 @@ function AC:HandleTauntedLooseMobGapClosing()
         TargetUnit(meleeTarget)
         self.lastTargetSwitch = GetTime()
         self:MarkAsOurTarget(UnitGUID("target"))
-        if not IsCurrentSpell("Attack") then
-            StartAttack()
-        end
+        self:EnsureMeleeAutoAttack("target")
         self:Debug("No gap closer for taunted ranged mob; returned to melee target " .. (UnitName("target") or "Unknown"))
         return true
     end
@@ -2191,9 +2247,7 @@ function AC:HandleUniversalLooseMobs()
     self:Debug("Found " .. #looseMobs .. " loose mobs to handle")
 
     local function startAttackOnCurrentTarget()
-        if UnitExists("target") and UnitCanAttack("player", "target") and not IsCurrentSpell("Attack") then
-            StartAttack()
-        end
+        self:EnsureMeleeAutoAttack("target")
     end
 
     local function swapToBestMeleeTargetAfterTaunt()
@@ -3484,7 +3538,7 @@ function AC:FindAndSetTarget()
                 local tankTarget = unit.."target"
                 if UnitExists(tankTarget) and UnitCanAttack("player", tankTarget) then
                     TargetUnit(tankTarget)
-                    StartAttack() -- Start auto-attack immediately
+                    self:EnsureMeleeAutoAttack("target")
                     return true
                 end
             end
@@ -3496,7 +3550,7 @@ function AC:FindAndSetTarget()
         local unit = "nameplate"..i
         if UnitExists(unit) and UnitCanAttack("player", unit) then
             TargetUnit(unit)
-            StartAttack() -- Start auto-attack immediately
+            self:EnsureMeleeAutoAttack("target")
             return true
         end
     end
@@ -4454,7 +4508,7 @@ function AC:OnUpdate()
         local bestTarget, priority = self:FindBestTarget()
         if bestTarget and priority > 50 then
             TargetUnit(bestTarget)
-            StartAttack()
+            self:EnsureMeleeAutoAttack("target")
             hasTarget = true
         end
         -- Standard auto-targeting fallback
@@ -4464,7 +4518,7 @@ function AC:OnUpdate()
                     local unit = "party"..i.."target"
                     if UnitExists(unit) and UnitCanAttack("player", unit) then
                         TargetUnit(unit)
-                        StartAttack()
+                        self:EnsureMeleeAutoAttack("target")
                         hasTarget = true
                         break
                     end
@@ -4476,7 +4530,7 @@ function AC:OnUpdate()
                     local unit = "nameplate"..i
                     if UnitExists(unit) and UnitCanAttack("player", unit) and UnitAffectingCombat(unit) then
                         TargetUnit(unit)
-                        StartAttack()
+                        self:EnsureMeleeAutoAttack("target")
                         hasTarget = true
                         break
                     end
@@ -4537,9 +4591,7 @@ function AC:OnUpdate()
     if hasTarget or canRunWithoutTarget then
         -- Ensure auto-attack for melee classes
         if hasTarget and (class == "ROGUE" or class == "WARRIOR" or class == "PALADIN" or class == "DEATHKNIGHT") then
-            if not IsCurrentSpell("Attack") then
-                StartAttack()
-            end
+            self:EnsureMeleeAutoAttack("target")
         end
         
         -- Use class-specific throttling for rotations

@@ -127,10 +127,9 @@ local function ArmsDebugState(key, message)
 end
 
 function AC:IsAutoTargetSwitchAllowed()
-    if not self:IsTankSpec() then
-        return true
-    end
-
+    -- Never override the player's target in a raid.  This must not depend on
+    -- the current stance because stance transitions can momentarily make a
+    -- Protection warrior look like a non-tank.
     return self:GetGroupSize() <= 5
 end
 
@@ -308,6 +307,7 @@ end
 -- swapping on pull while still giving Shield Slam/Revenge/Devastate/Cleave
 -- time on targets that have not yet been marked by this rotation.
 function AC:TryProtectionMultiTargetDistribution(nearbyEnemies)
+    if self:GetGroupSize() > 5 then return false end
     if nearbyEnemies < 2 or not self:IsAutoTargetSwitchAllowed() then return false end
     if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then
         return false
@@ -373,7 +373,7 @@ function AC:TryProtectionMultiTargetDistribution(nearbyEnemies)
 
     TargetUnit(bestCandidate.unit)
     self.lastTargetSwitch = GetTime()
-    if not IsCurrentSpell("Attack") then StartAttack() end
+    self:EnsureMeleeAutoAttack("target")
     WarriorDebug("Prot: Distributing threat to " .. (UnitName(bestCandidate.unit) or "Unknown"))
     return true
 end
@@ -1881,7 +1881,7 @@ function AC:ProtectionWarriorRotation()
     end
     
     -- Auto-attack
-    if hasTarget then StartAttack() end
+    if hasTarget then self:EnsureMeleeAutoAttack("target") end
 
     if inCombat then
         if not largeGroupMode and self:HandleTankTargeting() then return true end
@@ -1899,9 +1899,7 @@ function AC:ProtectionWarriorRotation()
         local meleeTarget = self.FindBestTankTarget and self:FindBestTankTarget(true, true, currentGUID)
         if meleeTarget and UnitExists(meleeTarget) and not UnitIsUnit(meleeTarget, "target") then
             TargetUnit(meleeTarget)
-            if not IsCurrentSpell("Attack") then
-                StartAttack()
-            end
+            self:EnsureMeleeAutoAttack("target")
             self.lastTargetSwitch = GetTime()
             self:MarkAsOurTarget(UnitGUID("target"))
             WarriorDebug("Prot: Returned to melee target after failed gap close")
@@ -1974,7 +1972,8 @@ function AC:ProtectionWarriorRotation()
             WarriorDebug("AoE Check: nearbyEnemies=" .. nearbyEnemies .. " inMelee=" .. (inMeleeRange and "Y" or "N"))
         end
 
-        if nearbyEnemies >= 2 and inMeleeRange and self:TryProtectionMultiTargetDistribution(nearbyEnemies) then
+        if not largeGroupMode and nearbyEnemies >= 2 and inMeleeRange and
+           self:TryProtectionMultiTargetDistribution(nearbyEnemies) then
             return true
         end
 
@@ -2152,7 +2151,7 @@ function AC:ArmsWarriorRotation()
                      level, currentStance, rage, health, enemies, hasTarget and "Y" or "N"))
     end
     
-    if hasTarget then StartAttack() end
+    if hasTarget then self:EnsureMeleeAutoAttack("target") end
     if not inCombat and hasTarget and level >= 4 then
         if self:TryCharge() then return true end
     end
@@ -2520,7 +2519,7 @@ function AC:FuryWarriorRotation()
                      level, currentStance, rage, health, enemies, hasTarget and "Y" or "N"))
     end
     
-    if hasTarget then StartAttack() end
+    if hasTarget then self:EnsureMeleeAutoAttack("target") end
 
     -- Charge from Battle Stance
     if not inCombat and hasTarget and level >= 4 then
@@ -2895,7 +2894,7 @@ function AC:LevelingWarriorRotation()
         return false
     end
 
-    StartAttack()
+    self:EnsureMeleeAutoAttack("target")
 
     if not self:IsInMeleeRange("target") then
         if Throttle("LevelingOutOfMelee", 2.0) then
