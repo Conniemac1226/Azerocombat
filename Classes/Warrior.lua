@@ -971,13 +971,6 @@ function AC:UseRacialsWarrior(burst, emergency)
         if race == "TAUREN" and UnitExists("target") and self:GetEnemiesAtLocation("target", 10) >= 2 and self:IsInMeleeRange("target") and 
            self:IsUsableSpell(S.WarStomp) and self:GetSpellCooldown(S.WarStomp) == 0 and
            castRacial(S.WarStomp, "Racial: War Stomp (AoE Stun)") then return true end
-        if race == "BLOODELF" and self:IsUsableSpell(S.ArcaneTorrent) and self:GetSpellCooldown(S.ArcaneTorrent) == 0 and self:IsInMeleeRange("target") then
-            -- Use for rage generation or silence
-            local targetCasting = self:GetInterruptibleCastInfo("target")
-            if targetCasting or UnitPower("player", 1) < 20 then
-                if castRacial(S.ArcaneTorrent, "Racial: Arcane Torrent") then return true end
-            end
-        end
     end
     return false
 end
@@ -1055,8 +1048,6 @@ function AC:WarriorHasCommandingBuff()
     local buffsToCheck = {
         [S.CommandingShout] = true,
         ["Blood Pact"] = true,
-        ["Power Word: Fortitude"] = true,
-        ["Prayer of Fortitude"] = true,
     }
 
     for buffName in pairs(buffsToCheck) do
@@ -1072,6 +1063,20 @@ function AC:WarriorHasCommandingBuff()
     return false
 end
 
+local WARRIOR_SHOUT_REFRESH_WINDOW = 8
+
+local function GetWarriorBuffTimeRemaining(buffName)
+    local name, _, _, _, _, duration, expirationTime = UnitBuff("player", buffName)
+    if not name then return 0 end
+
+    -- A zero expiration denotes a permanent aura. It never needs refreshing.
+    if not duration or duration == 0 or not expirationTime or expirationTime == 0 then
+        return math.huge
+    end
+
+    return math.max(0, expirationTime - GetTime())
+end
+
 function AC:GetPreferredWarriorShout(spec)
     local knowsBattle = self:KnowsSpell(S.BattleShout)
     local knowsCommanding = self:KnowsSpell(S.CommandingShout)
@@ -1079,12 +1084,15 @@ function AC:GetPreferredWarriorShout(spec)
         return nil
     end
 
-    local hasOwnBattle = self:HasBuff("player", S.BattleShout) and true or false
-    local hasOwnCommanding = self:HasBuff("player", S.CommandingShout) and true or false
-    local hasAPBuff = self:WarriorHasAttackPowerBuff()
-    local hasStamBuff = self:WarriorHasCommandingBuff()
-    local hasExternalAP = hasAPBuff and not hasOwnBattle
-    local hasExternalStam = hasStamBuff and not hasOwnCommanding
+    local battleRemaining = GetWarriorBuffTimeRemaining(S.BattleShout)
+    local commandingRemaining = GetWarriorBuffTimeRemaining(S.CommandingShout)
+    local battleHealthy = battleRemaining > WARRIOR_SHOUT_REFRESH_WINDOW
+    local commandingHealthy = commandingRemaining > WARRIOR_SHOUT_REFRESH_WINDOW
+    local hasExternalAP = UnitBuff("player", "Blessing of Might") or
+                          UnitBuff("player", "Greater Blessing of Might")
+    -- Commanding Shout and Blood Pact provide the same raid-buff category.
+    -- Fortitude grants stamina and stacks with their health bonus in WotLK.
+    local hasExternalHealth = UnitBuff("player", "Blood Pact") and true or false
 
     local preferredShout = nil
     if spec == "Protection" then
@@ -1093,41 +1101,92 @@ function AC:GetPreferredWarriorShout(spec)
         preferredShout = knowsBattle and S.BattleShout or (knowsCommanding and S.CommandingShout or nil)
     end
 
-    local preferredActive = false
-    if preferredShout == S.BattleShout then
-        preferredActive = hasOwnBattle
-    elseif preferredShout == S.CommandingShout then
-        preferredActive = hasOwnCommanding
+    local function shoutIsHealthy(shoutName)
+        if shoutName == S.BattleShout then
+            return battleHealthy
+        elseif shoutName == S.CommandingShout then
+            return commandingHealthy
+        end
+        return false
     end
 
     -- Solo (or no external buff coverage): keep only the spec-preferred shout.
-    if preferredShout and (not IsInGroup() or (not hasExternalAP and not hasExternalStam)) then
-        if preferredActive then
-            return nil
-        end
-        return preferredShout
+    if preferredShout and (not IsInGroup() or (not hasExternalAP and not hasExternalHealth)) then
+        return not shoutIsHealthy(preferredShout) and preferredShout or nil
     end
 
     -- If both categories are already covered, don't spend rage/GCD.
-    if hasAPBuff and hasStamBuff then
+    if hasExternalAP and hasExternalHealth then
         return nil
     end
 
     -- Group with external coverage: fill whichever category is currently missing.
-    if knowsBattle and not hasAPBuff then
-        return S.BattleShout
+    if hasExternalAP and knowsCommanding and not hasExternalHealth then
+        return not commandingHealthy and S.CommandingShout or nil
     end
 
-    if knowsCommanding and not hasStamBuff then
-        return S.CommandingShout
+    if hasExternalHealth and knowsBattle and not hasExternalAP then
+        return not battleHealthy and S.BattleShout or nil
     end
 
     return nil
 end
 
+function AC:TryMaintainWarriorShout(spec, context)
+    local shoutToUse = self:GetPreferredWarriorShout(spec)
+    if not shoutToUse then return false end
+
+    -- Shouts cost 10 rage. Check every blocker before consuming the short
+    -- attempt throttle so a lack of rage or an active GCD cannot defer a cast.
+    if UnitPower("player", 1) < 10 or not self:IsUsableSpell(shoutToUse) or
+       self:GetSpellCooldown(shoutToUse) > 0 or UnitCastingInfo("player") or
+       UnitChannelInfo("player") then
+        return false
+    end
+
+    if not Throttle("WarriorShoutAttempt", 0.75) then return false end
+    if not self:CastSpell(shoutToUse, "player") then return false end
+
+    WarriorDebug((context or spec or "Warrior") .. ": " .. shoutToUse)
+    return true
+end
+
 function AC:GetCurrentStance()
     local stance = GetShapeshiftForm()
     return stance or 0
+end
+
+function AC:TryWarriorArcaneTorrentInterrupt(unit)
+    unit = unit or "target"
+
+    local _, race = UnitRace("player")
+    if string.upper(race or "") ~= "BLOODELF" or not UnitAffectingCombat("player") then
+        return false
+    end
+
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) or
+       UnitIsDeadOrGhost(unit) or not self:IsInMeleeRange(unit) then
+        return false
+    end
+
+    local spellName, _, uninterruptible = self:GetInterruptibleCastInfo(unit)
+    if not spellName or uninterruptible or not self:ShouldInterruptSpell(spellName) then
+        return false
+    end
+
+    if not self:IsUsableSpell(S.ArcaneTorrent) or self:GetSpellCooldown(S.ArcaneTorrent) > 0 then
+        return false
+    end
+
+    -- Keep this independent from the general racial throttle: a 2-3 second
+    -- utility scan is too slow for an interrupt. The throttle only bounds
+    -- rejected client requests. Blood Elf Warriors on this server receive the
+    -- mana version, so there is intentionally no low-resource use case.
+    if not Throttle("ArcaneTorrentInterrupt", 0.25) then return false end
+    if not self:CastSpell(S.ArcaneTorrent, "player") then return false end
+
+    WarriorDebug("Racial: Arcane Torrent interrupted " .. spellName)
+    return true
 end
 
 -- FIXED: Stance functions with better error handling
@@ -1210,7 +1269,7 @@ function AC:TryArmsInterrupt(unit)
         end
     end
 
-    return false
+    return self:TryWarriorArcaneTorrentInterrupt(unit)
 end
 
 function AC:TryFuryInterrupt(unit)
@@ -1235,7 +1294,7 @@ function AC:TryFuryInterrupt(unit)
             WarriorDebug("Fury: Pummel interrupt")
             return true
         end
-        return false
+        return self:TryWarriorArcaneTorrentInterrupt(unit)
     end
 
     local timeLeft = endTime and ((endTime / 1000) - GetTime()) or 0
@@ -1246,7 +1305,7 @@ function AC:TryFuryInterrupt(unit)
             return true
         end
     end
-    return false
+    return self:TryWarriorArcaneTorrentInterrupt(unit)
 end
 
 -- FIXED: Enhanced talent checking with error handling
@@ -1811,20 +1870,14 @@ end
 function AC:CheckWarriorBuffs(spec)
     local applied = false
     local level = UnitLevel("player")
-    local rage = UnitPower("player", 1)
     local currentStance = self:GetCurrentStance()
     
     if not Throttle("WarriorOOCBuff", 5) then return false end
     if UnitAffectingCombat("player") then return false end
 
     -- Shouts
-    local shoutToUse = self:GetPreferredWarriorShout(spec)
-    if shoutToUse and Throttle("WarriorOOCShoutCast", 12) then
-        if self:IsUsableSpell(shoutToUse) and rage >= 10 then
-            if not self:CastSpell(shoutToUse) then return false end
-            WarriorDebug("OOC Buff: " .. shoutToUse)
-            applied = true
-        end
+    if self:TryMaintainWarriorShout(spec, "OOC Buff") then
+        return true
     end
     
     -- FIXED: Stance management with cooldown checks
@@ -1959,9 +2012,14 @@ function AC:ProtectionWarriorRotation()
             WarriorDebug("Prot: Shield Bash interrupt")
             return true
         end
+        if self:TryWarriorArcaneTorrentInterrupt("target") then return true end
         
         -- Victory Rush for free healing
         if self:TryVictoryRush() then return true end
+
+        -- Maintain the selected raid buff before ordinary threat abilities.
+        -- This runs only when the shout is missing or within its refresh window.
+        if self:TryMaintainWarriorShout("Protection", "Prot") then return true end
 
         -- *** HIGH PRIORITY AoE ABILITIES (only if we have melee targets) ***
         -- INTEGRATION: Use enhanced enemy location detection for better AoE decisions
@@ -2123,15 +2181,6 @@ function AC:ProtectionWarriorRotation()
             end
         end
 
-        -- Shouts are useful, but should not steal early GCDs from active threat buttons.
-        local combatShout = self:GetPreferredWarriorShout("Protection")
-        if combatShout and Throttle("ProtCombatShout", 10) then
-            if self:IsUsableSpell(combatShout) and rage >= 10 then
-                if not self:CastSpell(combatShout) then return false end
-                WarriorDebug("Prot: " .. combatShout)
-                return true
-            end
-        end
     end
     return false
 end
@@ -2306,6 +2355,10 @@ function AC:ArmsWarriorRotation()
         
         -- Victory Rush
         if self:TryVictoryRush() then return true end
+
+        -- Refresh Battle Shout before the normal Arms priority consumes the
+        -- rage needed for it. Emergency, interrupt, and proc setup remain first.
+        if self:TryMaintainWarriorShout("Arms", "Arms") then return true end
 
         local targetHP = self:GetTargetHealthPercent("target")
         local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
@@ -2494,12 +2547,6 @@ function AC:ArmsWarriorRotation()
             return true
         end
 
-        local combatShout = self:GetPreferredWarriorShout("Arms")
-        if combatShout and rage >= 10 and Throttle("ArmsCombatShout", 10) and self:IsUsableSpell(combatShout) then
-            if not self:CastSpell(combatShout) then return false end
-            WarriorDebug("Arms: " .. combatShout)
-            return true
-        end
     end
     return false
 end
@@ -2717,12 +2764,7 @@ function AC:FuryWarriorRotation()
         if self:TryVictoryRush() then return true end
 
         -- Keep shout buff maintained in combat.
-        local combatShout = self:GetPreferredWarriorShout("Fury")
-        if combatShout and rage >= 10 and Throttle("FuryCombatShout", 10) and self:IsUsableSpell(combatShout) then
-            if not self:CastSpell(combatShout) then return false end
-            WarriorDebug("Fury: " .. combatShout)
-            return true
-        end
+        if self:TryMaintainWarriorShout("Fury", "Fury") then return true end
 
         -- AoE rotation - use strict local hostile detection
         local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
@@ -2903,11 +2945,15 @@ function AC:LevelingWarriorRotation()
         return false
     end
 
+    if self:TryWarriorArcaneTorrentInterrupt("target") then return true end
+
     if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
         if not self:CastSpell(S.BloodRage) then return false end
         WarriorDebug("Leveling mode: Blood Rage")
         return true
     end
+
+    if self:TryMaintainWarriorShout("None", "Leveling") then return true end
 
     if self:TryVictoryRush() then
         return true
