@@ -1403,18 +1403,133 @@ function AC:EmergencyPetPassive()
     return false
 end
 
+-- Return true only when the unit is identified as an actual boss.  Dungeon
+-- and raid bosses are not consistently classified as "worldboss" by all
+-- WotLK 3.3.5a clients/private servers, but active encounter bosses are
+-- exposed through the boss1-boss5 unit tokens.  Do not broaden this to all
+-- elites or all units inside an instance: that would mark dungeon/raid trash
+-- and ordinary elite world mobs.
+-- AzerothCore's instance_encounters table identifies dungeon/raid bosses by
+-- creature entry.  The WotLK client exposes that entry in the creature GUID
+-- (characters 7-10 of the old 0xF130 GUID format), even when the server sends
+-- the creature as an ordinary elite and does not expose a boss unit token.
+-- This lets us recognize every standard encounter without treating all
+-- instance elites as bosses.
+local HUNTER_MARK_DUNGEON_BOSS_ENTRIES = {
+    [639] = true, [643] = true, [644] = true, [645] = true, [646] = true, [647] = true, [1663] = true, [1666] = true, [1696] = true, [1716] = true,
+    [1717] = true, [1763] = true, [1853] = true, [2748] = true, [3653] = true, [3654] = true, [3669] = true, [3670] = true, [3671] = true, [3673] = true,
+    [3674] = true, [3886] = true, [3887] = true, [3914] = true, [3927] = true, [3974] = true, [3975] = true, [3977] = true, [3983] = true, [4274] = true,
+    [4275] = true, [4278] = true, [4279] = true, [4420] = true, [4421] = true, [4422] = true, [4424] = true, [4428] = true, [4542] = true, [4543] = true,
+    [4829] = true, [4830] = true, [4831] = true, [4832] = true, [4854] = true, [4887] = true, [5709] = true, [5710] = true, [5719] = true, [5720] = true, [5721] = true, [5722] = true, [5775] = true, [6168] = true, [6229] = true, [6235] = true, [6243] = true, [6487] = true, [6906] = true, [6910] = true,
+    [7079] = true, [7206] = true, [7228] = true, [7267] = true, [7271] = true, [7272] = true, [7273] = true, [7275] = true, [7291] = true, [7355] = true,
+    [7357] = true, [7358] = true, [7361] = true, [7795] = true, [7796] = true, [7800] = true, [8127] = true, [8443] = true, [8567] = true, [8580] = true,
+    [8983] = true, [9016] = true, [9017] = true, [9018] = true, [9019] = true, [9024] = true, [9025] = true, [9033] = true, [9035] = true, [9041] = true,
+    [9056] = true, [9156] = true, [9196] = true, [9236] = true, [9237] = true, [9319] = true, [9499] = true, [9502] = true, [9537] = true, [9543] = true,
+    [9568] = true, [9736] = true, [9816] = true, [9938] = true, [10096] = true, [10184] = true, [10220] = true, [10264] = true, [10268] = true, [10363] = true,
+    [10429] = true, [10430] = true, [10432] = true, [10433] = true, [10435] = true, [10436] = true, [10437] = true, [10438] = true, [10439] = true, [10440] = true,
+    [10502] = true, [10503] = true, [10504] = true, [10505] = true, [10506] = true, [10507] = true, [10508] = true, [10516] = true, [10558] = true, [10584] = true,
+    [10596] = true, [10808] = true, [10811] = true, [10813] = true, [10901] = true, [10997] = true, [11032] = true, [11261] = true, [11380] = true, [11382] = true,
+    [11486] = true, [11487] = true, [11488] = true, [11489] = true, [11490] = true, [11492] = true, [11496] = true, [11501] = true, [11502] = true, [11517] = true,
+    [11518] = true, [11519] = true, [11520] = true, [11583] = true, [11622] = true, [11981] = true, [11982] = true, [11983] = true, [11988] = true, [12017] = true,
+    [12018] = true, [12056] = true, [12057] = true, [12098] = true, [12118] = true, [12201] = true, [12203] = true, [12225] = true, [12236] = true, [12258] = true,
+    [12259] = true, [12264] = true, [12435] = true, [12902] = true, [13020] = true, [13280] = true, [13282] = true, [13596] = true, [13601] = true, [14020] = true,
+    [14321] = true, [14322] = true, [14323] = true, [14324] = true, [14325] = true, [14326] = true, [14327] = true, [14507] = true, [14509] = true, [14510] = true,
+    [14515] = true, [14517] = true, [14601] = true, [14834] = true, [15083] = true, [15114] = true, [15263] = true, [15275] = true, [15299] = true, [15339] = true,
+    [15340] = true, [15341] = true, [15348] = true, [15369] = true, [15370] = true, [15509] = true, [15510] = true, [15516] = true, [15517] = true, [15544] = true,
+    [15550] = true, [15687] = true, [15688] = true, [15689] = true, [15690] = true, [15691] = true, [15727] = true, [15928] = true, [15931] = true, [15932] = true,
+    [15936] = true, [15952] = true, [15953] = true, [15954] = true, [15956] = true, [15989] = true, [15990] = true, [16011] = true, [16028] = true, [16060] = true,
+    [16061] = true, [16457] = true, [16524] = true, [16807] = true, [16808] = true, [16809] = true, [16812] = true, [17225] = true, [17257] = true, [17306] = true,
+    [17308] = true, [17377] = true, [17380] = true, [17381] = true, [17537] = true, [17767] = true, [17770] = true, [17796] = true, [17797] = true, [17798] = true,
+    [17808] = true, [17826] = true, [17842] = true, [17848] = true, [17862] = true, [17879] = true, [17880] = true, [17881] = true, [17882] = true, [17888] = true,
+    [17941] = true, [17942] = true, [17968] = true, [17975] = true, [17976] = true, [17977] = true, [17978] = true, [17980] = true, [17991] = true, [18096] = true,
+    [18105] = true, [18341] = true, [18343] = true, [18344] = true, [18371] = true, [18373] = true, [18472] = true, [18473] = true, [18667] = true, [18708] = true,
+    [18731] = true, [18732] = true, [18805] = true, [18831] = true, [19044] = true, [19219] = true, [19220] = true, [19221] = true, [19514] = true, [19516] = true,
+    [19622] = true, [20870] = true, [20885] = true, [20886] = true, [20912] = true, [20923] = true, [21212] = true, [21213] = true, [21214] = true, [21215] = true,
+    [21216] = true, [21217] = true, [22520] = true, [22841] = true, [22871] = true, [22887] = true, [22898] = true, [22917] = true, [22930] = true, [22947] = true,
+    [22948] = true, [23035] = true, [23420] = true, [23426] = true, [23574] = true, [23576] = true, [23577] = true, [23578] = true, [23863] = true, [23953] = true,
+    [23954] = true, [24201] = true, [24239] = true, [24560] = true, [24664] = true, [24723] = true, [24744] = true, [24882] = true, [24892] = true, [25038] = true,
+    [25165] = true, [25315] = true, [25840] = true, [26529] = true, [26530] = true, [26532] = true, [26630] = true, [26631] = true, [26668] = true, [26687] = true,
+    [26693] = true, [26723] = true, [26731] = true, [26763] = true, [26794] = true, [26796] = true, [26861] = true, [27447] = true, [27483] = true, [27654] = true,
+    [27655] = true, [27656] = true, [27975] = true, [27977] = true, [27978] = true, [28546] = true, [28586] = true, [28587] = true, [28684] = true, [28859] = true,
+    [28860] = true, [28921] = true, [28923] = true, [29120] = true, [29304] = true, [29305] = true, [29306] = true, [29308] = true, [29309] = true, [29310] = true,
+    [29311] = true, [29315] = true, [29316] = true, [29573] = true, [29932] = true, [30258] = true, [30449] = true, [30451] = true, [30452] = true, [31125] = true,
+    [31134] = true, [32930] = true, [33113] = true, [33118] = true, [33186] = true, [33271] = true, [33288] = true, [33293] = true, [33432] = true, [33515] = true,
+    [33993] = true, [34496] = true, [34564] = true, [34780] = true, [34797] = true, [35013] = true, [36476] = true, [36494] = true, [36497] = true, [36502] = true,
+    [36597] = true, [36612] = true, [36626] = true, [36627] = true, [36658] = true, [36678] = true, [36853] = true, [36855] = true, [37813] = true, [37955] = true,
+    [37970] = true, [38112] = true, [38113] = true, [38433] = true, [39746] = true, [39747] = true, [39751] = true, [39863] = true,
+}
+
+local function GetHunterCreatureEntry(unit)
+    local guid = UnitGUID(unit)
+    if not guid then return nil end
+
+    -- WotLK 3.3.5a creature GUID format: 0xF130 + entry + spawn UID.
+    if string.sub(guid, 1, 6):upper() == "0XF130" then
+        local entry = tonumber(string.sub(guid, 7, 10), 16)
+        if entry and HUNTER_MARK_DUNGEON_BOSS_ENTRIES[entry] then
+            return entry
+        end
+
+        -- Some 3.3.5a private-server builds include an extra 16-bit field
+        -- after F130. The creature entry is then at characters 9-12.
+        local shiftedEntry = tonumber(string.sub(guid, 9, 12), 16)
+        if shiftedEntry and HUNTER_MARK_DUNGEON_BOSS_ENTRIES[shiftedEntry] then
+            return shiftedEntry
+        end
+
+        return entry
+    end
+
+    -- Keep compatibility with newer hyphenated GUIDs if the server exposes
+    -- them despite using the WotLK client.
+    local entry = string.match(guid, "^Creature%-%d+%-%d+%-%d+%-%d+%-(%d+)%-%x+$")
+    return entry and tonumber(entry) or nil
+end
+
+function AC:IsHunterMarkBoss(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) then return false, "missing unit" end
+
+    local classification = UnitClassification(unit)
+    local level = UnitLevel(unit)
+    if classification == "worldboss" then
+        return true, "worldboss classification"
+    end
+    if level == -1 then
+        return true, "boss level"
+    end
+
+    local guid = UnitGUID(unit)
+    for i = 1, 5 do
+        local bossUnit = "boss" .. i
+        if UnitExists(bossUnit) and
+           ((UnitIsUnit and UnitIsUnit(unit, bossUnit)) or
+            (guid and UnitGUID(bossUnit) == guid)) then
+            return true, bossUnit .. " token"
+        end
+    end
+
+    local creatureEntry = GetHunterCreatureEntry(unit)
+    if creatureEntry and HUNTER_MARK_DUNGEON_BOSS_ENTRIES[creatureEntry] then
+        return true, "instance encounter entry " .. tostring(creatureEntry)
+    end
+
+    return false, string.format("not a boss: %s (entry=%s, classification=%s, level=%s)",
+        UnitName(unit) or "Unknown", tostring(creatureEntry or "unknown"),
+        tostring(classification or "nil"), tostring(level or "nil"))
+end
+
 function AC:ShouldUseHuntersMark(unit)
     unit = unit or "target"
     if not UnitExists(unit) then return false end
 
-    local classification = UnitClassification(unit)
-    local level = UnitLevel(unit) or 0
-    local isBoss = classification == "worldboss" or level == -1
+    local isBoss, bossReason = self:IsHunterMarkBoss(unit)
 
     -- Hunter's Mark is deliberately boss-only.  Applying it to normal mobs,
     -- elites, or high-level quest targets costs a GCD and is not worth it.
     if not isBoss then
-        HunterDebugThrottled("HuntersMarkSkip", 5.0, "Skipping Hunter's Mark - target is not a boss")
+        HunterDebugThrottled("HuntersMarkSkip", 5.0,
+            "Skipping Hunter's Mark - " .. tostring(bossReason))
         return false
     end
     
@@ -1430,7 +1545,7 @@ function AC:ShouldUseHuntersMark(unit)
         return false 
     end
     
-    HunterDebug("Hunter's Mark conditions met")
+    HunterDebug("Hunter's Mark conditions met (" .. tostring(bossReason) .. ")")
     return true
 end
 
