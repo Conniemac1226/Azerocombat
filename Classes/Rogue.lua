@@ -41,6 +41,7 @@ local S = { -- Spells
     Kick = "Kick",
     CloakOfShadows = "Cloak of Shadows", 
     Evasion = "Evasion", 
+    Feint = "Feint",
     Gouge = "Gouge", 
     Blind = "Blind",
     
@@ -257,13 +258,15 @@ function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
     -- Combat spec cooldown priority: BF → KS → AR
     if spec == "Combat" then
         local enemies = self:GetEnemyCount()
-        if enemies >= 2 and self:IsRogueSpellReady(S.BladeFlurry) then
+        local isEliteOrBoss = (targetType == "worldboss" or targetType == "rareelite" or targetType == "elite")
+        if (enemies >= 2 or isEliteOrBoss) and self:IsRogueSpellReady(S.BladeFlurry) then
             if not self:CastSpell(S.BladeFlurry, "player") then return false end
             RogueDebug("Combat burst: Blade Flurry")
             return true
         end
 
-        if energy <= 50 and self:IsRogueSpellReady(S.KillingSpree) then
+        -- Do not overlap Killing Spree with Adrenaline Rush
+        if energy <= 50 and not self:HasBuff("player", S.AdrenRush) and self:IsRogueSpellReady(S.KillingSpree) then
             if not self:CastSpell(S.KillingSpree, "target") then return false end
             RogueDebug("Combat burst: Killing Spree")
             if self.UseTrinkets then self:UseTrinkets() end
@@ -271,7 +274,7 @@ function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
             return true
         end
 
-        if energy <= 60 and self:IsRogueSpellReady(S.AdrenRush) then
+        if energy <= 60 and not self:HasBuff("player", S.KillingSpree) and self:IsRogueSpellReady(S.AdrenRush) then
             if not self:CastSpell(S.AdrenRush, "player") then return false end
             RogueDebug("Combat burst: Adrenaline Rush")
             if self.UseTrinkets then self:UseTrinkets() end
@@ -284,8 +287,20 @@ function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
             if self.UseTrinkets then self:UseTrinkets() end
             return true
         end
+
+        -- Overkill talent: offensive Vanish on boss fights for 20s of +30% energy regen
+        local isBoss = (targetType == "worldboss" or targetType == "elite" or targetType == "rareelite")
+        if isBoss and (GetNumPartyMembers() > 0 or GetNumRaidMembers() > 0) and not UnitIsUnit("targettarget", "player") then
+            if energy <= 45 and not self:HasBuff("player", "Overkill") and self:GetRogueTalentRank("Overkill") > 0 and self:IsRogueSpellReady(S.Vanish) then
+                if self:CastSpell(S.Vanish, "player") then
+                    RogueDebug("Assassination Overkill: Offensive Vanish for 30% energy regen")
+                    return true
+                end
+            end
+        end
     elseif spec == "Subtlety" then
-        if energy >= 60 and self:IsBehindTarget() and self:IsRogueSpellReady(S.ShadowDance) then
+        -- Shadow Dance is a self-buff and does not require behind target to activate
+        if energy >= 60 and self:IsRogueSpellReady(S.ShadowDance) then
             if not self:CastSpell(S.ShadowDance, "player") then return false end
             RogueDebug("Subtlety burst: Shadow Dance")
             if self.UseTrinkets then self:UseTrinkets() end
@@ -433,13 +448,33 @@ function AC:IsBehindTarget()
 
     if not UnitExists("target") then return false end
     
-    -- Use facing check if available
+    -- Use facing check if provided by client/server extension
     if UnitIsBehind then
-        return UnitIsBehind("player", "target")
+        local ok, behind = pcall(UnitIsBehind, "player", "target")
+        if ok and behind ~= nil then return behind end
     end
     
-    -- The stock 3.3.5 client has no reliable facing API. Returning false is
-    -- safer than repeatedly selecting a positional attack from the front.
+    -- Target of target check: if target is attacking tank/ally, rogue is behind/flanking
+    if UnitExists("targettarget") and not UnitIsUnit("targettarget", "player") then
+        return true
+    end
+
+    -- If target is CC'd or stunned, rogue can freely position behind
+    local ccDebuffs = {
+        "Cheap Shot", "Kidney Shot", "Gouge", "Blind", "Sap",
+        "Hammer of Justice", "Bash", "Pounce", "War Stomp", "Freezing Trap"
+    }
+    for _, debuff in ipairs(ccDebuffs) do
+        if self:HasDebuff("target", debuff) then
+            return true
+        end
+    end
+
+    -- In group/raid when target has no explicit target yet, assume behind
+    if (GetNumPartyMembers() > 0 or GetNumRaidMembers() > 0) and not UnitExists("targettarget") then
+        return true
+    end
+
     return false
 end
 
@@ -670,50 +705,53 @@ function AC:ManageRogueThreat(threatLevel, threatScore, level, spec)
     
     local inGroup = IsInGroup()
     local health = UnitHealth("player") / UnitHealthMax("player") * 100
+    local isTargeted = UnitExists("targettarget") and UnitIsUnit("targettarget", "player")
+    local energy = UnitPower("player", 3)
     
     RogueDebug("Threat Management: " .. threatLevel .. " threat detected")
     
-    -- High threat - immediate action needed
+    -- Feint: primary threat reduction tool (level 16+, 20 energy, reduces threat + 50% AoE dmg reduction in WotLK)
+    if inGroup and (threatLevel == "high" or threatLevel == "medium") and self:IsRogueSpellReady(S.Feint) and energy >= 20 then
+        if self:CastSpell(S.Feint, "player") then
+            RogueDebug("Threat: Feint used to dump threat")
+            return true
+        end
+    end
+    
+    -- High threat or critical health
     if threatLevel == "high" or health < 30 then
-        -- Vanish if available (resets threat completely)
-        if self:IsRogueSpellReady(S.Vanish) then
-            if self:CastSpell(S.Vanish, "player") then
-                RogueDebug("Threat: Emergency Vanish")
+        -- Vanish ONLY as true emergency if actively targeted and taking heavy damage
+        if (health < 25 and isTargeted) or (threatLevel == "high" and isTargeted and health < 50) then
+            if self:IsRogueSpellReady(S.Vanish) then
+                if self:CastSpell(S.Vanish, "player") then
+                    RogueDebug("Threat: Emergency Vanish")
+                    return true
+                end
+            end
+        end
+        
+        -- Evasion if targeted and taking physical damage
+        if isTargeted and self:IsRogueSpellReady(S.Evasion) then
+            if self:CastSpell(S.Evasion, "player") then
+                RogueDebug("Threat: Evasion to survive aggro")
                 return true
             end
         end
         
-        -- Blind target to reduce incoming damage
-        if self:IsRogueSpellReady(S.Blind) then
-            if self:CastSpell(S.Blind, "target") then
-                RogueDebug("Threat: Blind to reduce damage")
-                return true
-            end
-        end
-        
-        -- Gouge for breathing room
-        if self:IsRogueSpellReady(S.Gouge) and CheckInteractDistance("target", 3) then
+        -- Gouge for breathing room if facing target in melee range
+        if isTargeted and self:IsRogueSpellReady(S.Gouge) and CheckInteractDistance("target", 3) and energy >= 45 then
             if self:CastSpell(S.Gouge, "target") then
-                RogueDebug("Threat: Gouge for positioning")
+                RogueDebug("Threat: Gouge for breathing room")
                 return true
             end
         end
     end
     
-    -- Medium threat - defensive measures
-    if threatLevel == "medium" then
-        -- Evasion to reduce incoming damage
+    -- Medium threat - defensive measures when targeted
+    if threatLevel == "medium" and isTargeted then
         if self:IsRogueSpellReady(S.Evasion) then
             if self:CastSpell(S.Evasion, "player") then
                 RogueDebug("Threat: Evasion for damage mitigation")
-                return true
-            end
-        end
-        
-        -- Sprint to reposition near tank
-        if inGroup and self:IsRogueSpellReady(S.Sprint) then
-            if self:CastSpell(S.Sprint, "player") then
-                RogueDebug("Threat: Sprint to reposition")
                 return true
             end
         end
@@ -748,32 +786,89 @@ function AC:UseRogueRacials(targetIsElite)
     
     local race = select(2, UnitRace("player"))
     local health = UnitHealth("player") / UnitHealthMax("player") * 100
+    local energy = UnitPower("player", 3)
     
-    -- Emergency defensive racials
-    if health < 25 then
-        if race == "Undead" and self:GetSpellCooldown(R.WillOfForsaken) == 0 then
-            if not self:CastSpell(R.WillOfForsaken, "player") then return false end
-            RogueDebug("Emergency Will of the Forsaken")
+    local isUndead = (race == "Undead" or race == "Scourge")
+    local isHuman = (race == "Human")
+    local isDwarf = (race == "Dwarf")
+    local isGnome = (race == "Gnome")
+    local isBloodElf = (race == "BloodElf")
+    local isOrc = (race == "Orc")
+    local isTroll = (race == "Troll")
+
+    -- Blood Elf: Arcane Torrent for energy restoration (+15 energy) & silence
+    if isBloodElf and energy <= 40 and self:GetSpellCooldown(R.ArcaneTorrent) == 0 then
+        if self:CastSpell(R.ArcaneTorrent, "player") then
+            RogueDebug("Arcane Torrent (+15 Energy & Silence)")
             return true
-        elseif race == "Human" and self:GetSpellCooldown(R.EveryMan) == 0 then
-            if not self:CastSpell(R.EveryMan, "player") then return false end
-            RogueDebug("Emergency Every Man for Himself")
+        end
+    end
+
+    -- Check if player is under loss of control (Fear, Charm, Sleep, Stun, Root)
+    local hasFearCharmSleep = false
+    local hasStunOrIncap = false
+    local hasRootOrSnare = false
+    local hasPoisonDiseaseBleed = false
+
+    for i = 1, 40 do
+        local name, _, _, _, debuffType = UnitDebuff("player", i)
+        if not name then break end
+        if debuffType == "Poison" or debuffType == "Disease" or name == "Rend" or name == "Deep Wounds" or name == "Rake" or name == "Rip" then
+            hasPoisonDiseaseBleed = true
+        end
+        local lowerName = string.lower(name)
+        if string.find(lowerName, "fear") or string.find(lowerName, "scream") or string.find(lowerName, "horror") or
+           string.find(lowerName, "charm") or string.find(lowerName, "sleep") or string.find(lowerName, "seduction") then
+            hasFearCharmSleep = true
+        end
+        if string.find(lowerName, "stun") or string.find(lowerName, "bash") or string.find(lowerName, "kidney") or
+           string.find(lowerName, "cheap") or string.find(lowerName, "gouge") or string.find(lowerName, "blind") or
+           string.find(lowerName, "polymorph") or string.find(lowerName, "paralyze") then
+            hasStunOrIncap = true
+        end
+        if string.find(lowerName, "frost nova") or string.find(lowerName, "entangling") or string.find(lowerName, "hamstring") or
+           string.find(lowerName, "crippling") or string.find(lowerName, "slow") or string.find(lowerName, "chains of ice") then
+            hasRootOrSnare = true
+        end
+    end
+
+    -- Emergency CC-break racials
+    if isUndead and hasFearCharmSleep and self:GetSpellCooldown(R.WillOfForsaken) == 0 then
+        if self:CastSpell(R.WillOfForsaken, "player") then
+            RogueDebug("Will of the Forsaken (Broke Fear/Charm/Sleep)")
             return true
-        elseif race == "Dwarf" and self:GetSpellCooldown(R.Stoneform) == 0 then
-            if not self:CastSpell(R.Stoneform, "player") then return false end
-            RogueDebug("Emergency Stoneform")
+        end
+    end
+
+    if isHuman and (hasStunOrIncap or hasFearCharmSleep or (health < 30 and hasRootOrSnare)) and self:GetSpellCooldown(R.EveryMan) == 0 then
+        if self:CastSpell(R.EveryMan, "player") then
+            RogueDebug("Every Man for Himself (Broke CC)")
+            return true
+        end
+    end
+
+    if isGnome and hasRootOrSnare and self:GetSpellCooldown(R.EscapeArtist) == 0 then
+        if self:CastSpell(R.EscapeArtist, "player") then
+            RogueDebug("Escape Artist (Broke Root/Snare)")
+            return true
+        end
+    end
+
+    if isDwarf and (hasPoisonDiseaseBleed or health < 45) and self:GetSpellCooldown(R.Stoneform) == 0 then
+        if self:CastSpell(R.Stoneform, "player") then
+            RogueDebug("Stoneform (Removed Bleed/Poison/Disease + Armor)")
             return true
         end
     end
     
     -- Offensive racials - more liberal for leveling
-    local shouldUseBurst = targetIsElite or not IsInGroup() or UnitHealth("target") / UnitHealthMax("target") * 100 > 70
+    local shouldUseBurst = targetIsElite or not IsInGroup() or (UnitHealth("target") / UnitHealthMax("target") * 100 > 70)
     if shouldUseBurst then
-        if race == "Orc" and self:GetSpellCooldown(R.BloodFury) == 0 then
+        if isOrc and self:GetSpellCooldown(R.BloodFury) == 0 then
             if not self:CastSpell(R.BloodFury, "player") then return false end
             RogueDebug("Using Blood Fury")
             return true
-        elseif race == "Troll" and self:GetSpellCooldown(R.Berserking) == 0 then
+        elseif isTroll and self:GetSpellCooldown(R.Berserking) == 0 then
             if not self:CastSpell(R.Berserking, "player") then return false end
             RogueDebug("Using Berserking")
             return true
@@ -834,7 +929,7 @@ function AC:GetRogueBestFinisher(spec, cp, level, energy)
         end
         
         -- Smart Rupture usage
-        if level >= 20 and worthRupture and not self:HasDebuff("target", S.Rupture) then
+        if level >= 20 and worthRupture and not self:HasRoguePlayerDebuff("target", S.Rupture) then
             return S.Rupture
         end
     
@@ -860,7 +955,7 @@ function AC:GetRogueBestFinisher(spec, cp, level, energy)
         
         if armorPen < 1000 and worthRupture then
             -- Low ArP: Rupture for DoT damage
-            if level >= 20 and not self:HasDebuff("target", S.Rupture) then
+            if level >= 20 and not self:HasRoguePlayerDebuff("target", S.Rupture) then
                 return S.Rupture
             end
         end
@@ -904,7 +999,7 @@ function AC:GetRogueBestFinisher(spec, cp, level, energy)
         end
         
         -- Smart Rupture for Subtlety
-        if level >= 20 and worthRupture and not self:HasDebuff("target", S.Rupture) then
+        if level >= 20 and worthRupture and not self:HasRoguePlayerDebuff("target", S.Rupture) then
             return S.Rupture
         end
     end
@@ -932,8 +1027,8 @@ function AC:GetRogueBestGenerator(spec, level, inMelee, energy)
         local hasHAT = self:HasHonorAmongThieves()
         local energyThreshold = hasHAT and 30 or 50
         
-        if level >= 50 and self:KnowsSpell(S.Hemorrhage) and energy >= energyThreshold then
-            if not behind then
+        if self:KnowsSpell(S.Hemorrhage) and energy >= energyThreshold then
+            if not behind or not (self:HasMainHandDaggerEquipped() and self:KnowsSpell(S.Backstab)) then
                 return S.Hemorrhage
             end
         end
@@ -1113,7 +1208,7 @@ function AC:CheckAndApplyPoisons()
     -- Apply main hand poison if needed
     if not hasMainHandPoison then
         RogueDebug("Looking for main hand poison...")
-        local foundPoisons = self:FindPoisonInBags({"instant poison"})
+        local foundPoisons = self:FindPoisonInBags({"instant poison", "wound poison"})
         
         if #foundPoisons > 0 then
             -- Use the first found poison (highest priority)
@@ -1136,7 +1231,7 @@ function AC:CheckAndApplyPoisons()
     -- Apply off hand poison if needed
     if hasOffHandWeapon and not hasOffHandPoison then
         RogueDebug("Looking for off hand poison...")
-        local foundPoisons = self:FindPoisonInBags({"deadly poison"})
+        local foundPoisons = self:FindPoisonInBags({"deadly poison", "instant poison", "wound poison"})
         
         if #foundPoisons > 0 then
             -- Use the first found poison (highest priority)
@@ -1443,11 +1538,23 @@ function AC:RogueDefensives(health)
             end
         end
         
-        -- Cloak of Shadows - Subtlety and high-level talent
+        -- Cloak of Shadows - Level 66 baseline ability (removes harmful spell/magic debuffs & resists spells)
         if self:IsRogueSpellReady(S.CloakOfShadows) then
-            if self:CastSpell(S.CloakOfShadows, "player") then
-                RogueDebug("Using Cloak of Shadows")
-                return true
+            local hasHarmfulSpellDebuff = false
+            for i = 1, 40 do
+                local name, _, _, _, dType = UnitDebuff("player", i)
+                if not name then break end
+                if dType == "Magic" or dType == "Curse" or dType == "Poison" or dType == "Disease" then
+                    hasHarmfulSpellDebuff = true
+                    break
+                end
+            end
+            local enemyCasting = UnitCastingInfo("target") or UnitChannelInfo("target")
+            if hasHarmfulSpellDebuff or (health < 40 and enemyCasting) then
+                if self:CastSpell(S.CloakOfShadows, "player") then
+                    RogueDebug("Using Cloak of Shadows for spell mitigation")
+                    return true
+                end
             end
         end
     end
@@ -1569,6 +1676,7 @@ end
 -- =============================================
 
 function AC:ManageRogueStealth()
+    if IsMounted() or UnitInVehicle("player") or UnitOnTaxi("player") then return false end
     if UnitAffectingCombat("player") then return false end
     
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target")
@@ -1741,17 +1849,33 @@ function AC:HasRogueBleed(unit)
     return false
 end
 
+function AC:HasRoguePlayerDebuff(unit, debuffName)
+    unit = unit or "target"
+    for index = 1, 40 do
+        local name, _, _, count, _, _, expires, unitCaster = UnitDebuff(unit, index)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or not unitCaster) then
+            local timeLeft = (expires and expires > 0) and (expires - GetTime()) or 999
+            return true, count or 1, timeLeft
+        end
+    end
+    return false, 0, 0
+end
+
 function AC:GetRogueDebuffStacks(unit, debuffName)
     unit = unit or "target"
     for index = 1, 40 do
-        local name, _, _, count = UnitDebuff(unit, index)
+        local name, _, _, count, _, _, _, unitCaster = UnitDebuff(unit, index)
         if not name then break end
-        if name == debuffName then return count or 0 end
+        if name == debuffName and (unitCaster == "player" or not unitCaster) then return count or 0 end
     end
     return 0
 end
 
 function AC:HasTwoDaggersEquipped()
+    if self:KnowsSpell(S.Mutilate) and self:IsUsableSpell(S.Mutilate) then
+        return true
+    end
     return self:HasMainHandDaggerEquipped() and self:HasDaggerEquipped(17)
 end
 
@@ -2010,7 +2134,7 @@ function AC:CombatRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, sh
         
         if armorPen < 1000 and not self:HasBuff("player", S.BladeFlurry) then
             -- Low ArP: Rupture priority for DoT damage
-            if self:KnowsSpell(S.Rupture) and not self:HasDebuff("target", S.Rupture) and
+            if self:KnowsSpell(S.Rupture) and not self:HasRoguePlayerDebuff("target", S.Rupture) and
                not self:IsRogueFastDyingTarget() and energy >= 25 then
                 local success = self:CastSpell(S.Rupture, "target")
                 if success then
@@ -2100,11 +2224,16 @@ function AC:SubtletyRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, 
     
     -- Shadow Dance burst phase
     if self:HasBuff("player", S.ShadowDance) then
-        -- During Shadow Dance: spam Ambush
-        if energy >= 60 and self:IsBehindTarget() and self:KnowsSpell(S.Ambush) then
+        -- During Shadow Dance: spam Ambush if daggers and behind, else Cheap Shot
+        if energy >= 60 and self:IsBehindTarget() and self:HasMainHandDaggerEquipped() and self:KnowsSpell(S.Ambush) then
             local success = self:CastSpell(S.Ambush, "target")
             if success then
                 RogueDebug("Ambush (Shadow Dance burst)")
+                return true
+            end
+        elseif energy >= 40 and self:KnowsSpell(S.CheapShot) and not self:HasDebuff("target", S.CheapShot) then
+            if self:CastSpell(S.CheapShot, "target") then
+                RogueDebug("Cheap Shot (Shadow Dance control)")
                 return true
             end
         end
@@ -2131,7 +2260,7 @@ function AC:SubtletyRotation(cp, energy, level, shouldUseAOE, enemies, inMelee, 
     
     -- Finishers with Honor Among Thieves awareness
     if cp >= cpThreshold or (cp >= 2 and self:IsRogueFastDyingTarget()) then
-        if self:KnowsSpell(S.Rupture) and not self:HasDebuff("target", S.Rupture) and
+        if self:KnowsSpell(S.Rupture) and not self:HasRoguePlayerDebuff("target", S.Rupture) and
            not self:IsRogueFastDyingTarget() and energy >= 25 then
             local success = self:CastSpell(S.Rupture, "target")
             if success then
@@ -2386,9 +2515,9 @@ function AC:RogueRotation()
                 end
             end
             
-        -- Subtlety: Ambush from behind, Cheap Shot otherwise
+        -- Subtlety: Ambush from behind with dagger, Cheap Shot otherwise
         elseif spec == "Subtlety" then
-            if self:KnowsSpell(S.Ambush) and energy >= 60 then
+            if self:HasMainHandDaggerEquipped() and self:IsBehindTarget() and self:KnowsSpell(S.Ambush) and energy >= 60 then
                 local success = self:CastSpell(S.Ambush, "target")
                 if success then
                     RogueDebug("Ambush opener (Subtlety burst)")
@@ -2463,6 +2592,7 @@ end
 -- =============================================
 
 function AC:CheckRogueBuffs(spec)
+    if IsMounted() or UnitInVehicle("player") or UnitOnTaxi("player") then return false end
     if not self:Throttle("RogueOOCBuffCheck", 3) then return false end -- Reduced for leveling
     
     -- Poison application (most important) - 3s intervals for leveling

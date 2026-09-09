@@ -10,7 +10,6 @@ local S = {
     ArcaneExplosion = "Arcane Explosion",
     ArcanePower = "Arcane Power",
     PresenceOfMind = "Presence of Mind",
-    ArcaneOrb = "Arcane Orb",
     SlowFall = "Slow Fall",
     
     -- Fire spells
@@ -76,6 +75,7 @@ local S = {
     
     -- Conjure spells
     ConjureManaGem = "Conjure Mana Gem",
+    ConjureRefreshment = "Conjure Refreshment",
     ConjureWater = "Conjure Water",
     ConjureFood = "Conjure Food",
     
@@ -98,10 +98,20 @@ local S = {
 -- Mana gem priorities (best to worst)
 local ManaGems = {
     "Mana Sapphire", -- 3330 mana
+    "Mana Emerald", -- 2340 mana
     "Mana Ruby", -- 1073 mana  
     "Mana Citrine", -- 518 mana
     "Mana Jade", -- 343 mana
     "Mana Agate", -- 205 mana
+}
+
+local ConjureManaGemSpells = {
+    "Conjure Mana Gem",
+    "Conjure Mana Emerald",
+    "Conjure Mana Ruby",
+    "Conjure Mana Citrine",
+    "Conjure Mana Jade",
+    "Conjure Mana Agate",
 }
 
 local ConjuredFood = {
@@ -164,6 +174,32 @@ local function MageHasDebuffKeyword(unit, keywords)
         end
     end
     return false
+end
+
+local function HasMagePlayerDebuff(unit, debuffName)
+    if not unit or not debuffName then return false end
+    for i = 1, 40 do
+        local name, _, _, count, _, _, expirationTime, unitCaster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or unitCaster == nil) then
+            return true, count or 1, expirationTime
+        end
+    end
+    return false, 0, 0
+end
+
+local function MagePlayerDebuffTimeRemaining(unit, debuffName)
+    if not unit or not debuffName then return 0 end
+    for i = 1, 40 do
+        local name, _, _, _, _, _, expirationTime, unitCaster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or unitCaster == nil) then
+            if not expirationTime or expirationTime == 0 then return 999 end
+            local remaining = expirationTime - GetTime()
+            return remaining > 0 and remaining or 0
+        end
+    end
+    return 0
 end
 
 local function MageFindPetAction(actionName)
@@ -273,6 +309,27 @@ end
 function AC:UseMageDefensives()
     local health = self:GetPlayerHealthPercent()
     local enemies = self:GetEnemyCount()
+
+    -- Blink to break stun or root effects (WotLK mechanic)
+    local stunnedOrRooted = MageHasDebuffKeyword("player", {
+        "stun", "root", "entangling", "frost nova", "freeze", "web",
+    })
+    if stunnedOrRooted and MageSpellReady(self, S.Blink) and self:ActionThrottle("MageBlinkCC", 1.0) then
+        if self:CastSpell(S.Blink, "player") then
+            MageDebug("Blink breaking stun/root")
+            return true
+        end
+    end
+
+    -- Blink escape if low health and melee threat is actively hitting player
+    if health < 25 and UnitExists("target") and CheckInteractDistance("target", 3) and
+       UnitIsUnit("targettarget", "player") and MageSpellReady(self, S.Blink) and
+       self:ActionThrottle("MageBlinkEscape", 1.0) then
+        if self:CastSpell(S.Blink, "player") then
+            MageDebug("Blink escaping melee threat")
+            return true
+        end
+    end
     
     -- Ice Block for emergencies
     if health < 20 and MageSpellReady(self, S.IceBlock) then
@@ -433,8 +490,10 @@ end
 -- =============================================
 
 function AC:CheckMageBuffs(spec)
-    -- Skip if mounted to prevent dismounting
-    if IsMounted() then return false end
+    -- Skip if mounted, in vehicle, or on taxi
+    if IsMounted() or (UnitInVehicle and UnitInVehicle("player")) or (UnitOnTaxi and UnitOnTaxi("player")) then
+        return false
+    end
     
     -- Throttle buff checks
     if not self:Throttle("MageBuffCheck", 8) then return false end
@@ -489,7 +548,7 @@ end
 
 function AC:CheckMageGroupBuffs()
     if not self:Throttle("MageGroupBuffCheck", 15) then return false end
-    if UnitAffectingCombat("player") or IsMounted() then return false end
+    if UnitAffectingCombat("player") or IsMounted() or (UnitInVehicle and UnitInVehicle("player")) or (UnitOnTaxi and UnitOnTaxi("player")) then return false end
     
     for _, unit in ipairs(MageGroupUnits()) do
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
@@ -589,8 +648,11 @@ end
 -- =============================================
 
 function AC:ManageMageConjures()
-    -- Only check when out of combat
-    if UnitAffectingCombat("player") then return false end
+    -- Only check when out of combat, stationary, and not mounted/in vehicle/on taxi
+    if UnitAffectingCombat("player") or self:IsPlayerMoving() or IsMounted() or
+       (UnitInVehicle and UnitInVehicle("player")) or (UnitOnTaxi and UnitOnTaxi("player")) then
+        return false
+    end
     
     -- Throttle conjure checks, but do not use the throttle as a substitute
     -- for spell readiness. A failed cast should be retried promptly.
@@ -605,10 +667,14 @@ function AC:ManageMageConjures()
         end
     end
     
-    if not hasManaGem and MageSpellReady(self, S.ConjureManaGem) then
-        if self:CastSpell(S.ConjureManaGem, "player") then
-            MageDebug("Conjuring Mana Gem")
-            return true
+    if not hasManaGem then
+        for _, spell in ipairs(ConjureManaGemSpells) do
+            if MageSpellReady(self, spell) then
+                if self:CastSpell(spell, "player") then
+                    MageDebug("Conjuring " .. spell)
+                    return true
+                end
+            end
         end
     end
 
@@ -619,12 +685,6 @@ function AC:ManageMageConjures()
             break
         end
     end
-    if not hasFood and MageSpellReady(self, S.ConjureFood) then
-        if self:CastSpell(S.ConjureFood, "player") then
-            MageDebug("Conjuring food")
-            return true
-        end
-    end
 
     local hasWater = false
     for _, water in ipairs(ConjuredWater) do
@@ -633,10 +693,28 @@ function AC:ManageMageConjures()
             break
         end
     end
-    if not hasWater and MageSpellReady(self, S.ConjureWater) then
-        if self:CastSpell(S.ConjureWater, "player") then
-            MageDebug("Conjuring water")
-            return true
+
+    -- Conjure Refreshment (level 75+) creates Mana Strudel (serves as both food and water)
+    if MageSpellReady(self, S.ConjureRefreshment) then
+        if not hasFood or not hasWater then
+            if self:CastSpell(S.ConjureRefreshment, "player") then
+                MageDebug("Conjuring Refreshment (Mana Strudel)")
+                return true
+            end
+        end
+    else
+        if not hasFood and MageSpellReady(self, S.ConjureFood) then
+            if self:CastSpell(S.ConjureFood, "player") then
+                MageDebug("Conjuring food")
+                return true
+            end
+        end
+
+        if not hasWater and MageSpellReady(self, S.ConjureWater) then
+            if self:CastSpell(S.ConjureWater, "player") then
+                MageDebug("Conjuring water")
+                return true
+            end
         end
     end
     
@@ -666,12 +744,12 @@ function AC:ManageWaterElemental()
     end
 
     if UnitExists("pet") and not UnitIsDead("pet") and UnitAffectingCombat("player") and UnitExists("target") then
-        -- PetAttack is required after target changes; otherwise the elemental
-        -- can remain idle or continue attacking the previous target.
+        -- PetAttack is required after target changes; throttle to avoid stalling the rotation
         if PetAttack and (not UnitExists("pettarget") or not UnitIsUnit("pettarget", "target")) then
-            PetAttack()
-            MageDebug("Water Elemental attacking current target")
-            return true
+            if self:ActionThrottle("MagePetAttack", 1.5) then
+                PetAttack()
+                MageDebug("Water Elemental attacking current target")
+            end
         end
 
         -- Find Freeze by action name instead of assuming a fixed pet-bar slot.
@@ -682,15 +760,30 @@ function AC:ManageWaterElemental()
                              self:HasDebuff("target", S.Freeze) or
                              self:HasDebuff("target", "Frostbite")
         if freezeAction and not targetFrozen and MagePetActionReady(freezeAction) and
-           self:ActionThrottle("PetFreeze", 0.25) then
+           self:ActionThrottle("PetFreeze", 0.5) then
             CastPetAction(freezeAction)
-            local afterStart, afterDuration = GetPetActionCooldown(freezeAction)
-            local started = afterStart and afterDuration and afterDuration > 0 and
-                            (afterStart + afterDuration - GetTime()) > 0.05
-            if started or UnitCastingInfo("pet") or UnitChannelInfo("pet") then
-                MageDebug("Water Elemental using Freeze")
-                return true
+            if SpellIsTargeting and SpellIsTargeting() then
+                CameraOrSelectOrMoveStart()
+                CameraOrSelectOrMoveStop()
+            else
+                local frame = CreateFrame("Frame")
+                local attempts = 0
+                frame:SetScript("OnUpdate", function(f, elapsed)
+                    attempts = attempts + 1
+                    if SpellIsTargeting and SpellIsTargeting() then
+                        CameraOrSelectOrMoveStart()
+                        CameraOrSelectOrMoveStop()
+                        f:SetScript("OnUpdate", nil)
+                    elseif attempts >= 10 then
+                        if SpellIsTargeting and SpellIsTargeting() then
+                            SpellStopTargeting()
+                        end
+                        f:SetScript("OnUpdate", nil)
+                    end
+                end)
             end
+            MageDebug("Water Elemental using Freeze")
+            return true
         end
     end
     
@@ -837,13 +930,11 @@ function AC:ArcaneMageRotation()
         end
         
         -- Flamestrike if available
-        if MageSpellReady(self, S.Flamestrike) and not self:IsChanneling() and
-           not self:IsPlayerMoving() and self:Throttle("FlamestrikeArcane", 8) then
-            MageDebug("Arcane AoE: Flamestrike")
-            if not self:CastSpell(S.Flamestrike) then return false end
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
-            return true
+        if not self:IsChanneling() and not self:IsPlayerMoving() and self:Throttle("FlamestrikeArcane", 8) then
+            if self:SafeCastGroundAOE(S.Flamestrike) then
+                MageDebug("Arcane AoE: Flamestrike")
+                return true
+            end
         end
     end
     
@@ -879,6 +970,55 @@ function AC:ArcaneMageRotation()
             MageDebug("Arcane: Mirror Image")
             return true
         end
+    end
+
+    -- Leveling fallback: Arcane Blast is learned at level 64.
+    -- Below level 64, provide a fluid leveling rotation so the mage doesn't freeze.
+    if not self:KnowsSpell(S.ArcaneBlast) then
+        if procs.missileBarrage and MageSpellReady(self, S.ArcaneMissiles) then
+            if self:CastSpell(S.ArcaneMissiles, "target") then
+                MageDebug("Arcane leveling: Missile Barrage proc")
+                return true
+            end
+        end
+
+        if MageSpellReady(self, S.ArcaneBarrage) then
+            if self:CastSpell(S.ArcaneBarrage, "target") then
+                MageDebug("Arcane leveling: Arcane Barrage")
+                return true
+            end
+        end
+
+        if self:IsPlayerMoving() and MageSpellReady(self, S.FireBlast) then
+            if self:CastSpell(S.FireBlast, "target") then
+                MageDebug("Arcane leveling: Fire Blast on move")
+                return true
+            end
+        end
+
+        if manaPercent > 20 and MageSpellReady(self, S.ArcaneMissiles) and not self:IsPlayerMoving() then
+            if self:CastSpell(S.ArcaneMissiles, "target") then
+                MageDebug("Arcane leveling: Arcane Missiles")
+                return true
+            end
+        end
+
+        local filler = self:KnowsSpell(S.Frostbolt) and S.Frostbolt or S.Fireball
+        if MageSpellReady(self, filler) and not self:IsPlayerMoving() then
+            if self:CastSpell(filler, "target") then
+                MageDebug("Arcane leveling: " .. filler .. " filler")
+                return true
+            end
+        end
+
+        if manaPercent < 15 and MageSpellReady(self, S.Shoot) then
+            if self:CastSpell(S.Shoot, "target") then
+                MageDebug("Arcane leveling: wanding")
+                return true
+            end
+        end
+
+        return false
     end
 
     -- Do not spend Missile Barrage before the Arcane Blast multiplier is
@@ -952,18 +1092,17 @@ function AC:FireMageRotation()
     -- AoE rotation
     if enemies >= 3 then
         -- Use Firestarter proc for instant Flamestrike
-        if procs.firestarter and MageSpellReady(self, S.Flamestrike) then
+        if procs.firestarter then
             if not self:IsChanneling() and not self:IsPlayerMoving() then
-                MageDebug("Fire AoE: Firestarter Flamestrike")
-                if not self:CastSpell(S.Flamestrike) then return false end
-                CameraOrSelectOrMoveStart()
-                CameraOrSelectOrMoveStop()
-                return true
+                if self:SafeCastGroundAOE(S.Flamestrike) then
+                    MageDebug("Fire AoE: Firestarter Flamestrike")
+                    return true
+                end
             end
         end
         
         -- Apply Living Bomb to main target
-        if self:KnowsSpell(S.LivingBomb) and not self:HasDebuff("target", S.LivingBomb) and MageSpellReady(self, S.LivingBomb) then
+        if self:KnowsSpell(S.LivingBomb) and not HasMagePlayerDebuff("target", S.LivingBomb) and MageSpellReady(self, S.LivingBomb) then
             if self:CastSpell(S.LivingBomb, "target") then
                 MageDebug("Fire AoE: Living Bomb on target")
                 return true
@@ -975,7 +1114,7 @@ function AC:FireMageRotation()
             for i = 1, 40 do
                 local unit = "nameplate" .. i
                 if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) then
-                    if not self:HasDebuff(unit, S.LivingBomb) and IsSpellInRange(S.LivingBomb, unit) == 1 then
+                    if not HasMagePlayerDebuff(unit, S.LivingBomb) and IsSpellInRange(S.LivingBomb, unit) == 1 then
                         if self:CastSpell(S.LivingBomb, unit) then
                             MageDebug("Fire AoE: Living Bomb spread to " .. (UnitName(unit) or "nameplate"))
                             return true
@@ -1002,26 +1141,19 @@ function AC:FireMageRotation()
         end
         
         -- Flamestrike
-        if MageSpellReady(self, S.Flamestrike) and not self:IsChanneling() and
-           not self:IsPlayerMoving() and self:Throttle("FlamestrikeRegular", 8) then
-            MageDebug("Fire AoE: Flamestrike")
-            if not self:CastSpell(S.Flamestrike) then return false end
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
-            return true
+        if not self:IsChanneling() and not self:IsPlayerMoving() and self:Throttle("FlamestrikeRegular", 8) then
+            if self:SafeCastGroundAOE(S.Flamestrike) then
+                MageDebug("Fire AoE: Flamestrike")
+                return true
+            end
         end
     end
     
-    -- Cooldown usage for elite and boss targets. Combustion is a player buff,
-    -- and should be used only when both Living Bomb and Ignite are present.
+    -- Cooldown usage for elite and boss targets. Combustion in WotLK increases
+    -- critical strike chance with Fire spells until 3 crits occur.
     local targetHP = self:GetTargetHealthPercent("target")
     if self:ShouldUseMageMajorCooldowns() then
-        local hasLivingBomb = self:HasDebuff("target", S.LivingBomb)
-        local hasIgnite = self:HasDebuff("target", "Ignite")
-        local livingBombTime = self:DebuffTimeRemaining("target", S.LivingBomb)
-
-        if hasLivingBomb and hasIgnite and livingBombTime > 1 and
-           MageUseCooldown(self, S.Combustion, "player", "MageFireCombustion") then
+        if MageUseCooldown(self, S.Combustion, "player", "MageFireCombustion") then
             MageDebug("Fire: Combustion burst")
             return true
         end
@@ -1062,9 +1194,11 @@ function AC:FireMageRotation()
 
     -- Living Bomb should be allowed to explode. Refreshing several seconds
     -- early loses the explosion and is a direct damage loss.
+    -- Track player's own Living Bomb so other mages' debuffs don't block ours.
     if self:KnowsSpell(S.LivingBomb) then
-        local lbTime = self:DebuffTimeRemaining("target", S.LivingBomb)
-        if (not self:HasDebuff("target", S.LivingBomb) or lbTime <= 0.5) and MageSpellReady(self, S.LivingBomb) then
+        local hasLB = HasMagePlayerDebuff("target", S.LivingBomb)
+        local lbTime = MagePlayerDebuffTimeRemaining("target", S.LivingBomb)
+        if (not hasLB or lbTime <= 0.5) and MageSpellReady(self, S.LivingBomb) then
             if self:CastSpell(S.LivingBomb, "target") then
                 MageDebug("Fire: Living Bomb")
                 return true
@@ -1074,12 +1208,18 @@ function AC:FireMageRotation()
 
     -- Only maintain Improved Scorch when this mage actually has the talent,
     -- and build the debuff to five stacks instead of checking presence only.
+    -- In WotLK, the 5% spell crit debuff does not stack with Warlock's Shadow and Flame or Frost Mage's Winter's Chill.
     if self:HasMageTalentByName("Improved Scorch") and MageSpellReady(self, S.Scorch) then
+        local hasShadowAndFlame = self:HasDebuff("target", "Shadow and Flame")
+        local hasWintersChill, wcStacks = self:HasDebuff("target", S.WintersChill)
         local hasScorch, scorchStacks = self:HasDebuff("target", S.ImprovedScorch)
-        if not hasScorch or (scorchStacks or 0) < 5 or self:DebuffTimeRemaining("target", S.ImprovedScorch) < 5 then
-            if self:CastSpell(S.Scorch, "target") then
-                MageDebug("Fire: building/refreshing Improved Scorch")
-                return true
+        local critDebuffPresent = hasShadowAndFlame or (hasWintersChill and (wcStacks or 0) >= 5)
+        if not critDebuffPresent then
+            if not hasScorch or (scorchStacks or 0) < 5 or self:DebuffTimeRemaining("target", S.ImprovedScorch) < 5 then
+                if self:CastSpell(S.Scorch, "target") then
+                    MageDebug("Fire: building/refreshing Improved Scorch")
+                    return true
+                end
             end
         end
     end
@@ -1134,14 +1274,12 @@ function AC:FrostMageRotation()
     -- AoE rotation
     if enemies >= 3 then
         -- Blizzard for sustained AoE
-        if MageSpellReady(self, S.Blizzard) and manaPercent > 30 and
-           not self:IsChanneling() and not self:IsPlayerMoving() and
+        if manaPercent > 30 and not self:IsChanneling() and not self:IsPlayerMoving() and
            self:Throttle("BlizzardCast", 8) then
-            MageDebug("Frost AoE: Blizzard")
-            if not self:CastSpell(S.Blizzard) then return false end
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
-            return true
+            if self:SafeCastGroundAOE(S.Blizzard) then
+                MageDebug("Frost AoE: Blizzard")
+                return true
+            end
         end
         
         -- Cone of Cold for close AoE
@@ -1161,13 +1299,11 @@ function AC:FrostMageRotation()
         end
         
         -- Flamestrike if available
-        if MageSpellReady(self, S.Flamestrike) and not self:IsChanneling() and
-           not self:IsPlayerMoving() and self:Throttle("FlamestrikeFrost", 8) then
-            MageDebug("Frost AoE: Flamestrike")
-            if not self:CastSpell(S.Flamestrike) then return false end
-            CameraOrSelectOrMoveStart()
-            CameraOrSelectOrMoveStop()
-            return true
+        if not self:IsChanneling() and not self:IsPlayerMoving() and self:Throttle("FlamestrikeFrost", 8) then
+            if self:SafeCastGroundAOE(S.Flamestrike) then
+                MageDebug("Frost AoE: Flamestrike")
+                return true
+            end
         end
     end
     
@@ -1317,7 +1453,7 @@ function AC:MageRotation()
             if spec == "Fire" then
                 pullSpell = self:GetMageFireNuke()
             elseif spec == "Arcane" then
-                pullSpell = S.ArcaneBlast
+                pullSpell = self:KnowsSpell(S.ArcaneBlast) and S.ArcaneBlast or (self:KnowsSpell(S.Frostbolt) and S.Frostbolt or S.Fireball)
             end
             
             local inRange = not IsSpellInRange or IsSpellInRange(pullSpell, "target")
@@ -1517,9 +1653,10 @@ function AC:MageDebugInfo()
         self:Print("In Range: " .. (IsSpellInRange(S.Frostbolt, "target") == 1 and "YES" or "NO"))
         
         -- Show debuffs
-        if self:HasDebuff("target", S.LivingBomb) then
-            local timeLeft = self:DebuffTimeRemaining("target", S.LivingBomb)
-            self:Print("Living Bomb: " .. math.floor(timeLeft) .. "s remaining")
+        local hasLB = HasMagePlayerDebuff("target", S.LivingBomb)
+        if hasLB then
+            local timeLeft = MagePlayerDebuffTimeRemaining("target", S.LivingBomb)
+            self:Print("Living Bomb (Player): " .. math.floor(timeLeft) .. "s remaining")
         end
         
         if self:HasDebuff("target", S.ImprovedScorch) then

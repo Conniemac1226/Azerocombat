@@ -111,6 +111,33 @@ local function Throttle(key, interval)
     return false
 end
 
+-- Player-owned debuff tracking (prevents multi-priest conflicts)
+local function HasPriestPlayerDebuff(unit, debuffName)
+    if not unit or not debuffName then return false end
+    for i = 1, 40 do
+        local name, _, _, count, _, _, expirationTime, unitCaster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or unitCaster == nil) then
+            return true, count or 1, expirationTime
+        end
+    end
+    return false, 0, 0
+end
+
+local function PriestPlayerDebuffTimeRemaining(unit, debuffName)
+    if not unit or not debuffName then return 0 end
+    for i = 1, 40 do
+        local name, _, _, _, _, _, expirationTime, unitCaster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or unitCaster == nil) then
+            if not expirationTime or expirationTime == 0 then return 999 end
+            local remaining = expirationTime - GetTime()
+            return remaining > 0 and remaining or 0
+        end
+    end
+    return 0
+end
+
 -- UTILITY FUNCTIONS
 
 function AC:IsFastDyingMob(unit)
@@ -521,6 +548,7 @@ function AC:FindPriestShieldTarget()
     for _, unit in ipairs(units) do
         if UnitExists(unit) and PriestUnitInHealingRange(unit) and
            not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) and
+           not self:HasBuff(unit, S.PowerWordShield) and
            not self:HasDebuff(unit, S.WeakenedSoulDebuff) then
             local maxHealth = UnitHealthMax(unit)
             local hp = maxHealth > 0 and UnitHealth(unit) / maxHealth or 0
@@ -650,6 +678,57 @@ end
 function AC:NeedsDispel(unit)
     local hasDispellable, topDebuff, urgentDispel, priority = self:AnalyzeDispelNeeds(unit)
     return hasDispellable, topDebuff and topDebuff.name or nil, urgentDispel
+end
+
+function AC:TryPriestMassDispel()
+    if not self:KnowsSpell(S.MassDispel) or not self:IsUsableSpell(S.MassDispel) then return false end
+    if self:GetSpellCooldown(S.MassDispel) > 0 then return false end
+    if self:IsPlayerMoving() or UnitChannelInfo("player") then return false end
+    if not self:ActionThrottle("PriestMassDispel", 2.0) then return false end
+
+    -- 1. Check for enemy Divine Shield or Ice Block
+    if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target") then
+        local hasBubble = self:HasBuff("target", "Divine Shield") or self:HasBuff("target", "Ice Block")
+        if hasBubble then
+            if self:SafeCastGroundAOE(S.MassDispel) then
+                PriestDebug("Mass Dispel: stripping enemy immunity (Divine Shield / Ice Block)")
+                return true
+            end
+        end
+    end
+
+    -- 2. Check for heavy group magic debuffs (>= 3 allies with Magic debuffs)
+    local magicDebuffCount = 0
+    local units = {"player"}
+    if IsInGroup() then
+        local prefix = GetNumRaidMembers() > 0 and "raid" or "party"
+        local count = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
+        for i = 1, count do
+            local u = prefix .. i
+            if not UnitIsUnit(u, "player") then units[#units + 1] = u end
+        end
+    end
+    for _, u in ipairs(units) do
+        if UnitExists(u) and not UnitIsDeadOrGhost(u) and PriestUnitInHealingRange(u) then
+            for idx = 1, 40 do
+                local name, _, _, _, debuffType = UnitDebuff(u, idx)
+                if not name then break end
+                if debuffType == "Magic" then
+                    magicDebuffCount = magicDebuffCount + 1
+                    break
+                end
+            end
+        end
+    end
+
+    if magicDebuffCount >= 3 then
+        if self:SafeCastGroundAOE(S.MassDispel) then
+            PriestDebug("Mass Dispel: cleansing " .. magicDebuffCount .. " group members")
+            return true
+        end
+    end
+
+    return false
 end
 
 function AC:TryPriestPriorityDispel(minPriority)
@@ -881,7 +960,10 @@ end
 
 -- BUFF MANAGEMENT
 function AC:CheckPriestBuffs()
-    if UnitAffectingCombat("player") then return false end
+    if UnitAffectingCombat("player") or IsMounted() or
+       (UnitInVehicle and UnitInVehicle("player")) or (UnitOnTaxi and UnitOnTaxi("player")) then
+        return false
+    end
     
     -- Inner Fire
     if not self:HasBuff("player", S.InnerFire) and self:IsUsableSpell(S.InnerFire) then
@@ -970,6 +1052,15 @@ function AC:ShadowPriestRotation()
     if self:UsePriestDefensives() then return true end
 
     if self:UsePriestManaCooldowns() then return true end
+
+    -- Protect active channels (Mind Flay, Mind Sear, Hymn of Hope) from early clipping
+    if UnitChannelInfo("player") then
+        local channelName, _, _, _, _, endTime = UnitChannelInfo("player")
+        local remaining = endTime and (endTime / 1000 - GetTime()) or 0
+        if remaining > 0.35 then
+            return false
+        end
+    end
     
     -- Mana management
     if manaPercent < 30 and self:UseManaPotion(30) then
@@ -1004,20 +1095,20 @@ function AC:ShadowPriestRotation()
         return true
     end
 
-    if self:ActionThrottle("ShadowPriorityDispel", 0.5) and
-       self:TryPriestPriorityDispel(90) then
-        return true
+    if self:ActionThrottle("ShadowPriorityDispel", 0.5) then
+        if self:TryPriestMassDispel() then return true end
+        if self:TryPriestPriorityDispel(90) then return true end
     end
 
     -- While moving, skip casted filler and only spend globals on instant or execute tools.
     if isMoving then
-        if not isFastDying and not self:HasDebuff("target", S.DevouringPlague) and
+        if not isFastDying and not HasPriestPlayerDebuff("target", S.DevouringPlague) and
            self:IsUsableSpell(S.DevouringPlague) and self:CastSpell(S.DevouringPlague, "target") then
             PriestDebug("Shadow: Devouring Plague (moving)")
             return true
         end
 
-        if not isFastDying and not self:HasDebuff("target", S.ShadowWordPain) and
+        if not isFastDying and not HasPriestPlayerDebuff("target", S.ShadowWordPain) and
            self:IsUsableSpell(S.ShadowWordPain) then
             local hasWeaving, weavingStacks = self:HasBuff("player", S.ShadowWeavingDebuff)
             if (not hasWeaving or (weavingStacks or 0) >= 5) and
@@ -1056,14 +1147,14 @@ function AC:ShadowPriestRotation()
     -- WotLK has no Pandemic carry-over. VT is started just before expiry so
     -- it lands after the final tick; instant DP is allowed to expire.
     if not isFastDying then
-        local vtRemaining = self:DebuffTimeRemaining("target", S.VampiricTouch)
+        local vtRemaining = PriestPlayerDebuffTimeRemaining("target", S.VampiricTouch)
         if (vtRemaining == 0 or vtRemaining <= 1.5) and self:IsUsableSpell(S.VampiricTouch) then
             if not self:CastSpell(S.VampiricTouch, "target") then return false end
             PriestDebug("Shadow: Vampiric Touch")
             return true
         end
 
-        local dpRemaining = self:DebuffTimeRemaining("target", S.DevouringPlague)
+        local dpRemaining = PriestPlayerDebuffTimeRemaining("target", S.DevouringPlague)
         if dpRemaining == 0 and self:IsUsableSpell(S.DevouringPlague) then
             if not self:CastSpell(S.DevouringPlague, "target") then return false end
             PriestDebug("Shadow: Devouring Plague")
@@ -1073,7 +1164,7 @@ function AC:ShadowPriestRotation()
         -- Pain and Suffering rolls SW:P indefinitely. Apply it at five Shadow
         -- Weaving stacks when that talent buff is active; otherwise apply it
         -- normally for leveling/hybrid builds.
-        if not self:HasDebuff("target", S.ShadowWordPain) and self:IsUsableSpell(S.ShadowWordPain) then
+        if not HasPriestPlayerDebuff("target", S.ShadowWordPain) and self:IsUsableSpell(S.ShadowWordPain) then
             local hasWeaving, weavingStacks = self:HasBuff("player", S.ShadowWeavingDebuff)
             if not hasWeaving or (weavingStacks or 0) >= 5 then
                 if not self:CastSpell(S.ShadowWordPain, "target") then return false end
@@ -1129,6 +1220,9 @@ function AC:DisciplinePriestRotation()
     
     -- PRIORITY 1: EMERGENCY RESPONSE
     if self:UsePriestDefensives() then return true end
+
+    -- Protect active channels (Penance, Divine Hymn, Hymn of Hope) from being clipped
+    if UnitChannelInfo("player") then return false end
     
     -- EPIC PRIORITY 1.5: Maintain combat buffs
     if self:CheckPriestCombatBuffs() then return true end
@@ -1141,9 +1235,9 @@ function AC:DisciplinePriestRotation()
         return true
     end
     
-    -- Mass Dispel remains manual: without encounter-specific coordinates an
-    -- automatic ground placement can miss allies or leave a targeting cursor.
-    -- PRIORITY 3: INDIVIDUAL DISPELLING
+    -- PRIORITY 3: MASS DISPEL & INDIVIDUAL DISPELLING
+    if self:TryPriestMassDispel() then return true end
+
     if self:ActionThrottle("DispelCheck", 0.5) then
         local units = {"player"}
         if IsInGroup() then
@@ -1338,14 +1432,14 @@ function AC:DisciplinePriestRotation()
         end
         
         -- Holy Fire (DoT + direct damage)
-        if not self:HasDebuff("target", S.HolyFire) and self:IsUsableSpell(S.HolyFire) then
+        if not HasPriestPlayerDebuff("target", S.HolyFire) and self:IsUsableSpell(S.HolyFire) then
             if not self:CastSpell(S.HolyFire, "target") then return false end
             PriestDebug("DISC: Holy Fire")
             return true
         end
         
         -- Shadow Word: Pain (DoT)
-        if not self:HasDebuff("target", S.ShadowWordPain) and
+        if not HasPriestPlayerDebuff("target", S.ShadowWordPain) and
            self:IsUsableSpell(S.ShadowWordPain) and not self:IsFastDyingMob("target") then
             if not self:CastSpell(S.ShadowWordPain, "target") then return false end
             PriestDebug("DISC: Shadow Word: Pain")
@@ -1371,6 +1465,12 @@ function AC:HolyPriestRotation()
     local hasTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     local groupHealth = self:AnalyzeGroupHealth()
     
+    -- In Spirit of Redemption, all heals cost zero mana and the priest cannot move
+    local inSpirit = self:HasBuff("player", S.SpiritOfRedemptionBuff)
+    if inSpirit then
+        manaPercent = 100
+    end
+
     PriestDebug("HOLY: Mana " .. math.floor(manaPercent) .. "% | Group: " .. groupHealth.totalMembers .. " members | Avg HP: " .. math.floor(groupHealth.avgHealth * 100) .. "% | Emergency: " .. groupHealth.emergencyHealth)
     
     -- SMART HEALING PRIORITY 0: EMERGENCY TRIAGE OVERRIDE
@@ -1379,6 +1479,9 @@ function AC:HolyPriestRotation()
     
     -- PRIORITY 1: EMERGENCY RESPONSE
     if self:UsePriestDefensives() then return true end
+
+    -- Protect active channels (Divine Hymn, Hymn of Hope) from being clipped
+    if UnitChannelInfo("player") then return false end
     
     -- EPIC PRIORITY 1.5: Maintain combat buffs
     if self:CheckPriestCombatBuffs() then return true end
@@ -1391,7 +1494,9 @@ function AC:HolyPriestRotation()
         return true
     end
     
-    -- PRIORITY 3: DISPELLING
+    -- PRIORITY 3: MASS DISPEL & DISPELLING
+    if self:TryPriestMassDispel() then return true end
+
     if self:ActionThrottle("DispelCheckHoly", 0.5) then
         local units = {"player"}
         if IsInGroup() then
@@ -1611,14 +1716,14 @@ function AC:HolyPriestRotation()
         if self:UsePriestOffensives("Holy") then return true end
         
         -- Holy Fire (main damage + DoT)
-        if not self:HasDebuff("target", S.HolyFire) and self:IsUsableSpell(S.HolyFire) then
+        if not HasPriestPlayerDebuff("target", S.HolyFire) and self:IsUsableSpell(S.HolyFire) then
             if not self:CastSpell(S.HolyFire, "target") then return false end
             PriestDebug("HOLY: Holy Fire")
             return true
         end
         
         -- Shadow Word: Pain (DoT)
-        if not self:HasDebuff("target", S.ShadowWordPain) and
+        if not HasPriestPlayerDebuff("target", S.ShadowWordPain) and
            self:IsUsableSpell(S.ShadowWordPain) and not self:IsFastDyingMob("target") then
             if not self:CastSpell(S.ShadowWordPain, "target") then return false end
             PriestDebug("HOLY: Shadow Word: Pain")
@@ -1648,7 +1753,8 @@ function AC:PriestRotation()
     
     -- Out of combat
     if not inCombat then
-        if not IsMounted() and (not self.IsEatingOrDrinking or not self:IsEatingOrDrinking()) then
+        if not IsMounted() and not (UnitInVehicle and UnitInVehicle("player")) and not (UnitOnTaxi and UnitOnTaxi("player")) and
+           (not self.IsEatingOrDrinking or not self:IsEatingOrDrinking()) then
             if spec == "Discipline" or spec == "Holy" then
                 if self:EmergencyTriage() then return true end
                 if self:SmartHeal() then return true end
@@ -1668,29 +1774,37 @@ function AC:PriestRotation()
         if IsInGroup() and self:CheckPriestCombatBuffs() then return true end
         
         -- Pull
-        if hasTarget and not UnitAffectingCombat("target") then
-            -- Shadow opens long-lived targets with VT. SW:P is delayed until
-            -- Shadow Weaving is stacked by the in-combat rotation.
-            if spec == "Shadow" then
-                if not self:HasBuff("player", S.Shadowform) and self:IsUsableSpell(S.Shadowform) then
-                    if not self:CastSpell(S.Shadowform) then return false end
-                    return true
-                end
-                if not self:IsFastDyingMob("target") and self:IsUsableSpell(S.VampiricTouch) then
-                    if not self:CastSpell(S.VampiricTouch, "target") then return false end
-                    return true
-                elseif self:IsUsableSpell(S.ShadowWordPain) then
-                    if not self:CastSpell(S.ShadowWordPain, "target") then return false end
-                    return true
-                end
-            else
-                -- Holy/Disc pull with Holy Fire or Smite
-                if self:IsUsableSpell(S.HolyFire) then
-                    if not self:CastSpell(S.HolyFire, "target") then return false end
-                    return true
-                elseif self:IsUsableSpell(S.Smite) then
-                    if not self:CastSpell(S.Smite, "target") then return false end
-                    return true
+        if hasTarget and not UnitAffectingCombat("target") and UnitExists("target") then
+            local isMoving = self:IsPlayerMoving()
+            local inRange = not IsSpellInRange or IsSpellInRange(S.Smite, "target") == 1 or
+                            IsSpellInRange(S.ShadowWordPain, "target") == 1
+            if inRange then
+                -- Shadow opens long-lived targets with VT. SW:P is delayed until
+                -- Shadow Weaving is stacked by the in-combat rotation.
+                if spec == "Shadow" then
+                    if not self:HasBuff("player", S.Shadowform) and self:IsUsableSpell(S.Shadowform) then
+                        if not self:CastSpell(S.Shadowform) then return false end
+                        return true
+                    end
+                    if not isMoving and not self:IsFastDyingMob("target") and self:IsUsableSpell(S.VampiricTouch) then
+                        if not self:CastSpell(S.VampiricTouch, "target") then return false end
+                        return true
+                    elseif self:IsUsableSpell(S.ShadowWordPain) then
+                        if not self:CastSpell(S.ShadowWordPain, "target") then return false end
+                        return true
+                    end
+                else
+                    -- Holy/Disc pull with Holy Fire or Smite (or SW:P on move)
+                    if not isMoving and self:IsUsableSpell(S.HolyFire) then
+                        if not self:CastSpell(S.HolyFire, "target") then return false end
+                        return true
+                    elseif not isMoving and self:IsUsableSpell(S.Smite) then
+                        if not self:CastSpell(S.Smite, "target") then return false end
+                        return true
+                    elseif self:IsUsableSpell(S.ShadowWordPain) then
+                        if not self:CastSpell(S.ShadowWordPain, "target") then return false end
+                        return true
+                    end
                 end
             end
         end
@@ -1730,7 +1844,7 @@ function AC:PriestRotation()
         
         -- Basic DPS
         if hasTarget then
-            if not self:HasDebuff("target", S.ShadowWordPain) and
+            if not HasPriestPlayerDebuff("target", S.ShadowWordPain) and
                self:IsUsableSpell(S.ShadowWordPain) and not self:IsFastDyingMob("target") then
                 if not self:CastSpell(S.ShadowWordPain, "target") then return false end
                 PriestDebug("Leveling: SW:Pain")

@@ -52,10 +52,9 @@ local S = {
     EarthbindTotem = "Earthbind Totem", TremorTotem = "Tremor Totem", 
     StoneclawTotem = "Stoneclaw Totem", EarthElementalTotem = "Earth Elemental Totem",
     -- Air Totems
-    GraceOfAirTotem = "Grace of Air Totem", WrathOfAirTotem = "Wrath of Air Totem", 
+    WrathOfAirTotem = "Wrath of Air Totem", 
     WindfuryTotem = "Windfury Totem", GroundingTotem = "Grounding Totem",
     NatureResistanceTotem = "Nature Resistance Totem", SentryTotem = "Sentry Totem", 
-    WindwallTotem = "Windwall Totem", 
     -- Fire Totems
     SearingTotem = "Searing Totem", MagmaTotem = "Magma Totem", 
     FlametongueTotem = "Flametongue Totem", FrostResistanceTotem = "Frost Resistance Totem", 
@@ -63,8 +62,7 @@ local S = {
     FireElementalTotem = "Fire Elemental Totem",
     -- Water Totems
     HealingStreamTotem = "Healing Stream Totem", ManaSpringTotem = "Mana Spring Totem",
-    DiseaseCleansingTotem = "Disease Cleansing Totem", 
-    PoisonCleansingTotem = "Poison Cleansing Totem",
+    CleansingTotem = "Cleansing Totem",
     ManaTideTotem = "Mana Tide Totem",
     -- Totem Calls
     CallOfTheElements = "Call of the Elements", 
@@ -122,7 +120,7 @@ local TotemSlotNames = {
 
 -- Totem definitions and sets
 AC.TotemDefinitions = {
-    [S.StrengthOfEarthTotem] = TotemTypes.EARTH, [S.StoneskinTotem] = TotemTypes.EARTH, [S.EarthbindTotem] = TotemTypes.EARTH, [S.TremorTotem] = TotemTypes.EARTH, [S.StoneclawTotem] = TotemTypes.EARTH, [S.EarthElementalTotem] = TotemTypes.EARTH, [S.GraceOfAirTotem] = TotemTypes.AIR, [S.WrathOfAirTotem] = TotemTypes.AIR, [S.WindfuryTotem] = TotemTypes.AIR, [S.NatureResistanceTotem] = TotemTypes.AIR, [S.GroundingTotem] = TotemTypes.AIR, [S.SentryTotem] = TotemTypes.AIR, [S.WindwallTotem] = TotemTypes.AIR, [S.SearingTotem] = TotemTypes.FIRE, [S.MagmaTotem] = TotemTypes.FIRE, [S.FlametongueTotem] = TotemTypes.FIRE, [S.FrostResistanceTotem] = TotemTypes.FIRE, [S.TotemOfWrath] = TotemTypes.FIRE, [S.FireResistanceTotem] = TotemTypes.FIRE, [S.FireElementalTotem] = TotemTypes.FIRE, [S.HealingStreamTotem] = TotemTypes.WATER, [S.ManaSpringTotem] = TotemTypes.WATER, [S.DiseaseCleansingTotem] = TotemTypes.WATER, [S.PoisonCleansingTotem] = TotemTypes.WATER, [S.ManaTideTotem] = TotemTypes.WATER
+    [S.StrengthOfEarthTotem] = TotemTypes.EARTH, [S.StoneskinTotem] = TotemTypes.EARTH, [S.EarthbindTotem] = TotemTypes.EARTH, [S.TremorTotem] = TotemTypes.EARTH, [S.StoneclawTotem] = TotemTypes.EARTH, [S.EarthElementalTotem] = TotemTypes.EARTH, [S.WrathOfAirTotem] = TotemTypes.AIR, [S.WindfuryTotem] = TotemTypes.AIR, [S.NatureResistanceTotem] = TotemTypes.AIR, [S.GroundingTotem] = TotemTypes.AIR, [S.SentryTotem] = TotemTypes.AIR, [S.SearingTotem] = TotemTypes.FIRE, [S.MagmaTotem] = TotemTypes.FIRE, [S.FlametongueTotem] = TotemTypes.FIRE, [S.FrostResistanceTotem] = TotemTypes.FIRE, [S.TotemOfWrath] = TotemTypes.FIRE, [S.FireResistanceTotem] = TotemTypes.FIRE, [S.FireElementalTotem] = TotemTypes.FIRE, [S.HealingStreamTotem] = TotemTypes.WATER, [S.ManaSpringTotem] = TotemTypes.WATER, [S.CleansingTotem] = TotemTypes.WATER, [S.ManaTideTotem] = TotemTypes.WATER
 }
 -- ENHANCED: Ultimate totem sets with dynamic situational awareness
 AC.ShamanTotemSets = {
@@ -151,7 +149,7 @@ AC.ShamanTotemSets = {
     
     -- DYNAMIC: Situational Response Sets
     DEFENSIVE = { [TotemTypes.EARTH] = S.TremorTotem, [TotemTypes.AIR] = S.GroundingTotem, [TotemTypes.FIRE] = S.FlametongueTotem, [TotemTypes.WATER] = S.HealingStreamTotem },
-    RESISTANCE = { [TotemTypes.EARTH] = S.StoneskinTotem, [TotemTypes.AIR] = S.NatureResistanceTotem, [TotemTypes.FIRE] = S.FrostResistanceTotem, [TotemTypes.WATER] = S.PoisonCleansingTotem }
+    RESISTANCE = { [TotemTypes.EARTH] = S.StoneskinTotem, [TotemTypes.AIR] = S.NatureResistanceTotem, [TotemTypes.FIRE] = S.FrostResistanceTotem, [TotemTypes.WATER] = S.CleansingTotem }
 }
 
 -- Debug function
@@ -169,6 +167,33 @@ local function Throttle(key, interval)
         return true
     end
     return false
+end
+
+-- Player-owned debuff tracking (prevents multi-shaman conflicts)
+local function HasShamanPlayerDebuff(unit, debuffName)
+    if not unit or not debuffName then return false end
+    for i = 1, 40 do
+        local name, _, _, count, _, _, expirationTime, unitCaster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or unitCaster == nil) then
+            return true, count or 1, expirationTime
+        end
+    end
+    return false, 0, 0
+end
+
+local function ShamanPlayerDebuffTimeRemaining(unit, debuffName)
+    if not unit or not debuffName then return 0 end
+    for i = 1, 40 do
+        local name, _, _, _, _, _, expirationTime, unitCaster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or unitCaster == nil) then
+            if not expirationTime or expirationTime == 0 then return 999 end
+            local remaining = expirationTime - GetTime()
+            return remaining > 0 and remaining or 0
+        end
+    end
+    return 0
 end
 
 -- ENHANCED: Shaman-specific spell casting with better error handling
@@ -189,15 +214,15 @@ function AC:CastShamanSpell(spellName, unit)
         [S.StrengthOfEarthTotem] = true, [S.StoneskinTotem] = true,
         [S.EarthbindTotem] = true, [S.TremorTotem] = true,
         [S.StoneclawTotem] = true, [S.EarthElementalTotem] = true,
-        [S.GraceOfAirTotem] = true, [S.WrathOfAirTotem] = true,
+        [S.WrathOfAirTotem] = true,
         [S.WindfuryTotem] = true, [S.GroundingTotem] = true,
         [S.NatureResistanceTotem] = true, [S.SentryTotem] = true,
-        [S.WindwallTotem] = true, [S.SearingTotem] = true,
+        [S.SearingTotem] = true,
         [S.MagmaTotem] = true, [S.FlametongueTotem] = true,
         [S.FrostResistanceTotem] = true, [S.TotemOfWrath] = true,
         [S.FireResistanceTotem] = true, [S.FireElementalTotem] = true,
         [S.HealingStreamTotem] = true, [S.ManaSpringTotem] = true,
-        [S.DiseaseCleansingTotem] = true, [S.PoisonCleansingTotem] = true,
+        [S.CleansingTotem] = true,
         [S.ManaTideTotem] = true, [S.CallOfTheElements] = true,
         [S.CallOfTheAncestors] = true, [S.CallOfTheSpirits] = true,
         [S.TotemicRecall] = true
@@ -289,7 +314,24 @@ function AC:FindShamanTankUnit()
         -- better Earth Shield anchor than any class-based guess.
         return "focus"
     end
-    for _, unit in ipairs(self:GetShamanGroupUnits()) do
+    local groupUnits = self:GetShamanGroupUnits()
+    -- First pass: find a tank candidate without Earth Shield
+    for _, unit in ipairs(groupUnits) do
+        if self:IsShamanTankCandidate(unit) and not self:HasBuff(unit, S.EarthShield) then
+            return unit
+        end
+    end
+    -- Second pass: find tank candidate whose Earth Shield has <= 1 charge
+    for _, unit in ipairs(groupUnits) do
+        if self:IsShamanTankCandidate(unit) then
+            local hasES, charges = self:HasBuff(unit, S.EarthShield)
+            if not hasES or (charges and charges <= 1) then
+                return unit
+            end
+        end
+    end
+    -- Third pass: any tank candidate
+    for _, unit in ipairs(groupUnits) do
         if self:IsShamanTankCandidate(unit) then
             return unit
         end
@@ -390,10 +432,12 @@ function AC:HandleShamanCleansing()
                          (self:KnowsSpell(S.CureToxins) and S.CureToxins)
     if not cleanseSpell or not self:IsShamanSpellReady(cleanseSpell) then return false end
 
+    if not self:ActionThrottle("ShamanCleanse", 1.0) then return false end
+
     for _, unit in ipairs(self:GetShamanGroupUnits()) do
         if self:IsShamanFriendlyUnitReachable(unit) then
             for index = 1, 40 do
-                local name, _, _, debuffType = UnitDebuff(unit, index)
+                local name, _, _, _, debuffType = UnitDebuff(unit, index)
                 if not name then break end
                 local canRemove = debuffType == "Poison" or debuffType == "Disease" or
                                   (cleanseSpell == S.CleanseSpirit and debuffType == "Curse")
@@ -416,13 +460,14 @@ function AC:HandleShamanPurge()
        not UnitCanAttack("player", "target") then
         return false
     end
-    if not self:CanUseShamanSpell(S.Purge) then return false end
+    if not self:CanUseShamanSpell(S.Purge) or not self:IsShamanSpellReady(S.Purge) then return false end
+    if not self:ActionThrottle("ShamanPurge", 1.5) then return false end
 
     for index = 1, 40 do
-        local name, _, _, _, _, _, _, isStealable = UnitBuff("target", index)
+        local name, _, _, _, dispelType = UnitBuff("target", index)
         if not name then break end
-        if isStealable and self:CastShamanSpell(S.Purge, "target") then
-            ShamanDebug("Purged " .. name)
+        if dispelType == "Magic" and self:CastShamanSpell(S.Purge, "target") then
+            ShamanDebug("Purged " .. name .. " from target")
             return true
         end
     end
@@ -562,11 +607,40 @@ function AC:DeployShamanTotems(spec, level, situation)
         slotPriority = {TotemTypes.WATER, TotemTypes.AIR, TotemTypes.EARTH, TotemTypes.FIRE}
     end
 
+    -- Emergency Tremor Totem deployment if any party member is Feared, Charmed, or Asleep
+    if self:IsShamanSpellReady(S.TremorTotem) then
+        local fearOrCharmActive = false
+        for _, u in ipairs(self:GetShamanGroupUnits()) do
+            if UnitExists(u) and not UnitIsDeadOrGhost(u) and (u == "player" or CheckInteractDistance(u, 4)) then
+                for idx = 1, 40 do
+                    local debuffName = UnitDebuff(u, idx)
+                    if not debuffName then break end
+                    local lowerD = string.lower(debuffName)
+                    if string.find(lowerD, "fear", 1, true) or string.find(lowerD, "horror", 1, true) or
+                       string.find(lowerD, "charm", 1, true) or string.find(lowerD, "sleep", 1, true) then
+                        fearOrCharmActive = true
+                        break
+                    end
+                end
+                if fearOrCharmActive then break end
+            end
+        end
+        if fearOrCharmActive then
+            local activeEarth = self:GetActiveShamanTotem(TotemTypes.EARTH)
+            if not ShamanTotemNameMatches(activeEarth, S.TremorTotem) and self:Throttle("TremorDeploy", 2.0) then
+                if self:CastShamanSpell(S.TremorTotem) then
+                    ShamanDebug("Emergency Tremor Totem deployed (Fear/Charm/Sleep detected)")
+                    return true
+                end
+            end
+        end
+    end
+
     local fallbacks = {
         [TotemTypes.FIRE] = {S.SearingTotem, S.MagmaTotem},
         [TotemTypes.EARTH] = {S.StrengthOfEarthTotem, S.StoneskinTotem, S.StoneclawTotem},
-        [TotemTypes.WATER] = {S.ManaSpringTotem, S.HealingStreamTotem},
-        [TotemTypes.AIR] = {S.WrathOfAirTotem, S.WindfuryTotem, S.GraceOfAirTotem}
+        [TotemTypes.WATER] = {S.ManaSpringTotem, S.HealingStreamTotem, S.CleansingTotem},
+        [TotemTypes.AIR] = {S.WrathOfAirTotem, S.WindfuryTotem}
     }
 
     for _, slot in ipairs(slotPriority) do
@@ -677,8 +751,9 @@ function AC:ManageShamanShields(spec, level)
     local shield = wantsWaterShield and self:KnowsSpell(S.WaterShield) and S.WaterShield or
                    (self:KnowsSpell(S.LightningShield) and S.LightningShield)
     if shield then
-        local hasBuff, _, stacks = self:HasBuff("player", shield)
-        if not hasBuff or (shield == S.LightningShield and stacks and stacks <= 1) then
+        local hasBuff, stacks = self:HasBuff("player", shield)
+        if not hasBuff or (shield == S.LightningShield and stacks and stacks <= 1) or
+           (shield == S.WaterShield and stacks and stacks <= 1) then
             if self:CastShamanSpell(shield) then return true end
         end
     end
@@ -714,7 +789,7 @@ function AC:ElementalRotation(level, hasTarget, targetHP, manaPercent, enemies)
     local situation = enemies >= 3 and "AOE" or (IsInGroup() and "GROUP" or "SOLO")
     if self:DeployShamanTotems("Elemental", level, situation) then return true end
 
-    local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
+    local flameShockDuration = ShamanPlayerDebuffTimeRemaining("target", S.FlameShock)
     local targetWillLive = isElite or targetHP > 18
     if targetWillLive and self:IsShamanSpellReady(S.FlameShock) and flameShockDuration < 2.5 and
        self:CastShamanSpell(S.FlameShock) then
@@ -762,7 +837,7 @@ function AC:ElementalRotation(level, hasTarget, targetHP, manaPercent, enemies)
         return false
     end
 
-    if flameShockDuration > 2.5 and self:IsShamanSpellReady(S.LavaBurst) and
+    if flameShockDuration > 1.5 and self:IsShamanSpellReady(S.LavaBurst) and
        self:CastShamanSpell(S.LavaBurst) then
         ShamanDebug("Lava Burst with Flame Shock active")
         return true
@@ -840,7 +915,7 @@ function AC:EnhancementRotation(level, hasTarget, targetHP, manaPercent, enemies
             ShamanDebug("Instant emergency Healing Wave at 5 Maelstrom")
             return true
         end
-        local maelstromSpell = enemies >= 2 and S.ChainLightning or S.LightningBolt
+        local maelstromSpell = (enemies >= 2 and self:IsShamanSpellReady(S.ChainLightning)) and S.ChainLightning or S.LightningBolt
         if self:IsShamanSpellReady(maelstromSpell) and self:CastShamanSpell(maelstromSpell) then
             ShamanDebug("Instant " .. maelstromSpell .. " at 5 Maelstrom")
             return true
@@ -858,7 +933,7 @@ function AC:EnhancementRotation(level, hasTarget, targetHP, manaPercent, enemies
         return true
     end
 
-    local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
+    local flameShockDuration = ShamanPlayerDebuffTimeRemaining("target", S.FlameShock)
     local targetWillLive = isElite or targetHP > 20
     if targetWillLive and flameShockDuration < 2.5 and self:IsShamanSpellReady(S.FlameShock) and
        self:CastShamanSpell(S.FlameShock) then
@@ -967,14 +1042,14 @@ function AC:RestorationRotation(level, hasTarget, targetHP, manaPercent, enemies
             ShamanDebug("Tidal Waves Healing Wave")
             return true
         end
-        if healTargetHP < 0.78 and not isMoving and self:IsShamanSpellReady(S.LesserHealingWave) and
-           self:CastShamanSpell(S.LesserHealingWave, healTarget) then
-            ShamanDebug("Lesser Healing Wave spot heal")
-            return true
-        end
         if healTargetHP < 0.60 and not isMoving and self:IsShamanSpellReady(S.HealingWave) and
            self:CastShamanSpell(S.HealingWave, healTarget) then
             ShamanDebug("Healing Wave large heal")
+            return true
+        end
+        if healTargetHP < 0.85 and not isMoving and self:IsShamanSpellReady(S.LesserHealingWave) and
+           self:CastShamanSpell(S.LesserHealingWave, healTarget) then
+            ShamanDebug("Lesser Healing Wave spot heal")
             return true
         end
     end
@@ -1002,14 +1077,14 @@ function AC:RestorationRotation(level, hasTarget, targetHP, manaPercent, enemies
     local safeToDPS = not healTarget and groupAnalysis.damagedMembers == 0 and
                       (not IsInGroup() or manaPercent > 75)
     if hasTarget and safeToDPS then
-        local flameShockDuration = self:DebuffTimeRemaining("target", S.FlameShock)
+        local flameShockDuration = ShamanPlayerDebuffTimeRemaining("target", S.FlameShock)
         local targetWillLive = self:IsShamanBossTarget("target") or targetHP > 20
         if targetWillLive and flameShockDuration < 2.5 and self:IsShamanSpellReady(S.FlameShock) and
            self:CastShamanSpell(S.FlameShock) then
             ShamanDebug("Flame Shock during healing downtime")
             return true
         end
-        if not isMoving and flameShockDuration > 2.5 and self:IsShamanSpellReady(S.LavaBurst) and
+        if not isMoving and flameShockDuration > 1.5 and self:IsShamanSpellReady(S.LavaBurst) and
            self:CastShamanSpell(S.LavaBurst) then
             ShamanDebug("Lava Burst during healing downtime")
             return true
@@ -1026,7 +1101,10 @@ end
 
 -- ENHANCED: Ultimate buff management with intelligent priorities
 function AC:CheckShamanBuffs(spec)
-    if UnitAffectingCombat("player") or IsMounted() or IsFlying() then return false end
+    if UnitAffectingCombat("player") or IsMounted() or IsFlying() or
+       (UnitInVehicle and UnitInVehicle("player")) or (UnitOnTaxi and UnitOnTaxi("player")) then
+        return false
+    end
     local level = UnitLevel("player")
     
     -- Enhanced weapon imbue management
@@ -1192,6 +1270,38 @@ function AC:ShamanRotation()
     
     -- Out of combat management
     if not inCombat then
+        -- Restoration out of combat healing & tank Earth Shield
+        if spec == "Restoration" then
+            local healTarget, healTargetHP = self:FindShamanHealingTarget("normal")
+            if healTarget and healTargetHP < 0.90 then
+                if self:RestorationRotation(level, hasTarget, targetHP, manaPercent, enemies) then
+                    return true
+                end
+            end
+            local tankUnit = IsInGroup() and self:FindShamanTankUnit() or "player"
+            if tankUnit and self:IsShamanSpellReady(S.EarthShield) then
+                local hasES, charges = self:HasBuff(tankUnit, S.EarthShield)
+                if not hasES or (charges and charges <= 1) then
+                    if self:CastShamanSpell(S.EarthShield, tankUnit) then
+                        ShamanDebug("Pre-pull Earth Shield on " .. (UnitName(tankUnit) or tankUnit))
+                        return true
+                    end
+                end
+            end
+        end
+
+        -- Pre-pull hostile target engagement
+        if hasTarget and not UnitAffectingCombat("target") and UnitExists("target") then
+            local pullSpell = S.LightningBolt
+            local inRange = not IsSpellInRange or IsSpellInRange(pullSpell, "target")
+            if inRange ~= 0 and self:IsShamanSpellReady(pullSpell) and self:Throttle("ShamanPull", 1.5) then
+                if not self:IsPlayerMoving() and self:CastShamanSpell(pullSpell, "target") then
+                    ShamanDebug("Pulling with " .. pullSpell)
+                    return true
+                end
+            end
+        end
+
         return false
     end
     

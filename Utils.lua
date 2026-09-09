@@ -221,7 +221,7 @@ function AC:CanDispel(unit, dispelType)
     unit = unit or "player"
     local i = 1
     while i <= 40 do
-        local name, _, _, debuffType = UnitDebuff(unit, i)
+        local name, _, _, _, debuffType = UnitDebuff(unit, i)
         if not name then break end
         
         if debuffType == dispelType then
@@ -233,33 +233,35 @@ function AC:CanDispel(unit, dispelType)
 end
 
 -- Check if unit is feared (WotLK 3.3.5a compatible)
+local fearFragments = {"fear", "scream", "terror", "panic", "horrify", "scare", "intimidating shout", "howl of terror"}
 function UnitIsFeared(unit)
     unit = unit or "player"
-    local i = 1
-    while i <= 40 do
-        local name, _, _, debuffType = UnitDebuff(unit, i)
+    for i = 1, 40 do
+        local name = UnitDebuff(unit, i)
         if not name then break end
-        
-        if debuffType == "Fear" then
-            return true
+        local lowerName = string.lower(name)
+        for _, fragment in ipairs(fearFragments) do
+            if string.find(lowerName, fragment, 1, true) then
+                return true
+            end
         end
-        i = i + 1
     end
     return false
 end
 
 -- Check if unit is charmed (WotLK 3.3.5a compatible)  
+local charmFragments = {"charm", "seduction", "mind control", "sleep", "hibernate", "wyvern sting"}
 function UnitIsCharmed(unit)
     unit = unit or "player"
-    local i = 1
-    while i <= 40 do
-        local name, _, _, debuffType = UnitDebuff(unit, i)
+    for i = 1, 40 do
+        local name = UnitDebuff(unit, i)
         if not name then break end
-        
-        if debuffType == "Charm" then
-            return true
+        local lowerName = string.lower(name)
+        for _, fragment in ipairs(charmFragments) do
+            if string.find(lowerName, fragment, 1, true) then
+                return true
+            end
         end
-        i = i + 1
     end
     return false
 end

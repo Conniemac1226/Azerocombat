@@ -18,11 +18,11 @@ local S = {
     Recklessness = "Recklessness", BloodRage = "Bloodrage", ShieldWall = "Shield Wall",
     LastStand = "Last Stand", EnragedRegeneration = "Enraged Regeneration", DeathWish = "Death Wish", 
     BerserkerRage = "Berserker Rage", Bladestorm = "Bladestorm", SpellReflection = "Spell Reflection",
-    ShatteringThrow = "Shattering Throw", Vigilance = "Vigilance",
+    ShatteringThrow = "Shattering Throw", Vigilance = "Vigilance", Retaliation = "Retaliation",
     
     -- Shouts
     BattleShout = "Battle Shout", CommandingShout = "Commanding Shout", DemoShout = "Demoralizing Shout",
-    IntimidatingShout = "Intimidating Shout", ThunderClap = "Thunder Clap",
+    IntimidatingShout = "Intimidating Shout", ThunderClap = "Thunder Clap", ChallengingShout = "Challenging Shout",
     
     -- Stances
     BattleStance = "Battle Stance", DefensiveStance = "Defensive Stance", BerserkerStance = "Berserker Stance",
@@ -30,11 +30,14 @@ local S = {
     -- Utility
     Pummel = "Pummel", ShieldBash = "Shield Bash", 
     Charge = "Charge", Intercept = "Intercept", Hamstring = "Hamstring",
+    Taunt = "Taunt", MockingBlow = "Mocking Blow", Intervene = "Intervene",
+    Disarm = "Disarm", PiercingHowl = "Piercing Howl",
     
     -- Buffs/Debuffs
     SuddenDeath = "Sudden Death",
     TasteForBlood = "Taste for Blood", SlamEffect = "Slam!",
     EnrageEffect = "Enrage", VictoryRushBuff = "Victorious",
+    SwordAndBoard = "Sword and Board",
     
     -- Racial Abilities
     BloodFury = "Blood Fury", Berserking = "Berserking", WarStomp = "War Stomp", 
@@ -384,7 +387,12 @@ end
 
 -- ENHANCED: Find best target with smart melee prioritization and performance optimization
 function AC:FindBestWarriorTarget()
-    return self:FindBestTankTarget()
+    if self:IsTankSpec() then
+        return self:FindBestTankTarget()
+    else
+        local target = self:FindBestTarget()
+        return target
+    end
 end
 
 -- FIXED: Enhanced ranged ability usage with immediate return to melee and cooldown checks
@@ -521,20 +529,18 @@ function AC:UseTrinketsFixed()
 end
 
 
--- ENHANCED: Victory Rush usage with better conditions
+-- ENHANCED: Victory Rush usage (WotLK 3.3.5a: free 0-rage attack after killing blow)
 function AC:TryVictoryRush()
     if not self:KnowsSpell(S.VictoryRush) then return false end
     
-    -- Check if we have the Victory Rush buff (Victorious)
-    if self:HasBuff("player", S.VictoryRushBuff) and self:IsUsableSpell(S.VictoryRush) then
-        -- Use it if we're below 80% health or about to cap rage
-        local health = self:GetPlayerHealthPercent()
-        local rage = UnitPower("player", 1)
-        
-        if health < 80 or rage > 90 then
-            if not self:CastSpell(S.VictoryRush) then return false end
-            WarriorDebug("Victory Rush - free healing")
-            return true
+    -- In WotLK 3.3.5a, Victory Rush is activated directly upon an honor/XP kill without a player buff
+    if self:IsUsableSpell(S.VictoryRush) and self:GetSpellCooldown(S.VictoryRush) == 0 then
+        if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target") and
+           self:IsInMeleeRange("target") then
+            if self:CastSpell(S.VictoryRush, "target") then
+                WarriorDebug("Victory Rush (free 0-rage attack)")
+                return true
+            end
         end
     end
     
@@ -629,21 +635,18 @@ function AC:UseWarriorDefensives()
     -- Shield Wall is the hard panic button; keep it later than Last Stand.
     if self:KnowsSpell(S.ShieldWall) and self:IsUsableSpell(S.ShieldWall) and
        self:GetSpellCooldown(S.ShieldWall) == 0 and canRetry("shieldWall", 8) then
-        if self:KnowsSpell(S.ShieldWall) and self:IsUsableSpell(S.ShieldWall) and
-           self:GetSpellCooldown(S.ShieldWall) == 0 then
-            if hasShield and (health < 20 or (spec == "Protection" and underHeavyPressure and health < 30)) then
-                markAttempt("shieldWall")
-                self.shieldWallBlocked = false
-                if not self:CastSpell(S.ShieldWall) then return false end
-                WarriorDebug("Shield Wall at critical health / tank burst")
-                return true
-            else
-                if spec == "Protection" then
-                    local shouldLogBlocked = (not self.shieldWallBlocked) or Throttle("ShieldWallBlockedDebug", 30.0)
-                    self.shieldWallBlocked = true
-                    if shouldLogBlocked then
-                        WarriorDebug("Shield Wall blocked: missing shield or threshold not met")
-                    end
+        if hasShield and (health < 20 or (spec == "Protection" and underHeavyPressure and health < 30)) then
+            markAttempt("shieldWall")
+            self.shieldWallBlocked = false
+            if not self:CastSpell(S.ShieldWall) then return false end
+            WarriorDebug("Shield Wall at critical health / tank burst")
+            return true
+        else
+            if spec == "Protection" then
+                local shouldLogBlocked = (not self.shieldWallBlocked) or Throttle("ShieldWallBlockedDebug", 30.0)
+                self.shieldWallBlocked = true
+                if shouldLogBlocked then
+                    WarriorDebug("Shield Wall blocked: missing shield or threshold not met")
                 end
             end
         end
@@ -652,25 +655,54 @@ function AC:UseWarriorDefensives()
     -- Enraged Regeneration works best as follow-up stabilization.
     if health < 45 and canRetry("enragedRegen", 6) and self:KnowsSpell(S.EnragedRegeneration) and
        self:IsUsableSpell(S.EnragedRegeneration) then
-        if self:KnowsSpell(S.EnragedRegeneration) and self:IsUsableSpell(S.EnragedRegeneration) then
-            local isEnraged = self:HasBuff("player", S.BerserkerRage) or 
-                             self:HasBuff("player", S.DeathWish) or 
-                             self:HasBuff("player", S.EnrageEffect) or
-                             self:HasBuff("player", S.BloodRage)
-            
-            if isEnraged and self:GetSpellCooldown(S.EnragedRegeneration) == 0 then
-                markAttempt("enragedRegen")
-                if not self:CastSpell(S.EnragedRegeneration) then return false end
-                WarriorDebug("Enraged Regeneration")
-                return true
-            elseif not isEnraged and self:KnowsSpell(S.BerserkerRage) and self:IsUsableSpell(S.BerserkerRage) and
-                   self:GetSpellCooldown(S.BerserkerRage) == 0 and 
-                   canRetry("berserkerForRegen", 4) and health < 35 then
+        local isEnraged = self:HasBuff("player", S.BerserkerRage) or 
+                         self:HasBuff("player", S.EnrageEffect) or
+                         self:HasBuff("player", S.BloodRage)
+        
+        if isEnraged and self:GetSpellCooldown(S.EnragedRegeneration) == 0 then
+            markAttempt("enragedRegen")
+            if not self:CastSpell(S.EnragedRegeneration) then return false end
+            WarriorDebug("Enraged Regeneration")
+            return true
+        elseif not isEnraged and health < 35 then
+            -- Bloodrage can be used in any stance to enable Enraged Regeneration
+            if self:KnowsSpell(S.BloodRage) and self:IsUsableSpell(S.BloodRage) and
+               self:GetSpellCooldown(S.BloodRage) == 0 and canRetry("bloodrageForRegen", 4) then
+                markAttempt("bloodrageForRegen")
+                if self:CastSpell(S.BloodRage) then
+                    WarriorDebug("Blood Rage for Enraged Regen")
+                    return true
+                end
+            elseif currentStance == 3 and self:KnowsSpell(S.BerserkerRage) and self:IsUsableSpell(S.BerserkerRage) and
+                   self:GetSpellCooldown(S.BerserkerRage) == 0 and canRetry("berserkerForRegen", 4) then
                 markAttempt("berserkerForRegen")
-                if not self:CastSpell(S.BerserkerRage) then return false end
-                WarriorDebug("Berserker Rage for Enraged Regen")
-                return true
+                if self:CastSpell(S.BerserkerRage) then
+                    WarriorDebug("Berserker Rage for Enraged Regen")
+                    return true
+                end
             end
+        end
+    end
+
+    -- Disarm for high melee pressure in Defensive Stance
+    if currentStance == 2 and self:KnowsSpell(S.Disarm) and self:IsUsableSpell(S.Disarm) and
+       self:GetSpellCooldown(S.Disarm) == 0 and canRetry("disarm", 20) and hasTarget and
+       self:IsInMeleeRange("target") and (underHeavyPressure or health < 50) then
+        markAttempt("disarm")
+        if self:CastSpell(S.Disarm, "target") then
+            WarriorDebug("Disarm - reducing enemy physical damage")
+            return true
+        end
+    end
+
+    -- Retaliation for multi-mob melee survival in Battle Stance
+    if currentStance == 1 and enemies >= 2 and health < 75 and canRetry("retaliation", 60) and
+       self:KnowsSpell(S.Retaliation) and self:IsUsableSpell(S.Retaliation) and
+       self:GetSpellCooldown(S.Retaliation) == 0 and hasTarget and self:IsInMeleeRange("target") then
+        markAttempt("retaliation")
+        if self:CastSpell(S.Retaliation) then
+            WarriorDebug("Retaliation - multi-target counter attacks")
+            return true
         end
     end
     
@@ -711,7 +743,8 @@ end
 
 -- ENHANCED: Proactive Spell Reflection system with intelligent spell detection
 function AC:UseEnhancedSpellReflection()
-    if not self:KnowsSpell(S.SpellReflection) or self:GetSpellCooldown(S.SpellReflection) > 0 then
+    if not self:KnowsSpell(S.SpellReflection) or self:GetSpellCooldown(S.SpellReflection) > 0 or
+       not self:IsUsableSpell(S.SpellReflection) then
         return false
     end
     
@@ -1438,6 +1471,10 @@ function AC:TryCharge()
 
     -- Non-Warbringer warriors must be in Battle Stance before Charge range checks are reliable.
     if not hasWarbringer and currentStance ~= 1 then
+        -- Avoid stance-dancing out of combat if already in melee or far out of interact distance
+        if self:IsInMeleeRange("target") or not CheckInteractDistance("target", 4) then
+            return false
+        end
         if self:ForceBattleStance() then
             WarriorDebug("Charge setup: switching to Battle Stance")
             return true
@@ -1669,7 +1706,6 @@ end
 function AC:ShouldMaintainProtectionThunderClap()
     if not self:KnowsSpell(S.ThunderClap) or not self:IsUsableSpell(S.ThunderClap) then return false end
     if self:GetSpellCooldown(S.ThunderClap) > 0 then return false end
-    if UnitPower("player", 1) < 20 then return false end
     if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then return false end
     if not UnitAffectingCombat("target") then return false end
     if not self:IsInMeleeRange("target", true) then return false end
@@ -1942,9 +1978,20 @@ function AC:ProtectionWarriorRotation()
         if not hasTarget then return false end
     end
 
-    -- Intervene disabled; use Warbringer Charge as the primary combat gap closer.
+    -- Warbringer Charge as primary combat gap closer
     if hasTarget and level >= 4 and self:TryProtectionWarbringerCharge("target") then
         return true
+    end
+
+    -- Heroic Throw if target is distant and Charge cannot be used
+    if inCombat and hasTarget and not self:IsInMeleeRange("target", true) and
+       self:IsInHeroicThrowRange("target") and self:IsUsableSpell(S.HeroicThrow) and
+       self:GetSpellCooldown(S.HeroicThrow) == 0 then
+        if self:CastSpell(S.HeroicThrow, "target") then
+            self:MarkAsOurTarget(UnitGUID("target"))
+            WarriorDebug("Prot: Heroic Throw on distant target")
+            return true
+        end
     end
 
     if inCombat and not largeGroupMode and hasTarget and not self:IsInMeleeRange("target", true) then
@@ -1993,16 +2040,15 @@ function AC:ProtectionWarriorRotation()
             rage = UnitPower("player", 1)
         end
         
-        -- Use Berserker Rage for fear/charm breaks or controlled rage generation.
-        -- Keep this constrained so it doesn't preempt core threat buttons on normal pulls.
-        local needsEnrageSetup = health < 35 and self:KnowsSpell(S.EnragedRegeneration) and self:GetSpellCooldown(S.EnragedRegeneration) == 0
+        -- Use Berserker Rage only if already in Berserker Stance (cannot cast in Defensive Stance in 3.3.5a)
         local needsFearBreak = UnitIsFeared("player") or UnitIsCharmed("player")
-        if self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 and
-           (needsFearBreak or (rage < 30 and not self:HasBuff("player", S.BloodRage)) or needsEnrageSetup) then
-            if not self:CastSpell(S.BerserkerRage) then return false end
-            WarriorDebug("Prot: Berserker Rage (offensive enrage)")
-            if needsFearBreak then
-                return true
+        if currentStance == 3 and self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 and
+           (needsFearBreak or (rage < 30 and not self:HasBuff("player", S.BloodRage))) then
+            if self:CastSpell(S.BerserkerRage) then
+                WarriorDebug("Prot: Berserker Rage")
+                if needsFearBreak then
+                    return true
+                end
             end
         end
         
@@ -2017,9 +2063,11 @@ function AC:ProtectionWarriorRotation()
         -- Victory Rush for free healing
         if self:TryVictoryRush() then return true end
 
-        -- Maintain the selected raid buff before ordinary threat abilities.
-        -- This runs only when the shout is missing or within its refresh window.
-        if self:TryMaintainWarriorShout("Protection", "Prot") then return true end
+        -- Maintain shout only when core threat is established or when rage permits
+        local hasActiveShout = self:HasBuff("player", S.CommandingShout) or self:HasBuff("player", S.BattleShout)
+        if (hasActiveShout or rage >= 30 or not targetInCombat) and self:TryMaintainWarriorShout("Protection", "Prot") then
+            return true
+        end
 
         -- *** HIGH PRIORITY AoE ABILITIES (only if we have melee targets) ***
         -- INTEGRATION: Use enhanced enemy location detection for better AoE decisions
@@ -2043,14 +2091,13 @@ function AC:ProtectionWarriorRotation()
             -- Thunder Clap FIRST (highest priority for initial AoE threat)
             -- FIXED: Only use Thunderclap when in proper melee range, not just when enemies are detectable
             local canUseTC = self:IsUsableSpell(S.ThunderClap)
-            local hasRage = rage >= 20
             local notThrottled = Throttle("ProtTCAoE", 0.5)
             local inRange = self:ThunderClapInRange()
             local hasTCReach = self:HasEnemyInThunderClapReach(20)
             local notOnCD = self:GetSpellCooldown(S.ThunderClap) == 0
             local delayForCharge = self:ShouldDelayProtectionThunderClapAfterCharge()
             
-            if canUseTC and hasRage and notThrottled and inRange and hasTCReach and notOnCD and not delayForCharge and targetInCombat then 
+            if canUseTC and notThrottled and inRange and hasTCReach and notOnCD and not delayForCharge and targetInCombat then 
                 if not self:CastSpell(S.ThunderClap) then return false end
                 self:MarkAsOurTarget(UnitGUID("target"))
                 WarriorDebug("Prot: Thunder Clap (AoE threat priority)")
@@ -2060,7 +2107,7 @@ function AC:ProtectionWarriorRotation()
                 local spellExists = GetSpellInfo(S.ThunderClap) ~= nil
                 local spellKnown = self:KnowsSpell(S.ThunderClap)
                 local cooldownTime = self:GetSpellCooldown(S.ThunderClap)
-                WarriorDebug("TC blocked: usable=" .. (canUseTC and "Y" or "N") .. " rage=" .. (hasRage and "Y" or "N") .. 
+                WarriorDebug("TC blocked: usable=" .. (canUseTC and "Y" or "N") .. 
                            " throttle=" .. (notThrottled and "Y" or "N") .. " range=" .. (inRange and "Y" or "N") ..
                            " reach=" .. (hasTCReach and "Y" or "N") ..
                            " cd=" .. (notOnCD and "Y" or "N") .. " chargeDelay=" .. (delayForCharge and "Y" or "N") .. 
@@ -2075,25 +2122,27 @@ function AC:ProtectionWarriorRotation()
 
         local targetHP = self:GetTargetHealthPercent("target")
 
-        -- Shield Block boosts Shield Slam damage/threat; don't let it consume the rotation tick.
-        if self:IsUsableSpell(S.ShieldBlock) and rage >= 10 and self:IsUsableSpell(S.ShieldSlam) and
+        -- Shield Block boosts Shield Slam damage/threat; don't let it consume the rotation tick or fail the cycle.
+        if self:IsUsableSpell(S.ShieldBlock) and self:IsUsableSpell(S.ShieldSlam) and
            self:GetSpellCooldown(S.ShieldBlock) == 0 and self:GetSpellCooldown(S.ShieldSlam) == 0 and
            Throttle("ShieldBlockProt", 5) then 
-            if not self:CastSpell(S.ShieldBlock) then return false end
-            WarriorDebug("Prot: Shield Block")
+            if self:CastSpell(S.ShieldBlock) then
+                WarriorDebug("Prot: Shield Block")
+            end
         end
         
-        -- Shield Slam (high threat) - Mark target as ours
-        if self:IsUsableSpell(S.ShieldSlam) and rage >= 20 then
+        -- Shield Slam (high threat) - Mark target as ours (free and 0-rage on Sword and Board proc)
+        local hasSwordAndBoard = self:HasBuff("player", S.SwordAndBoard) or self:HasBuff("player", "Sword and Board")
+        if self:IsUsableSpell(S.ShieldSlam) and (hasSwordAndBoard or rage >= 15) then
             if self:CastSpell(S.ShieldSlam, "target") then
                 self:MarkAsOurTarget(UnitGUID("target"))
-                WarriorDebug("Prot: Shield Slam")
+                WarriorDebug("Prot: Shield Slam" .. (hasSwordAndBoard and " (Sword and Board free)" or ""))
                 return true
             end
         end
         
         -- Revenge (high threat, low cost) - Mark target as ours
-        if self:IsUsableSpell(S.Revenge) and rage >= 5 then 
+        if self:IsUsableSpell(S.Revenge) then 
             if self:CastSpell(S.Revenge, "target") then
                 self:MarkAsOurTarget(UnitGUID("target"))
                 WarriorDebug("Prot: Revenge")
@@ -2135,13 +2184,13 @@ function AC:ProtectionWarriorRotation()
         end
         
         -- Devastate/Sunder - Mark target as ours
-        if self:KnowsSpell(S.Devastate) and self:IsUsableSpell(S.Devastate) and rage >= 15 then
+        if self:KnowsSpell(S.Devastate) and self:IsUsableSpell(S.Devastate) then
             if self:CastSpell(S.Devastate, "target") then
                 self:MarkAsOurTarget(UnitGUID("target"))
                 WarriorDebug("Prot: Devastate")
                 return true
             end
-        elseif self:IsUsableSpell(S.SunderArmor) and rage >= 15 then 
+        elseif self:IsUsableSpell(S.SunderArmor) then 
             local _, _, _, sunderCount = UnitDebuff("target", S.SunderArmor)
             if ((sunderCount or 0) < 5 or self:DebuffTimeRemaining("target", S.SunderArmor) < 5) then
                 if self:CastSpell(S.SunderArmor, "target") then
@@ -2334,14 +2383,14 @@ function AC:ArmsWarriorRotation()
             rage = UnitPower("player", 1)
         end
         
-        -- Berserker Rage for fear/charm or rage
+        -- Berserker Rage for fear/charm or rage (only if in Berserker Stance in 3.3.5a)
         local needsFearBreak = UnitIsFeared("player") or UnitIsCharmed("player")
-        if (needsFearBreak or (rage < 30 and GetSpellCooldown(S.BerserkerRage) == 0)) and 
-           self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 then 
-            if not self:CastSpell(S.BerserkerRage) then return false end
-            WarriorDebug("Arms: Berserker Rage")
-            if needsFearBreak then
-                return true
+        if currentStance == 3 and self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 then 
+            if self:CastSpell(S.BerserkerRage) then
+                WarriorDebug("Arms: Berserker Rage")
+                if needsFearBreak then
+                    return true
+                end
             end
         end
         
@@ -2412,24 +2461,23 @@ function AC:ArmsWarriorRotation()
             end
         end
         
-        -- PRIORITY 1: Rend enables Taste for Blood. Refresh very late to avoid wasting proc ticks.
-        if rendRemaining <= 0.3 and self:IsUsableSpell(S.Rend) and rage >= 10 and Throttle("ArmsRendRefresh", 1.0) then
+        -- PRIORITY 1: Rend enables Taste for Blood. Refresh when <= 2.0s to avoid losing proc ticks.
+        if rendRemaining <= 2.0 and self:IsUsableSpell(S.Rend) and rage >= 10 then
             if self:CastSpell(S.Rend, "target") then
                 WarriorDebug("Arms: Rend applied/refreshed")
                 return true
             end
         end
 
-        -- Proc reliability: consume Overpower/Execute procs quickly to avoid waste.
-        if overpowerExpiring and self:CastSpell(S.Overpower, "target") then
-            WarriorDebug("Arms: Overpower (expiring Taste for Blood)")
+        -- Overpower takes priority (5 rage, +50% crit chance) over Sudden Death Execute
+        if (overpowerExpiring or (overpowerReady and rage >= 5)) and self:CastSpell(S.Overpower, "target") then
+            WarriorDebug("Arms: Overpower (" .. (overpowerExpiring and "expiring Taste for Blood" or (hasTaste and "Taste for Blood" or "usable proc")) .. ")")
             return true
         end
 
         if suddenDeathReady and Throttle("ArmsSDExecuteFast", 0.25) then
-            local holdForOverpower = overpowerReady and rage < 20
             local holdForMS = msCooldown == 0 and rage < 30
-            if not holdForOverpower and not holdForMS then
+            if not holdForMS then
                 if self:CastSpell(S.Execute, "target") then
                     WarriorDebug("Arms: Execute (Sudden Death)")
                     return true
@@ -2437,11 +2485,6 @@ function AC:ArmsWarriorRotation()
             end
         elseif suddenDeathProc and rage < 15 and Throttle("ArmsSuddenDeathPool", 3.0) then
             WarriorDebug("Arms: Pooling rage for Sudden Death (" .. rage .. ")")
-        end
-
-        if overpowerReady and rage >= 5 and self:CastSpell(S.Overpower, "target") then
-            WarriorDebug("Arms: Overpower (" .. (hasTaste and "Taste for Blood" or "usable proc") .. ")")
-            return true
         end
 
         -- Boss utility: maintain armor reduction early when no equivalent debuff is present.
@@ -2462,16 +2505,16 @@ function AC:ArmsWarriorRotation()
             end
         end
 
-        -- Sweeping Strikes before Arms cleave burst.
+        -- Sweeping Strikes before Arms cleave burst (off-GCD).
         if sweepingReady and Throttle("ArmsSweepingStrikes", 0.5) then
-            if not self:CastSpell(S.SweepingStrikes) then return false end
-            WarriorDebug("Arms: Sweeping Strikes")
-            return true
+            if self:CastSpell(S.SweepingStrikes) then
+                WarriorDebug("Arms: Sweeping Strikes")
+            end
         end
 
         -- Cleave/AoE support. Bladestorm is strongest after Rend is secure and no Overpower is expiring.
         if isCleaveContext and self:IsInMeleeRange("target") then
-            if self:KnowsSpell(S.ThunderClap) and self:IsUsableSpell(S.ThunderClap) and rage >= 20 and
+            if self:KnowsSpell(S.ThunderClap) and self:IsUsableSpell(S.ThunderClap) and
                self:GetSpellCooldown(S.ThunderClap) == 0 and self:ThunderClapInRange() and
                self:HasEnemyInThunderClapReach(20) and
                (not overpowerExpiring) and Throttle("ArmsThunderClap", 0.5) then
@@ -2488,9 +2531,8 @@ function AC:ArmsWarriorRotation()
                 WarriorDebug("Arms: Bladestorm AoE")
                 return true
             end
-            if ShouldQueueRageDump(rage, {self:GetSpellCooldown(S.MortalStrike), self:GetSpellCooldown(S.Overpower)}, 20)
-               and QueueOnNextSwing(S.Cleave, "Arms: Cleave AoE") then
-                return true
+            if ShouldQueueRageDump(rage, {self:GetSpellCooldown(S.MortalStrike), self:GetSpellCooldown(S.Overpower)}, 20) then
+                QueueOnNextSwing(S.Cleave, "Arms: Cleave AoE")
             end
         end
         
@@ -2613,7 +2655,8 @@ function AC:FuryWarriorRotation()
     local bossLikeGroupTarget = inGroup and (preTargetClassification == "worldboss" or
                                 preTargetMaxHealth >= playerMaxHealth * 6)
     local canRendWeave = self:HasTalentByName("Improved Rend", "ImprovedRend") and
-                         self:HasWarriorGlyph("Glyph of Rending")
+                         self:HasWarriorGlyph("Glyph of Rending") and
+                         self:GetWarriorTalentRank("Tactical Mastery", "TacticalMasteryRank") >= 3
     local preBTCooldown = self:GetSpellCooldown(S.Bloodthirst)
     local preWWCooldown = self:GetSpellCooldown(S.Whirlwind)
     local shouldStartRendWeave = canRendWeave and inCombat and hasTarget and level >= 30 and self:KnowsSpell(S.Rend)
@@ -2622,7 +2665,7 @@ function AC:FuryWarriorRotation()
         and (now - self.furyRendWeaveLastAttempt) > 12
         and not self:HasDebuff("target", S.Rend)
         and preTargetHP > 25
-        and rage >= 45
+        and rage >= 15 and rage <= 25
         and preBTCooldown > 2.0 and preWWCooldown > 2.0
         and not self:HasBuff("player", S.SlamEffect)
         and self:IsInMeleeRange("target")
@@ -2742,22 +2785,26 @@ function AC:FuryWarriorRotation()
         local coreSoon = (btWindow <= 1.5) or (wwWindow <= 1.5)
         local hasSlamProc = self:HasBuff("player", S.SlamEffect)
         
-        -- Berserker Rage
+        -- Berserker Rage (off-GCD)
         if self:IsUsableSpell(S.BerserkerRage) and self:GetSpellCooldown(S.BerserkerRage) == 0 then
             if UnitIsFeared("player") or UnitIsCharmed("player")
                or (rage < 25 and not coreSoon and not hasSlamProc) then 
-                if not self:CastSpell(S.BerserkerRage) then return false end
-                WarriorDebug("Fury: Berserker Rage")
-                return true 
+                if self:CastSpell(S.BerserkerRage) then
+                    WarriorDebug("Fury: Berserker Rage")
+                    if UnitIsFeared("player") or UnitIsCharmed("player") then
+                        return true
+                    end
+                end
             end
         end
         
-        -- Blood Rage
+        -- Blood Rage (off-GCD)
         if rage < 20 and not coreSoon and not hasSlamProc
            and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
-            if not self:CastSpell(S.BloodRage) then return false end
-            WarriorDebug("Fury: Blood Rage")
-            return true
+            if self:CastSpell(S.BloodRage) then
+                WarriorDebug("Fury: Blood Rage")
+                rage = UnitPower("player", 1)
+            end
         end
         
         -- Victory Rush
@@ -2785,9 +2832,8 @@ function AC:FuryWarriorRotation()
                     return true
                 end
             end
-            if ShouldQueueRageDump(rage, {self:GetSpellCooldown(S.Bloodthirst), self:GetSpellCooldown(S.Whirlwind)}, 65)
-               and QueueOnNextSwing(S.Cleave, "Fury: Cleave dump") then
-                return true
+            if ShouldQueueRageDump(rage, {self:GetSpellCooldown(S.Bloodthirst), self:GetSpellCooldown(S.Whirlwind)}, 65) then
+                QueueOnNextSwing(S.Cleave, "Fury: Cleave dump")
             end
         end
         
@@ -2938,7 +2984,17 @@ function AC:LevelingWarriorRotation()
 
     self:EnsureMeleeAutoAttack("target")
 
+    -- Defensive abilities, racials, and potions for leveling survival
+    if self:UseWarriorDefensives() then return true end
+
     if not self:IsInMeleeRange("target") then
+        if level >= 20 and self:IsUsableSpell(S.HeroicThrow) and self:GetSpellCooldown(S.HeroicThrow) == 0 and
+           self:IsInHeroicThrowRange("target") then
+            if self:CastSpell(S.HeroicThrow, "target") then
+                WarriorDebug("Leveling mode: Heroic Throw on distant target")
+                return true
+            end
+        end
         if Throttle("LevelingOutOfMelee", 2.0) then
             WarriorDebug("Leveling mode: target out of melee range, waiting for swing or gap closer")
         end
@@ -2950,13 +3006,40 @@ function AC:LevelingWarriorRotation()
     if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then
         if not self:CastSpell(S.BloodRage) then return false end
         WarriorDebug("Leveling mode: Blood Rage")
-        return true
+        rage = UnitPower("player", 1)
     end
 
     if self:TryMaintainWarriorShout("None", "Leveling") then return true end
 
+    -- Victory Rush (free damage after kills)
     if self:TryVictoryRush() then
         return true
+    end
+
+    local enemies = self:GetEnemyCount()
+
+    -- Retaliation on multi-mob leveling pulls
+    if level >= 20 and enemies >= 2 and health < 80 and self:IsUsableSpell(S.Retaliation) and
+       self:GetSpellCooldown(S.Retaliation) == 0 then
+        if self:CastSpell(S.Retaliation) then
+            WarriorDebug("Leveling mode: Retaliation")
+            return true
+        end
+    end
+
+    -- Thunder Clap AoE and attack speed reduction
+    if level >= 6 and (enemies >= 2 or not self:HasDebuff("target", S.ThunderClap)) and
+       self:IsUsableSpell(S.ThunderClap) and self:GetSpellCooldown(S.ThunderClap) == 0 and
+       self:ThunderClapInRange() and Throttle("LevelingTC", 0.5) then
+        if self:CastSpell(S.ThunderClap) then
+            WarriorDebug("Leveling mode: Thunder Clap")
+            return true
+        end
+    end
+
+    -- Cleave on multi-mob pulls
+    if level >= 20 and enemies >= 2 and rage >= 25 then
+        QueueOnNextSwing(S.Cleave, "Leveling mode: Cleave AoE")
     end
 
     local targetHP = self:GetTargetHealthPercent("target")
@@ -2980,7 +3063,9 @@ function AC:LevelingWarriorRotation()
         return true
     end
 
-    if ShouldQueueRageDump(rage, nil, 35) and QueueOnNextSwing(S.HeroicStrike, "Leveling mode: Heroic Strike dump") then
+    -- Heroic Strike: queue aggressively at low levels (levels 1-9) when it is our only attack
+    local dumpThreshold = (level < 10) and 15 or 35
+    if ShouldQueueRageDump(rage, nil, dumpThreshold) and QueueOnNextSwing(S.HeroicStrike, "Leveling mode: Heroic Strike dump") then
         return true
     end
 

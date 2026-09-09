@@ -48,6 +48,7 @@ local S = { -- Spells
     SurvivalInstincts = "Survival Instincts",
     Lacerate = "Lacerate", 
     MangleBear = "Mangle (Bear)",
+    FeralChargeBear = "Feral Charge - Bear",
 
     -- Restoration
     TreeOfLife = "Tree of Life", 
@@ -455,16 +456,67 @@ function AC:GetComboPoints()
     return GetComboPoints("player", "target") 
 end
 
--- RESEARCH-BASED: Check if we're behind target (for Shred priority)
+-- Helper function to check if behind target (for Shred/Ravage priority)
 function AC:IsBehindTarget()
     if not UnitExists("target") then return false end
-    -- There is no reliable stock 3.3.5 API for behind checks.
-    -- Use Shred usability as a practical WotLK-safe proxy for "behind enough".
     if not self:IsInMeleeRange("target") then return false end
-    return self:IsUsableSpell(S.Shred)
+
+    -- Use facing check if provided by client/server extension
+    if UnitIsBehind then
+        local ok, behind = pcall(UnitIsBehind, "player", "target")
+        if ok and behind ~= nil then return behind end
+    end
+
+    -- Target of target check: if target is attacking tank/ally, druid is behind/flanking
+    if UnitExists("targettarget") and not UnitIsUnit("targettarget", "player") then
+        return true
+    end
+
+    -- If target is CC'd or stunned, druid can position behind
+    local ccDebuffs = {
+        "Pounce Bleed", "Pounce", "Bash", "Maim", "Cheap Shot", "Kidney Shot", "Gouge", "Blind",
+        "Sap", "Hammer of Justice", "War Stomp", "Freezing Trap"
+    }
+    for _, debuff in ipairs(ccDebuffs) do
+        if self:HasDebuff("target", debuff) then
+            return true
+        end
+    end
+
+    -- In group/raid when target has no explicit target yet, assume behind
+    if IsDruidInGroup() and not UnitExists("targettarget") then
+        return true
+    end
+
+    return false
 end
 
 AC.DruidIsBehindTarget = AC.IsBehindTarget
+
+function AC:HasDruidPlayerDebuff(unit, debuffName)
+    unit = unit or "target"
+    for index = 1, 40 do
+        local name, _, _, count, _, _, expires, unitCaster = UnitDebuff(unit, index)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or not unitCaster) then
+            local timeLeft = (expires and expires > 0) and (expires - GetTime()) or 999
+            return true, count or 1, timeLeft
+        end
+    end
+    return false, 0, 0
+end
+
+function AC:DruidPlayerDebuffTimeRemaining(unit, debuffName)
+    unit = unit or "target"
+    for index = 1, 40 do
+        local name, _, _, count, _, _, expires, unitCaster = UnitDebuff(unit, index)
+        if not name then break end
+        if name == debuffName and (unitCaster == "player" or not unitCaster) then
+            return (expires and expires > 0) and (expires - GetTime()) or 999
+        end
+    end
+    return 0
+end
 
 -- RESEARCH-BASED: Fast dying mob check (affects DoT application)
 function AC:IsFastDyingMob(unit)
@@ -606,8 +658,8 @@ function AC:UseDruidOffensives(spec, form)
             return true
         end
         
-        -- RESEARCH: Starfall on cooldown outside of eclipse
-        if self:IsUsableSpell(S.Starfall) and self:GetSpellCooldown(S.Starfall) == 0 and Throttle("Starfall", 90) then
+        -- RESEARCH: Starfall on cooldown outside of eclipse (Throttle 2s to support Glyph of Starfall 60s CD)
+        if self:IsUsableSpell(S.Starfall) and self:GetSpellCooldown(S.Starfall) == 0 and Throttle("Starfall", 2) then
             if not self:CastSpell(S.Starfall, "player") then return false end
             DruidDebug("Starfall - burst")
             return true
@@ -616,25 +668,23 @@ function AC:UseDruidOffensives(spec, form)
     
     -- Feral Cat
     if form == AC.DruidForms.CAT then
-        -- RESEARCH: Berserk is the most powerful cooldown (15 seconds, 50% energy cost reduction)
-        if self:IsUsableSpell(S.Berserk) and self:GetSpellCooldown(S.Berserk) == 0 then
-            local tigersFuryCD = self:GetSpellCooldown(S.TigersFury)
-            -- Use when Tiger's Fury has >15s cooldown remaining.
-            if (not self:KnowsSpell(S.TigersFury) or tigersFuryCD > 15) and Throttle("Berserk", 3) then
-                if not self:CastSpell(S.Berserk, "player") then return false end
-                DruidDebug("Berserk - burst")
-                if self.UseTrinkets then self:UseTrinkets() end
+        local hasBerserkBuff = self:HasBuff("player", S.Berserk)
+        local catEnergy = UnitPower("player", 3)
+
+        -- Tiger's Fury: controlled energy injection (cannot be used while Berserk is active)
+        if not hasBerserkBuff and catEnergy <= 35 and self:IsUsableSpell(S.TigersFury)
+           and self:GetSpellCooldown(S.TigersFury) == 0 and Throttle("TigersFury", 2.0) then
+            if self:CastSpell(S.TigersFury, "player") then
+                DruidDebug("Tiger's Fury (energy regen + damage buff)")
                 return true
             end
         end
-        
-        -- RESEARCH: Tiger's Fury as controlled energy injection (avoid low-value spam attempts).
-        local catEnergy = UnitPower("player", 3)
-        local catCP = self:GetComboPoints()
-        if catEnergy <= 30 and self:IsUsableSpell(S.TigersFury)
-           and self:GetSpellCooldown(S.TigersFury) == 0 and Throttle("TigersFury", 8.0) then
-            if not self:CastSpell(S.TigersFury, "player") then return false end
-            DruidDebug("Tiger's Fury (energy regen)")
+
+        -- RESEARCH: Berserk (15 seconds, 50% energy cost reduction)
+        if self:IsUsableSpell(S.Berserk) and self:GetSpellCooldown(S.Berserk) == 0 and Throttle("Berserk", 3) then
+            if not self:CastSpell(S.Berserk, "player") then return false end
+            DruidDebug("Berserk - burst")
+            if self.UseTrinkets then self:UseTrinkets() end
             return true
         end
     end
@@ -894,8 +944,8 @@ function AC:BalanceDruidRotation()
             return true
         end
 
-        -- Typhoon before committing to Hurricane's channel.
-        if self:IsUsableSpell(S.Typhoon) and self:GetSpellCooldown(S.Typhoon) == 0 and self:IsInMeleeRange("target") then
+        -- Typhoon before committing to Hurricane's channel (30yd frontal cone).
+        if self:IsUsableSpell(S.Typhoon) and self:GetSpellCooldown(S.Typhoon) == 0 and CheckInteractDistance("target", 4) then
             if not self:CastSpell(S.Typhoon, "player") then return false end
             DruidDebug("Balance: Typhoon")
             return true
@@ -942,12 +992,20 @@ function AC:BalanceDruidRotation()
     end
     
     local function shouldRefreshBalanceDot(debuffName)
-        if not self:HasDebuff("target", debuffName) then
+        if not self:HasDruidPlayerDebuff("target", debuffName) then
             return true -- Missing DoT
         end
 
         -- WotLK DoTs do not have Pandemic; avoid clipping active ticks.
-        return self:DebuffTimeRemaining("target", debuffName) < 0.5
+        return self:DruidPlayerDebuffTimeRemaining("target", debuffName) < 0.5
+    end
+
+    -- Clearcasting proc: Starfire is highest DPE nuke outside of Solar Eclipse
+    if self:HasOmenOfClarity() and not hasSolarEclipse and self:IsUsableSpell(S.Starfire) and self:GetSpellCooldown(S.Starfire) == 0 and manaPercent > 10 then
+        if self:CastSpell(S.Starfire, "target") then
+            DruidDebug("Balance: Starfire (Clearcasting proc)")
+            return true
+        end
     end
 
     if not isFastDying then
@@ -1038,11 +1096,24 @@ function AC:FeralCatDpsRotation()
     -- Offensive cooldowns are top priority for Cat when the target is worth it.
     if self:UseDruidOffensives("Feral", currentForm) then return true end
 
-    -- Omen of Clarity should be spent on Shred when position allows.
-    if hasOOC and cp < 5 and self:IsUsableSpell(S.Shred) then
-        if not self:CastSpell(S.Shred, "target") then return false end
-        DruidDebug("Cat: Shred (Clearcasting)")
-        return true
+    -- Omen of Clarity should be spent on Shred when behind, or Mangle/Claw when in front.
+    if hasOOC and cp < 5 then
+        if self:IsBehindTarget() and self:IsUsableSpell(S.Shred) then
+            if self:CastSpell(S.Shred, "target") then
+                DruidDebug("Cat: Shred (Clearcasting)")
+                return true
+            end
+        elseif self:IsUsableSpell(S.MangleCat) then
+            if self:CastSpell(S.MangleCat, "target") then
+                DruidDebug("Cat: Mangle (Clearcasting)")
+                return true
+            end
+        elseif self:IsUsableSpell(S.Claw) then
+            if self:CastSpell(S.Claw, "target") then
+                DruidDebug("Cat: Claw (Clearcasting)")
+                return true
+            end
+        end
     end
     
     -- RESEARCH PRIORITY 1: Faerie Fire (Feral) - armor reduction
@@ -1100,7 +1171,7 @@ function AC:FeralCatDpsRotation()
     
     -- Rip: WotLK has no Pandemic, so do not clip active ticks.
     if cp >= 5 and not isFastDying and targetHP > 25 then
-        local ripTime = self:DebuffTimeRemaining("target", S.Rip)
+        local ripTime = self:DruidPlayerDebuffTimeRemaining("target", S.Rip)
         local ripCost = hasOOC and 0 or 30
 
         if ripTime < 0.5 and energy >= ripCost and self:IsUsableSpell(S.Rip) then
@@ -1113,7 +1184,7 @@ function AC:FeralCatDpsRotation()
     -- RESEARCH PRIORITY 4: Ferocious Bite (5 CP, when DoTs/SR are maintained)
     if cp >= 5 and energy >= 35 and self:IsUsableSpell(S.FerociousBite) then
         local srTime = self:BuffTimeRemaining("player", S.SavageRoar)
-        local ripTime = self:DebuffTimeRemaining("target", S.Rip)
+        local ripTime = self:DruidPlayerDebuffTimeRemaining("target", S.Rip)
         
         -- Use FB if target is dying OR only with very healthy SR/Rip windows.
         if isFastDying or targetHP < 25 or (energy >= 55 and srTime > 10 and ripTime > 10) then
@@ -1124,7 +1195,7 @@ function AC:FeralCatDpsRotation()
     end
     
     -- Rake: WotLK has no Pandemic, so do not clip active ticks.
-    local rakeTime = self:DebuffTimeRemaining("target", S.Rake)
+    local rakeTime = self:DruidPlayerDebuffTimeRemaining("target", S.Rake)
     local rakeCost = hasOOC and 0 or 35
     
     if not isFastDying and energy >= rakeCost then
@@ -1137,29 +1208,32 @@ function AC:FeralCatDpsRotation()
     
     -- RESEARCH PRIORITY 7: Build combo points (CP generation)
     if cp < 5 then
-        -- RESEARCH: Shred if available (usability handles positional constraints in WotLK).
-        if self:IsUsableSpell(S.Shred) then
-            if not self:CastSpell(S.Shred, "target") then return false end
-            DruidDebug("Cat: Shred (CP builder)")
-            return true
+        -- Shred if behind target
+        if self:IsBehindTarget() and self:IsUsableSpell(S.Shred) then
+            if self:CastSpell(S.Shred, "target") then
+                DruidDebug("Cat: Shred (CP builder)")
+                return true
+            end
         end
         
-        -- RESEARCH: Mangle if not behind (positioning-independent)
+        -- Mangle if in front or cannot Shred
         if self:IsUsableSpell(S.MangleCat) then
-            if not self:CastSpell(S.MangleCat, "target") then return false end
-            DruidDebug("Cat: Mangle (CP builder)")
-            return true
+            if self:CastSpell(S.MangleCat, "target") then
+                DruidDebug("Cat: Mangle (CP builder)")
+                return true
+            end
         elseif self:IsUsableSpell(S.Claw) then
-            if not self:CastSpell(S.Claw, "target") then return false end
-            DruidDebug("Cat: Claw (CP builder fallback)")
-            return true
+            if self:CastSpell(S.Claw, "target") then
+                DruidDebug("Cat: Claw (CP builder fallback)")
+                return true
+            end
         end
     end
     
     -- Final 5CP anti-idle fallback: only bite when finishers are healthy.
     if cp == 5 and energy >= 60 and self:IsUsableSpell(S.FerociousBite) then
         local srTimeFinal = self:BuffTimeRemaining("player", S.SavageRoar)
-        local ripTimeFinal = self:DebuffTimeRemaining("target", S.Rip)
+        local ripTimeFinal = self:DruidPlayerDebuffTimeRemaining("target", S.Rip)
         if srTimeFinal > 12 and ripTimeFinal > 12 then
             if not self:CastSpell(S.FerociousBite, "target") then return false end
             DruidDebug("Cat: Ferocious Bite (5CP final fallback)")
@@ -1274,6 +1348,15 @@ function AC:FeralBearTankRotation()
     end
 
     if not hasTarget then return false end
+
+    -- Ranged gap closer: Feral Charge - Bear (8-25 yd range)
+    if self:IsUsableSpell(S.FeralChargeBear) and self:GetSpellCooldown(S.FeralChargeBear) == 0 and
+       not self:IsInMeleeRange("target") and CheckInteractDistance("target", 4) and rage >= 5 then
+        if self:CastSpell(S.FeralChargeBear, "target") then
+            DruidDebug("Bear: Feral Charge (gap closer)")
+            return true
+        end
+    end
 
     -- Queue Maul proactively since it is an on-next-swing attack, not a normal GCD spender.
     if self:IsUsableSpell(S.Maul) and not IsCurrentSpell(S.Maul) then
@@ -1400,8 +1483,8 @@ function AC:FeralBearTankRotation()
     
     -- EPIC PRIORITY 5: Advanced Lacerate stacking with safe refresh timing
     if self:IsUsableSpell(S.Lacerate) and rage >= 13 then
-        local _, lacStacks = self:HasDebuff("target", S.Lacerate)
-        local lacTimeRemaining = self:DebuffTimeRemaining("target", S.Lacerate)
+        local _, lacStacks = self:HasDruidPlayerDebuff("target", S.Lacerate)
+        local lacTimeRemaining = self:DruidPlayerDebuffTimeRemaining("target", S.Lacerate)
         
         -- EPIC LACERATE LOGIC:
         -- 1. Build to 5 stacks for maximum DoT damage
@@ -1411,6 +1494,21 @@ function AC:FeralBearTankRotation()
             if not self:CastSpell(S.Lacerate, "target") then return false end
             DruidDebug("EPIC LACERATE: Stack " .. ((lacStacks or 0) + 1) .. "/5 (time: "..string.format("%.1f", lacTimeRemaining)..")")
             return true
+        end
+    end
+
+    -- Single-target GCD filler: do not idle when rage is available
+    if enemies < 3 and rage >= 30 then
+        if self:IsUsableSpell(S.Lacerate) then
+            if self:CastSpell(S.Lacerate, "target") then
+                DruidDebug("Bear: Lacerate (single-target filler)")
+                return true
+            end
+        elseif self:IsUsableSpell(S.SwipeBear) then
+            if self:CastSpell(S.SwipeBear, "player") then
+                DruidDebug("Bear: Swipe (single-target filler)")
+                return true
+            end
         end
     end
     
@@ -2090,8 +2188,8 @@ function AC:CheckDruidGroupBuffs()
 
         local unit = groupUnits[index]
         if UnitExists(unit) and not UnitIsDeadOrGhost(unit) and UnitIsConnected(unit) then
-            local hasMotW = self:HasBuff(unit, S.MarkOfTheWild) or self:HasBuff(unit, S.GiftOfTheWild) or
-                           self:HasBuff(unit, "Blessing of Kings") -- Don't overwrite Kings
+            -- Mark of the Wild / Gift of the Wild stacks with Blessing of Kings in WotLK 3.3.5a
+            local hasMotW = self:HasBuff(unit, S.MarkOfTheWild) or self:HasBuff(unit, S.GiftOfTheWild)
             if not hasMotW and CheckInteractDistance(unit, 4) and self:IsUsableSpell(motwSpell) then
                 local castSpell = motwSpell
                 local castSucceeded = self:CastSpell(castSpell, unit)
@@ -2232,6 +2330,13 @@ function AC:UseRacialsDruid(burst, emergency)
             return true
         end
 
+        if race == "NIGHTELF" and health < 20 and IsDruidInGroup() and self:IsUsableSpell(S.Shadowmeld) then
+            if self:CastSpell(S.Shadowmeld, "player") then
+                DruidDebug("Racial: Shadowmeld (emergency drop)")
+                return true
+            end
+        end
+
         if race == "DWARF" and self:IsUsableSpell(S.Stoneform) and self:GetSpellCooldown(S.Stoneform) == 0 then
             if debuffs and (debuffs.poison or debuffs.disease or debuffs.bleed or health < 35) then
                 if not self:CastSpell(S.Stoneform, "player") then return false end
@@ -2350,18 +2455,17 @@ function AC:DruidRotation()
         -- Travel forms management
         if not hasTarget then
             local moving = self:IsPlayerMoving()
-            if IsSwimming() and currentForm ~= AC.DruidForms.AQUATIC then
-                if self:ShiftToForm(S.AquaticForm) then return true end
-            elseif IsFlyableArea() and moving and currentForm ~= AC.DruidForms.FLIGHT and 
-                   currentForm ~= AC.DruidForms.SWIFT_FLIGHT then
-                local flightForm = self:KnowsSpell(S.SwiftFlightForm) and S.SwiftFlightForm or S.FlightForm
-                if self:ShiftToForm(flightForm) then return true end
-            elseif moving and currentForm ~= AC.DruidForms.TRAVEL and not IsFlyableArea() and not IsSwimming() then
-                if self:ShiftToForm(S.TravelForm) then return true end
-            elseif not moving and (currentForm == AC.DruidForms.TRAVEL or currentForm == AC.DruidForms.FLIGHT or 
-                                  currentForm == AC.DruidForms.SWIFT_FLIGHT or currentForm == AC.DruidForms.AQUATIC) then
-                -- Cancel travel form when stopped
-                if self:ShiftToForm("Caster") then return true end
+            -- Never attempt to shift into travel forms if already mounted, in vehicle, or on taxi
+            if not IsMounted() and not UnitInVehicle("player") and not UnitOnTaxi("player") then
+                if IsSwimming() and currentForm ~= AC.DruidForms.AQUATIC then
+                    if self:ShiftToForm(S.AquaticForm) then return true end
+                elseif IsFlyableArea() and moving and currentForm ~= AC.DruidForms.FLIGHT and 
+                       currentForm ~= AC.DruidForms.SWIFT_FLIGHT then
+                    local flightForm = self:KnowsSpell(S.SwiftFlightForm) and S.SwiftFlightForm or S.FlightForm
+                    if self:ShiftToForm(flightForm) then return true end
+                elseif moving and currentForm ~= AC.DruidForms.TRAVEL and not IsFlyableArea() and not IsSwimming() then
+                    if self:ShiftToForm(S.TravelForm) then return true end
+                end
             end
         end
 
@@ -2408,7 +2512,8 @@ function AC:DruidRotation()
                         local classification = UnitClassification("target")
                         local toughTarget = classification == "elite" or classification == "rareelite" or
                                             classification == "worldboss"
-                        if not toughTarget and self:IsUsableSpell(S.Ravage) then
+                        local behind = self:IsBehindTarget()
+                        if behind and not toughTarget and self:IsUsableSpell(S.Ravage) then
                             if self:CastSpell(S.Ravage, "target") then
                                 DruidDebug("Ravage opener")
                                 return true
@@ -2420,7 +2525,7 @@ function AC:DruidRotation()
                                 return true
                             end
                         end
-                        if toughTarget and self:IsUsableSpell(S.Ravage) then
+                        if behind and toughTarget and self:IsUsableSpell(S.Ravage) then
                             if self:CastSpell(S.Ravage, "target") then
                                 DruidDebug("Ravage opener fallback")
                                 return true

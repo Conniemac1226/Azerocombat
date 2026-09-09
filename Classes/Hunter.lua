@@ -8,6 +8,7 @@ local S = { -- Spells
     MultiShot = "Multi-Shot", KillShot = "Kill Shot", SerpentSting = "Serpent Sting",
     RaptorStrike = "Raptor Strike",
     MongooseBite = "Mongoose Bite", WingClip = "Wing Clip",
+    ConcussiveShot = "Concussive Shot", TranquilizingShot = "Tranquilizing Shot",
     
     -- BM Abilities
     KillCommand = "Kill Command", BestialWrath = "Bestial Wrath", Intimidation = "Intimidation",
@@ -34,6 +35,7 @@ local S = { -- Spells
     -- Pet Abilities (for control)
     PetGrowl = "Growl", PetClaw = "Claw", PetBite = "Bite", PetSmack = "Smack", 
     PetDash = "Dash", PetDive = "Dive", PetCower = "Cower", PetCharge = "Charge",
+    PetHeartOfThePhoenix = "Heart of the Phoenix", PetWolverineBite = "Wolverine Bite",
     
     -- Pet Family Abilities
     PetCallOfTheWild = "Call of the Wild", -- Ferocity pet talent
@@ -188,21 +190,22 @@ function AC:ManagePetDPS()
     
     if not Throttle("PetDPSAbilities", throttleTime) then return false end
     
-    -- Growl autocast is disabled in groups by UpdatePetGrowl(). Do not stop
+    -- Growl autocast is disabled in groups with tanks by UpdatePetGrowl(). Do not stop
     -- all pet damage merely because the pet is high on threat; that heavily
     -- penalizes BM and Cower is primarily a defensive tool in Wrath.
-    local inGroup = IsInGroup() or GetNumRaidMembers() > 0
+    local inGroupWithTank = self:IsInGroupWithTank()
+    local inRaid = GetNumRaidMembers() > 0
+    local isTankedGroup = inRaid or inGroupWithTank
     
     local focus, maxFocus = self:GetPetPower()
     local targetHealth = self:GetTargetHealthPercent("pettarget")
-    local inMelee = CheckInteractDistance("pettarget", 3)
     
-    HunterDebugThrottled("PetDPSCheck", 2.0, "Pet DPS check - Focus: " .. focus .. "/" .. maxFocus .. ", Target HP: " .. targetHealth .. "%, In melee: " .. tostring(inMelee) .. ", BW: " .. tostring(hasBestialWrath))
+    HunterDebugThrottled("PetDPSCheck", 2.0, "Pet DPS check - Focus: " .. focus .. "/" .. maxFocus .. ", Target HP: " .. targetHealth .. "%, BW: " .. tostring(hasBestialWrath))
     
-    -- Solo play: Use Growl aggressively to maintain threat
-    if not inGroup then
+    -- Solo play or group without tank: Use Growl aggressively to maintain threat
+    if not isTankedGroup then
         if self:UsePetAbility(S.PetGrowl, 15) then
-            HunterDebug("Pet using Growl (solo threat generation)")
+            HunterDebug("Pet using Growl (threat generation)")
             return true
         end
     end
@@ -263,8 +266,8 @@ function AC:ManagePetDPS()
         return true
     end
     
-    -- Priority 2: Defensive abilities when pet is tanking (solo play)
-    if not inGroup then
+    -- Priority 2: Defensive abilities when pet is tanking (solo play / no tank)
+    if not isTankedGroup then
         local petHealth = UnitHealth("pet")
         local petMaxHealth = UnitHealthMax("pet")
         local petHealthPercent = (petMaxHealth > 0) and (petHealth / petMaxHealth * 100) or 100
@@ -286,10 +289,10 @@ function AC:ManagePetDPS()
         return true
     end
     
-    -- Priority 3: Movement abilities for gap closing
-    if not inMelee and focus >= 20 then
-        -- Prioritize Charge for threat generation in solo
-        if not inGroup and self:UsePetAbility(S.PetCharge, 25) then
+    -- Priority 3: Movement abilities for gap closing (throttled)
+    if focus >= 20 and Throttle("PetGapCloser", 4.0) then
+        -- Prioritize Charge for threat generation in solo / no-tank
+        if not isTankedGroup and self:UsePetAbility(S.PetCharge, 25) then
             HunterDebug("Pet using Charge (threat + stun)")
             return true
         end
@@ -299,15 +302,16 @@ function AC:ManagePetDPS()
         end
     end
     
-    -- Priority 4: Core damage abilities.
-    -- Do not infer the active ability from the pet family. WotLK pets can
-    -- have different learned action bars, and the action bar is authoritative.
-    local focusThreshold = hasBestialWrath and 20 or 30
+    -- Priority 4: Core damage abilities (Wolverine Bite, Claw, Bite, Smack).
+    -- WotLK pets have different learned action bars; the pet action bar is authoritative.
+    local focusThreshold = hasBestialWrath and 15 or 30
+    local coreAttacks = {S.PetWolverineBite, S.PetClaw, S.PetBite, S.PetSmack}
     
-    if inMelee and focus >= focusThreshold then
-        for _, abilityName in ipairs({S.PetClaw, S.PetBite, S.PetSmack}) do
-            if self:UsePetAbility(abilityName, 25) then
-                HunterDebug("Pet basic attack: " .. abilityName)
+    if focus >= focusThreshold then
+        for _, abilityName in ipairs(coreAttacks) do
+            local cost = (abilityName == S.PetWolverineBite) and 12 or 25
+            if self:UsePetAbility(abilityName, cost) then
+                HunterDebug("Pet attack: " .. abilityName)
                 return true
             end
         end
@@ -327,19 +331,20 @@ function AC:ManagePetDPS()
     -- During Bestial Wrath, dump all focus for maximum damage
     local focusReserve = hasBestialWrath and 0 or (hasSpecialAbility and 20 or 0)
     
-    if inMelee and focus > focusReserve + 25 then
-        -- Use whichever basic attack is actually on the pet bar.
-        for _, abilityName in ipairs({S.PetClaw, S.PetBite, S.PetSmack}) do
-            if self:UsePetAbility(abilityName, 25) then
+    if focus > focusReserve + 25 then
+        for _, abilityName in ipairs(coreAttacks) do
+            local cost = (abilityName == S.PetWolverineBite) and 12 or 25
+            if self:UsePetAbility(abilityName, cost) then
                 return true
             end
         end
     end
     
     -- Emergency focus dump during Bestial Wrath
-    if hasBestialWrath and inMelee and focus > 25 then
-        for _, abilityName in ipairs({S.PetClaw, S.PetBite, S.PetSmack}) do
-            if self:UsePetAbility(abilityName, 25) then
+    if hasBestialWrath and focus > 15 then
+        for _, abilityName in ipairs(coreAttacks) do
+            local cost = (abilityName == S.PetWolverineBite) and 12 or 25
+            if self:UsePetAbility(abilityName, cost) then
                 HunterDebug("BW Focus dump: " .. abilityName)
                 return true
             end
@@ -482,6 +487,66 @@ function AC:UseRacials(offensive, emergency)
     return false
 end
 
+-- Check if unit has debuff, with optional caster filtering to isolate our own DoTs in raids
+function AC:HunterHasDebuff(unit, spellName, onlyPlayer)
+    unit = unit or "target"
+    if not UnitExists(unit) then return false end
+
+    if not onlyPlayer then
+        return self:HasDebuff(unit, spellName)
+    end
+
+    for i = 1, 40 do
+        local name, _, _, count, _, duration, expires, caster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == spellName and (caster == "player" or caster == "pet") then
+            return true, count, duration, expires
+        end
+    end
+    return false
+end
+
+-- Get remaining duration of debuff, with optional caster filtering
+function AC:HunterDebuffTimeRemaining(unit, spellName, onlyPlayer)
+    unit = unit or "target"
+    if not UnitExists(unit) then return 0 end
+
+    if not onlyPlayer then
+        return self:DebuffTimeRemaining(unit, spellName)
+    end
+
+    for i = 1, 40 do
+        local name, _, _, count, _, duration, expires, caster = UnitDebuff(unit, i)
+        if not name then break end
+        if name == spellName and (caster == "player" or caster == "pet") then
+            if expires and expires > 0 then
+                return math.max(0, expires - GetTime())
+            end
+            return 0
+        end
+    end
+    return 0
+end
+
+-- Check if enemy has dispellable Magic or Enrage buff for Tranquilizing Shot
+function AC:HunterTargetHasDispellableBuff(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) or not UnitCanAttack("player", unit) then return false end
+
+    for i = 1, 40 do
+        local name, _, _, _, buffType = UnitBuff(unit, i)
+        if not name then break end
+        if buffType == "Magic" then
+            return true, "Magic: " .. name
+        end
+        local lowerName = name:lower()
+        if lowerName:find("enrage") or lowerName:find("frenzy") or lowerName:find("berserk") then
+            return true, "Enrage: " .. name
+        end
+    end
+    return false
+end
+
 function AC:HunterSpellRangeResult(spellName, unit)
     if not spellName or not unit or not UnitExists(unit) then return nil end
     local ok, result = pcall(IsSpellInRange, spellName, unit)
@@ -588,9 +653,8 @@ end
 
 function AC:GetHunterRangeState(unit)
     unit = unit or "target"
-    -- Favor a valid ranged result when both APIs report a boundary target.
-    -- This is the ordering used by the stable Hunter path and prevents a
-    -- noisy melee range result from trapping the rotation in melee actions.
+    -- In WotLK 3.3.5a, ranged attacks have a 5-yard minimum range and melee has a 5-yard
+    -- maximum range (the classic 5-8y deadzone was eliminated in patch 2.3).
     if self:HunterIsInRangedRange(unit) then
         return "ranged"
     end
@@ -599,9 +663,12 @@ function AC:GetHunterRangeState(unit)
         return "melee"
     end
 
+    -- Close boundary fallback (~10 yards): if neither API gave a definite positive,
+    -- treat as melee so close-range abilities can be checked, falling back to ranged shots
+    -- rather than locking the hunter out in a non-existent deadzone.
     local closeOk, closeResult = pcall(CheckInteractDistance, unit, 3)
     if closeOk and closeResult then
-        return "deadzone"
+        return "melee"
     end
 
     return "outofrange"
@@ -698,10 +765,12 @@ function AC:CalculatePetThreatPriority(target)
     end
     
     -- Distance consideration (closer = higher priority)
-    if CheckInteractDistance(target.unit, 1) then -- Very close
-        priority = priority + 20
-    elseif CheckInteractDistance(target.unit, 2) then -- Close
-        priority = priority + 10
+    if CheckInteractDistance(target.unit, 3) then -- Duel range (~10 yards)
+        priority = priority + 25
+    elseif CheckInteractDistance(target.unit, 2) then -- Trade range (~11 yards)
+        priority = priority + 15
+    elseif CheckInteractDistance(target.unit, 1) then -- Inspect range (~28 yards)
+        priority = priority + 5
     end
     
     return priority
@@ -1071,33 +1140,40 @@ function AC:ManagePet(inCombat)
         return false
     end
 
-    -- Priority 1: Revive dead pet (critical for survival)
-    if petStatus == "dead" and self:KnowsSpell(S.RevivePet) and not self:IsChanneling() then
-        local canRevive = self:HunterSpellAvailable(S.RevivePet) and
-                          IsUsableSpell(S.RevivePet) and not self:IsPlayerMoving()
-        if canRevive and self:ActionThrottle("RevivePetAttempt", 2.0) then
-            HunterDebug("Attempting to revive pet")
-            if self:CastSpell(S.RevivePet, "player") then
-                state.petDeadPending = true
-                return true
+    -- Priority 1: Revive dead pet
+    if petStatus == "dead" and not self:IsChanneling() then
+        -- Ferocity pet talent: Heart of the Phoenix (instant revival)
+        if self:UsePetAbility(S.PetHeartOfThePhoenix) then
+            HunterDebug("Used Heart of the Phoenix (instant revive)")
+            state.petDeadPending = false
+            return true
+        end
+
+        -- Hardcasting Revive Pet takes 10 seconds: only do this out of combat,
+        -- or in combat if feigning death
+        if self:KnowsSpell(S.RevivePet) then
+            local canRevive = self:HunterSpellAvailable(S.RevivePet) and
+                              IsUsableSpell(S.RevivePet) and not self:IsPlayerMoving() and
+                              (not inCombat or self:HasBuff("player", S.FeignDeath))
+            if canRevive and self:ActionThrottle("RevivePetAttempt", 2.0) then
+                HunterDebug("Attempting to revive pet")
+                if self:CastSpell(S.RevivePet, "player") then
+                    state.petDeadPending = true
+                    return true
+                end
+                HunterDebug("Revive Pet failed to start")
+            elseif not canRevive and Throttle("RevivePetBlocked", 3.0) then
+                HunterDebug("Revive Pet blocked - inCombat:" .. tostring(inCombat) .. ", moving:" .. tostring(self:IsPlayerMoving()))
             end
-            HunterDebug("Revive Pet failed to start")
-        elseif not canRevive and Throttle("RevivePetBlocked", 3.0) then
-            HunterDebug("Revive Pet blocked - moving:" .. tostring(self:IsPlayerMoving()) .. ", usable:" .. tostring(IsUsableSpell(S.RevivePet)))
         end
     end
     
     -- Priority 2: Call missing pet
     if petStatus == "nopet" and self:IsUsableSpell(S.CallPet) then
-        -- More lenient conditions for calling pet
         local safeToCall = not self:IsChanneling() and 
                           (not self:IsPlayerMoving() or playerHealth > 60 or not inCombat)
         
         if safeToCall then
-            -- Clear target to avoid interruptions if in danger
-            if inCombat and playerHealth < 50 then
-                ClearTarget()
-            end
             if self:ActionThrottle("CallPetAttempt", 6.0) then
                 HunterDebug("Calling Pet (no pet active)")
                 if self:CastSpell(S.CallPet, "player") then
@@ -1194,25 +1270,23 @@ function AC:UpdatePetGrowl()
         return false 
     end
     
-    local inGroup = IsInGroup()
+    local inGroupWithTank = self:IsInGroupWithTank()
     local inRaid = GetNumRaidMembers() > 0
-    -- Solo play: ALWAYS use Growl for maximum threat
-    if not inGroup and not inRaid then
+    
+    -- If in a raid or in a party WITH a tank: disable Growl to avoid pulling off the tank
+    if inRaid or inGroupWithTank then
+        local changed = self:TogglePetSpell(S.PetGrowl, false)
+        if changed then
+            HunterDebugThrottled("GrowlGroupOff", 5.0, "Tank present: Growl OFF")
+        end
+        return changed
+    else
+        -- Solo play or party WITHOUT a tank (duo leveling, DPS-only group): enable Growl for pet tanking
         if self:TogglePetSpell(S.PetGrowl, true) then
-            HunterDebug("Solo mode: Growl ON for maximum threat")
+            HunterDebugThrottled("GrowlSoloOn", 5.0, "Solo/No-Tank mode: Growl ON for pet threat")
             return true
         end
         return false
-    end
-    
-    -- Group/Raid: disable Growl. Cower is handled as low-health mitigation by
-    -- ManagePetDPS rather than being treated as a threat dump.
-    if inGroup or inRaid then
-        local changed = self:TogglePetSpell(S.PetGrowl, false)
-        if changed then
-            HunterDebugThrottled("GrowlGroupOff", 5.0, "Group mode: Growl OFF")
-        end
-        return changed
     end
     
     return false
@@ -1324,8 +1398,7 @@ function AC:GetOptimalPetStance()
     local playerHealth = self:GetPlayerHealthPercent()
     local hasHostileTarget = UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
     
-    -- At critical health the pet must keep protecting the hunter. Passive
-    -- would stop pressure and can send a solo mob back onto the player.
+    -- At critical health the pet must keep protecting the hunter.
     if playerHealth < 15 then
         HunterDebug("Pet stance logic: Defensive (emergency - low health)")
         return "Defensive"
@@ -1336,25 +1409,9 @@ function AC:GetOptimalPetStance()
         return "Passive" 
     end
     
-    -- Defensive stance conditions (group play)
-    if inCombat and (isInGroup or hasTank) then
-        HunterDebug("Pet stance logic: Defensive (in group/raid)")
-        return "Defensive"
-    end
-    
-    if inCombat and hasHostileTarget and playerHealth > 50 then
-        HunterDebug("Pet stance logic: Defensive (in combat with target)")
-        return "Defensive"
-    end
-    
-    -- Aggressive stance conditions (solo play)
-    if not isInGroup and inCombat and playerHealth > 30 then
-        HunterDebug("Pet stance logic: Aggressive (solo combat)")
-        return "Aggressive"
-    end
-    
-    -- Default to Defensive for safety
-    HunterDebug("Pet stance logic: Defensive (default)")
+    -- In combat, Defensive stance is optimal for both group and solo play.
+    -- PetAttack() coordinates targeted attacks while avoiding Aggressive stance's accidental patrol pulling.
+    HunterDebug("Pet stance logic: Defensive")
     return "Defensive"
 end
 
@@ -1715,12 +1772,14 @@ function AC:HunterSpellAvailable(spellName)
         [S.SerpentSting] = 4,
         [S.ArcaneShot] = 6,
         [S.HuntersMark] = 6,
+        [S.ConcussiveShot] = 8,
         [S.WingClip] = 12,
         [S.MendPet] = 12,
         [S.MultiShot] = 18,
         [S.FeignDeath] = 30,
         [S.Volley] = 40,
         [S.SteadyShot] = 50,
+        [S.TranquilizingShot] = 60,
         [S.KillCommand] = 66,
         [S.KillShot] = 71,
         [S.ExplosiveShot] = 60,
@@ -2027,14 +2086,41 @@ function AC:HunterCanUseKillCommand()
     return self:HunterCanCast(S.KillCommand, "target", { requirePet = true })
 end
 
+function AC:GetHunterHighestSpellRank(spellName)
+    if not spellName then return nil end
+    local highestRank = nil
+    for tabIndex = 1, GetNumSpellTabs() do
+        local _, _, offset, numSpells = GetSpellTabInfo(tabIndex)
+        for i = offset + 1, offset + numSpells do
+            local name, bookRank = GetSpellName(i, BOOKTYPE_SPELL)
+            if name == spellName and bookRank then
+                local rankNum = tonumber(bookRank:match("(%d+)"))
+                if rankNum and (not highestRank or rankNum > highestRank) then
+                    highestRank = rankNum
+                end
+            end
+        end
+    end
+    return highestRank
+end
+
 function AC:HunterLockAndLoadRank()
     local state = self:InitializeHunterState()
     if not state.lockAndLoadActive then return nil end
 
-    if state.lockAndLoadShots == 0 or state.lockAndLoadShots == 2 then
-        return 4
+    local highestRank = self:GetHunterHighestSpellRank(S.ExplosiveShot)
+    if not highestRank then return nil end
+
+    -- WotLK Lock and Load has 2 charges:
+    -- Shot 0: highest rank
+    -- Shot 1: highest rank - 1 (if learned) to avoid overwriting the DoT tick
+    if state.lockAndLoadShots == 0 then
+        return highestRank
     elseif state.lockAndLoadShots == 1 then
-        return 3
+        if highestRank > 1 and self:GetHunterSpellIndexForRank(S.ExplosiveShot, highestRank - 1) then
+            return highestRank - 1
+        end
+        return highestRank
     end
 
     return nil
@@ -2050,11 +2136,11 @@ function AC:HunterCanFireExplosiveShot(castOpts)
     local now = GetTime()
     local sinceLastES = now - (state.lastExplosiveShotCast or 0)
     local hasLockAndLoad = self:HasBuff("player", S.LockAndLoad)
-    local esRemaining = self:DebuffTimeRemaining("target", S.ExplosiveShot)
+    local esRemaining = self:HunterDebuffTimeRemaining("target", S.ExplosiveShot, true)
 
     if hasLockAndLoad then
-        -- WotLK's 4-3-4 sequence intentionally uses separate ranks so the
-        -- middle shot does not overwrite the first rank's damage-over-time.
+        -- WotLK's downranked sequence intentionally uses separate ranks so the
+        -- second shot does not overwrite the first rank's damage-over-time.
         return self:HunterLockAndLoadRank() ~= nil and sinceLastES >= 1.0
     end
 
@@ -2368,11 +2454,21 @@ function AC:ManageAspects(spec, inCombat, manaPercent)
     end
 
     if bestDpsAspect then
-        -- Stay in Viper while out of combat so it can refill the bar fully.
-        -- Once combat is established, leave Viper above the 70% threshold.
-        if inCombat and self:HasBuff("player", S.AspectViper) and manaPercent > 70 then
+        -- Leave Viper when mana is healthy:
+        -- In combat: threshold is > 70% mana
+        -- Out of combat: threshold is >= 85% mana so hunter does not enter combat with 50% damage reduction
+        local shouldLeaveViper = false
+        if self:HasBuff("player", S.AspectViper) then
+            if inCombat and manaPercent > 70 then
+                shouldLeaveViper = true
+            elseif not inCombat and manaPercent >= 85 then
+                shouldLeaveViper = true
+            end
+        end
+
+        if shouldLeaveViper then
             if self:HunterTryCast(bestDpsAspect, "player") then
-                HunterDebug("Aspect: " .. bestDpsAspect .. " (leave viper)")
+                HunterDebug("Aspect: " .. bestDpsAspect .. " (leave viper, mana " .. string.format("%.0f%%", manaPercent) .. ")")
                 return true
             end
         elseif not self:HasBuff("player", bestDpsAspect) and not self:HasBuff("player", S.AspectViper) then
@@ -2477,8 +2573,8 @@ function AC:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies, inCo
     if not inCombat then return false end
 
     if spec == "Beast Mastery" and (targetIsTough or targetHP > 40) and self:HunterTryCast(S.BestialWrath, "player", { requirePet = true }) then
-        HunterDebug("BM: Bestial Wrath")
-        return true
+        HunterDebug("BM: Bestial Wrath (off-GCD)")
+        -- Off-GCD: do not return true; let rotation immediately cast damage abilities
     end
 
     if (targetIsTough or enemies >= 3) and self:HunterTryCast(S.RapidFire, "player") then
@@ -2505,6 +2601,23 @@ function AC:HunterHandleUtility(spec, petStatus)
     -- Break crowd control as soon as it exists; this is not limited to the
     -- low-health defensive branch.
     if self:UseRacials(false, true) then
+        return true
+    end
+
+    -- Tranquilizing Shot: Dispel Enrage and Magic effects on hostile target
+    if self:HunterSpellAvailable(S.TranquilizingShot) and self:ActionThrottle("HunterTranqShot", 2.0) then
+        local hasDispellable, reason = self:HunterTargetHasDispellableBuff("target")
+        if hasDispellable and self:HunterTryCast(S.TranquilizingShot, "target", { noMelee = true, noDeadzone = true }) then
+            HunterDebug("Tranquilizing Shot (" .. reason .. ")")
+            return true
+        end
+    end
+
+    -- Concussive Shot: Slow fleeing enemies from range
+    if self:IsTargetFleeing("target") and self:HunterSpellAvailable(S.ConcussiveShot) and
+       not self:HasDebuff("target", S.ConcussiveShot) and
+       self:HunterTryCast(S.ConcussiveShot, "target", { noMelee = true, noDeadzone = true }) then
+        HunterDebug("Concussive Shot (fleeing target)")
         return true
     end
 
@@ -2700,7 +2813,7 @@ function AC:HunterBeastMasteryRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    local serpentUp = self:HasDebuff("target", S.SerpentSting)
+    local serpentUp = self:HunterHasDebuff("target", S.SerpentSting, true)
     if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not serpentUp then
         if self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
             HunterDebug("BM: Serpent Sting")
@@ -2737,7 +2850,7 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    local serpentUp = self:HasDebuff("target", S.SerpentSting)
+    local serpentUp = self:HunterHasDebuff("target", S.SerpentSting, true)
     if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not serpentUp and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("MM: Serpent Sting")
         return true
@@ -2754,17 +2867,17 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         return true
     end
 
-    if hasImprovedSteady and chimeraCD <= 1.0 and not self:IsPlayerMoving() then
-        HunterDebugThrottled("MMHoldISSChimera", 1.0, "MM: Holding ISS for Chimera")
-    end
-
     if self:HunterTryCast(S.AimedShot, "target", { noMelee = true, noDeadzone = true, noPlayerCast = true }) then
         HunterDebug(hasImprovedSteady and "MM: Aimed Shot (ISS)" or "MM: Aimed Shot")
         return true
     end
 
-    if hasImprovedSteady and aimedCD <= 1.0 and not self:IsPlayerMoving() then
-        HunterDebugThrottled("MMHoldISSAimed", 1.0, "MM: Holding ISS for Aimed")
+    -- If Improved Steady Shot is active and not moving, hold the proc for upcoming Chimera/Aimed Shot
+    -- if either is coming off cooldown within 1.2s instead of consuming it on a weak Steady Shot or Arcane Shot.
+    local holdForBigShot = hasImprovedSteady and not self:IsPlayerMoving() and (chimeraCD <= 1.2 or aimedCD <= 1.2)
+    if holdForBigShot then
+        HunterDebugThrottled("MMHoldISS", 1.0, "MM: Holding ISS for upcoming Chimera/Aimed Shot")
+        return false
     end
 
     if not isFastDying and (targetIsTough or targetHP > 40) then
@@ -2773,9 +2886,15 @@ function AC:HunterMarksmanshipRotation(targetHP, targetIsTough, isFastDying, man
         end
     end
 
-    if targetIsTough and self:HunterTryCast(S.ReadinessSpell, "player") then
-        HunterDebug("MM: Readiness")
-        return true
+    -- Readiness: Use only when Rapid Fire is on cooldown (and the Rapid Fire buff is NOT currently active),
+    -- and Chimera Shot and Aimed Shot are also on cooldown, on tough targets.
+    local rapidFireCD = self:HunterSpellAvailable(S.RapidFire) and self:GetSpellCooldown(S.RapidFire) or 0
+    local hasRapidFireBuff = self:HasBuff("player", S.RapidFire)
+    if targetIsTough and not hasRapidFireBuff and rapidFireCD > 10 and chimeraCD > 3 and aimedCD > 3 then
+        if self:HunterTryCast(S.ReadinessSpell, "player") then
+            HunterDebug("MM: Readiness (major cooldowns reset)")
+            return true
+        end
     end
 
     if hasImprovedSteady and shouldUseArcane and self:HunterManaGate(manaPercent, 25) and chimeraCD > 1.0 and aimedCD > 1.0 and self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
@@ -2813,7 +2932,7 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
         return true
     end
 
-    local serpentUp = self:HasDebuff("target", S.SerpentSting)
+    local serpentUp = self:HunterHasDebuff("target", S.SerpentSting, true)
     local hasLockAndLoad = self:UpdateSurvivalProcState()
 
     local lockAndLoadRank = hasLockAndLoad and self:HunterLockAndLoadRank() or nil
@@ -2824,6 +2943,14 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
             HunterDebug(hasLockAndLoad and "SV: Explosive Shot (LnL)" or "SV: Explosive Shot")
             return true
         end
+    end
+
+    -- Arcane Shot: used during leveling before Explosive Shot is learned at level 60
+    -- (In WotLK, Explosive Shot and Arcane Shot share a cooldown; only cast if Explosive Shot is unavailable)
+    if not self:HunterSpellAvailable(S.ExplosiveShot) and self:HunterManaGate(manaPercent, 25) and
+       self:HunterTryCast(S.ArcaneShot, "target", { noMelee = true, noDeadzone = true }) then
+        HunterDebug("SV: Arcane Shot (pre-60)")
+        return true
     end
 
     if not isFastDying and (targetIsTough or targetHP > 40) then
@@ -2853,8 +2980,12 @@ function AC:HunterSurvivalRotation(targetHP, targetIsTough, isFastDying, manaPer
         return true
     end
 
-    if self:ShouldUseMultiTarget(2, self:GetEffectiveEnemyCount(self:GetEnemyCount())) and self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
-        HunterDebug("SV: Multi-Shot")
+    -- If Aimed Shot is untalented or on multiple enemies, use Multi-Shot as instant physical filler
+    local hasAimedShot = self:HunterSpellAvailable(S.AimedShot)
+    if (not hasAimedShot or self:ShouldUseMultiTarget(2, self:GetEffectiveEnemyCount(self:GetEnemyCount()))) and
+       self:HunterManaGate(manaPercent, 28) and
+       self:HunterTryCast(S.MultiShot, "target", { noMelee = true, noDeadzone = true }) then
+        HunterDebug(hasAimedShot and "SV: Multi-Shot (AoE)" or "SV: Multi-Shot (filler)")
         return true
     end
 
@@ -2874,8 +3005,7 @@ function AC:HunterLevelingRotation(level, targetHP, targetIsTough, isFastDying, 
     end
 
     if targetHP > 40 and self:HunterTryCast(S.BestialWrath, "player", { requirePet = true }) then
-        HunterDebug("Lvl: Bestial Wrath")
-        return true
+        HunterDebug("Lvl: Bestial Wrath (off-GCD)")
     end
 
     if targetHP < 20 and level >= 71 and self:HunterTryCast(S.KillShot, "target", { noMelee = true, noDeadzone = true }) then
@@ -2888,7 +3018,7 @@ function AC:HunterLevelingRotation(level, targetHP, targetIsTough, isFastDying, 
         return true
     end
 
-    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not self:HasDebuff("target", S.SerpentSting) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
+    if self:HunterShouldUseSerpentSting("target", targetHP, targetIsTough, isFastDying) and not self:HunterHasDebuff("target", S.SerpentSting, true) and self:HunterTryCast(S.SerpentSting, "target", { noMelee = true, noDeadzone = true }) then
         HunterDebug("Lvl: Serpent Sting")
         return true
     end
@@ -3102,10 +3232,7 @@ function AC:CheckHunterBuffs(spec)
     
     if self:ManagePet(false) then return true end
 
-    if self:HunterKnowsSpell(S.TrueshotAura) and not self:HasBuff("player", S.TrueshotAura) and self:HunterTryCast(S.TrueshotAura, "player") then
-        HunterDebug("Trueshot Aura")
-        return true
-    end
+    -- Note: Trueshot Aura is a passive talent in WotLK 3.3.5a and does not require casting.
     
     local manaPercent = (UnitPowerMax("player", 0) > 0) and (UnitPower("player", 0) / UnitPowerMax("player", 0) * 100) or 100
     if self:ManageAspects(spec, false, manaPercent) then return true end
