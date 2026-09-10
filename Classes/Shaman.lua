@@ -800,7 +800,7 @@ function AC:ElementalRotation(level, hasTarget, targetHP, manaPercent, enemies)
     if meaningfulTarget and self:IsShamanSpellReady(S.ElementalMastery) and
        self:CastShamanSpell(S.ElementalMastery) then
         ShamanDebug("Elemental Mastery burst")
-        if self.UseTrinkets then self:UseTrinkets() end
+        if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
         if isBoss and self.UseOffensivePotion then self:UseOffensivePotion(true) end
         return true
     end
@@ -892,7 +892,7 @@ function AC:EnhancementRotation(level, hasTarget, targetHP, manaPercent, enemies
     if meaningfulTarget and self:IsShamanSpellReady(S.FeralSpirit) and
        self:CastShamanSpell(S.FeralSpirit) then
         ShamanDebug("Feral Spirit on a durable target")
-        if self.UseTrinkets then self:UseTrinkets() end
+        if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
         if isBoss and self.UseOffensivePotion then self:UseOffensivePotion(true) end
         return true
     end
@@ -1145,6 +1145,12 @@ function AC:UseShamanDefensives()
     -- Emergency health potion
     if health < 35 and self.UseHealthPotion and self:UseHealthPotion(35) then
         ShamanDebug("Used health potion")
+        return true
+    end
+
+    -- Defensive on-use Trinket
+    if health < 45 and self:UseDefensiveTrinkets() then
+        ShamanDebug("Used defensive trinket")
         return true
     end
     

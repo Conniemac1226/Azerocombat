@@ -939,7 +939,7 @@ function AC:UsePriestOffensives(spec)
     if spec == "Shadow" and self:IsUsableSpell(S.Shadowfiend) and
        self:CastSpell(S.Shadowfiend, "target") then
         PriestDebug("Shadowfiend (damage cooldown)")
-        if self.UseTrinkets then self:UseTrinkets() end
+        if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
         if (targetClass == "worldboss" or UnitHealth("target") > 500000) and
            self.UseOffensivePotion then
             self:UseOffensivePotion(true)

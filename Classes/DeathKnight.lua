@@ -375,6 +375,11 @@ function AC:BloodDeathKnightRotation()
     if tankMode and self:HandleTankTargeting() then return true end
     
     -- Emergency defensives
+    if health < 45 and self:UseDefensiveTrinkets() then
+        DeathKnightDebug("BLOOD: Defensive Trinket")
+        return true
+    end
+
     if health < 30 then
         if self:KnowsSpell(S.VampiricBlood) and self:IsUsableSpell(S.VampiricBlood) then
             if not self:CastSpell(S.VampiricBlood, "player") then return false end
@@ -1211,7 +1216,13 @@ function AC:DeathKnightAutoUtility()
     local inCombat = UnitAffectingCombat("player")
     
     -- Emergency health management
-    if health < 35 and inCombat then
+    if health < 45 and inCombat then
+        -- Defensive on-use trinket
+        if self:UseDefensiveTrinkets() then
+            DeathKnightDebug("AUTO-UTILITY: Defensive Trinket")
+            return true
+        end
+
         -- Icebound Fortitude
         if self:IsUsableSpell(S.IceboundFortitude) then
             if self:CastSpell(S.IceboundFortitude, "player") then
@@ -1348,7 +1359,7 @@ function AC:UseDeathKnightCooldowns()
 
     -- Wait until diseases are established before starting burst buffs.
     if worthyTarget and rotationReady then
-        if self:UseTrinkets() then
+        if self:UseOffensiveTrinkets() then
             DeathKnightDebug("Used Trinkets")
             return true
         end

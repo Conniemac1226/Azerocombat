@@ -269,7 +269,7 @@ function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
         if energy <= 50 and not self:HasBuff("player", S.AdrenRush) and self:IsRogueSpellReady(S.KillingSpree) then
             if not self:CastSpell(S.KillingSpree, "target") then return false end
             RogueDebug("Combat burst: Killing Spree")
-            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
             if self.UseOffensivePotion then self:UseOffensivePotion(true) end
             return true
         end
@@ -277,14 +277,14 @@ function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
         if energy <= 60 and not self:HasBuff("player", S.KillingSpree) and self:IsRogueSpellReady(S.AdrenRush) then
             if not self:CastSpell(S.AdrenRush, "player") then return false end
             RogueDebug("Combat burst: Adrenaline Rush")
-            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
             return true
         end
     elseif spec == "Assassination" then
         if cp >= 4 and self:IsRogueSpellReady(S.ColdBlood) then
             if not self:CastSpell(S.ColdBlood, "player") then return false end
             RogueDebug("Assassination burst: Cold Blood")
-            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
             return true
         end
 
@@ -303,7 +303,7 @@ function AC:UseRogueOffensiveCooldownsEnhanced(spec, level, cp, energy)
         if energy >= 60 and self:IsRogueSpellReady(S.ShadowDance) then
             if not self:CastSpell(S.ShadowDance, "player") then return false end
             RogueDebug("Subtlety burst: Shadow Dance")
-            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
             return true
         end
 
@@ -1530,6 +1530,12 @@ function AC:RogueDefensives(health)
     
     -- Regular defensive cooldowns - SPEC SPECIFIC
     if health < 40 then
+        -- Defensive on-use Trinket
+        if self:UseDefensiveTrinkets() then
+            RogueDebug("Using defensive trinket")
+            return true
+        end
+
         -- Evasion - Available to all specs
         if self:IsRogueSpellReady(S.Evasion) then
             if self:CastSpell(S.Evasion, "player") then
@@ -1617,7 +1623,7 @@ function AC:UseRogueOffensiveCooldownsLegacy(spec, level, cp)
                 RogueDebug("Using Adrenaline Rush")
                 
                 -- Chain cooldowns
-                if self.UseTrinkets then self:UseTrinkets() end
+                if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
                 if self.UseOffensivePotion then self:UseOffensivePotion(true) end
                 return true
             end
@@ -1628,7 +1634,7 @@ function AC:UseRogueOffensiveCooldownsLegacy(spec, level, cp)
                 RogueDebug("Using Killing Spree")
                 
                 -- Chain cooldowns with Killing Spree
-                if self.UseTrinkets then self:UseTrinkets() end
+                if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
                 if self.UseOffensivePotion then self:UseOffensivePotion(true) end
                 return true
             end
@@ -1647,7 +1653,7 @@ function AC:UseRogueOffensiveCooldownsLegacy(spec, level, cp)
            shouldUseCooldowns then
             if not self:CastSpell(S.ShadowDance, "player") then return false end
             RogueDebug("Using Shadow Dance burst phase")
-            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
             return true
         end
         

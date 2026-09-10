@@ -592,6 +592,12 @@ function AC:UseDruidDefensives(form)
         return true
     end
 
+    -- Defensive on-use Trinket (usable in all forms)
+    if health < 45 and self:UseDefensiveTrinkets() then
+        DruidDebug("Defensive trinket at low health")
+        return true
+    end
+
     -- Barkskin (usable in all forms)
     if health < 50 and self:IsUsableSpell(S.Barkskin) then
         if not self:CastSpell(S.Barkskin, "player") then return false end
@@ -654,7 +660,7 @@ function AC:UseDruidOffensives(spec, form)
            Throttle("ForceOfNature", 3) then
             if not self:SafeCastGroundAOE(S.ForceOfNature) then return false end
             DruidDebug("Force of Nature - burst")
-            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
             return true
         end
         
@@ -684,7 +690,7 @@ function AC:UseDruidOffensives(spec, form)
         if self:IsUsableSpell(S.Berserk) and self:GetSpellCooldown(S.Berserk) == 0 and Throttle("Berserk", 3) then
             if not self:CastSpell(S.Berserk, "player") then return false end
             DruidDebug("Berserk - burst")
-            if self.UseTrinkets then self:UseTrinkets() end
+            if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
             return true
         end
     end
@@ -1399,7 +1405,7 @@ function AC:FeralBearTankRotation()
                 DruidDebug("EPIC BERSERK: Maximum threat mode")
 
                 -- Use trinkets with Berserk for maximum threat
-                if self.UseTrinkets then self:UseTrinkets() end
+                if self.UseOffensiveTrinkets then self:UseOffensiveTrinkets() end
 
                 -- Use offensive racials
                 if self:UseRacialsDruid(true, false) then

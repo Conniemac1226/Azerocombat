@@ -331,6 +331,12 @@ function AC:UseMageDefensives()
         end
     end
     
+    -- Defensive on-use Trinket
+    if health < 45 and self:UseDefensiveTrinkets() then
+        MageDebug("Used defensive trinket")
+        return true
+    end
+
     -- Ice Block for emergencies
     if health < 20 and MageSpellReady(self, S.IceBlock) then
         if self:CastSpell(S.IceBlock, "player") then
@@ -950,7 +956,7 @@ function AC:ArcaneMageRotation()
             MageDebug("Arcane: Icy Veins")
             return true
         end
-        if self:IsMageBossTarget() and self:UseTrinkets() then
+        if self:IsMageBossTarget() and self:UseOffensiveTrinkets() then
             MageDebug("Arcane: offensive trinket")
             return true
         end
@@ -1163,7 +1169,7 @@ function AC:FireMageRotation()
             return true
         end
 
-        if self:IsMageBossTarget() and self:UseTrinkets() then
+        if self:IsMageBossTarget() and self:UseOffensiveTrinkets() then
             MageDebug("Fire: offensive trinket")
             return true
         end
@@ -1324,7 +1330,7 @@ function AC:FrostMageRotation()
             return true
         end
 
-        if self:IsMageBossTarget() and self:UseTrinkets() then
+        if self:IsMageBossTarget() and self:UseOffensiveTrinkets() then
             MageDebug("Frost: offensive trinket")
             return true
         end

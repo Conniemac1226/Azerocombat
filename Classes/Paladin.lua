@@ -2159,7 +2159,7 @@ function AC:PaladinCombatRotation(spec, level, hasTarget, targetHP, manaPercent,
                self:GetSpellCooldown(S.AvengingWrath) <= 0.1 then
                 if self:CastPaladinSpell(S.AvengingWrath, "player") then return true end
             end
-            if self:UseTrinkets() then
+            if self:UseOffensiveTrinkets() then
                 PaladinDebug("Used offensive trinket for burst")
                 return true
             end
@@ -2392,7 +2392,7 @@ function AC:PaladinRotation()
 
         -- Lower-priority emergency tools must never delay LoH or an immunity.
         if inCombat and self:UseLifeblood() then return true end
-        if self:UseTrinkets() then
+        if self:UseDefensiveTrinkets() then
             PaladinDebug("Used defensive trinket")
             return true
         end

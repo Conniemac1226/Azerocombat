@@ -2512,6 +2512,11 @@ function AC:HunterHasMovementImpairingDebuff()
 end
 
 function AC:UseDefensiveCooldowns(healthPercent)
+    if healthPercent < 45 and self:UseDefensiveTrinkets() then
+        HunterDebug("Used defensive trinket")
+        return true
+    end
+
     if healthPercent < 25 and self:HunterTryCast(S.FeignDeath, "player") then
         HunterDebug("Feign Death")
         return true
@@ -2582,8 +2587,8 @@ function AC:HunterUseMinorCooldowns(spec, targetIsTough, targetHP, enemies, inCo
         return true
     end
 
-    if (targetIsTough or enemies >= 3) and self:UseTrinkets() then
-        HunterDebug("Used Trinkets")
+    if (targetIsTough or enemies >= 3) and self:UseOffensiveTrinkets() then
+        HunterDebug("Used Offensive Trinket")
     end
 
     if targetIsTough and self.UseOffensivePotion and self:UseOffensivePotion(true) then

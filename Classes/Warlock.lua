@@ -2357,8 +2357,12 @@ function AC:UseWarlockRacials(spec, procs, targetHealthPercent)
     local race = string.upper((englishRace or localizedRace or ""):gsub("%s+", ""))
     local playerHealthPercent = (UnitHealth("player") / UnitHealthMax("player")) * 100
     
-    -- Emergency health potions
-    if playerHealthPercent < 30 then
+    -- Emergency health potions & defensive trinkets
+    if playerHealthPercent < 35 then
+        if self:UseDefensiveTrinkets() then
+            WarlockDebug("Used defensive trinket at " .. string.format("%.0f", playerHealthPercent) .. "% health")
+            return nil
+        end
         if self.UseHealthPotion and self:UseHealthPotion(30) then
             WarlockDebug("Used health potion at " .. string.format("%.0f", playerHealthPercent) .. "% health")
             return nil -- Let potion take effect
