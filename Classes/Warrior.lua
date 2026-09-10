@@ -483,49 +483,9 @@ end
 -- =============================================
 
 
--- FIXED: Enhanced trinket usage with better checks and freeze prevention
+-- FIXED: Enhanced trinket usage with categorization support (delegates to offensive trinkets)
 function AC:UseTrinketsFixed()
-    -- FIXED: Throttle trinket attempts to prevent spam
-    if not Throttle("TrinketUse", 3.0) then
-        return false
-    end
-    
-    -- Check both trinket slots (13 = top, 14 = bottom)
-    for slot = 13, 14 do
-        local success, itemLink = pcall(GetInventoryItemLink, "player", slot)
-        if success and itemLink then
-            local startSuccess, start, duration = pcall(GetInventoryItemCooldown, "player", slot)
-            if startSuccess then
-                local isUsable = IsUsableItem(itemLink)
-                local isReady = (start == 0) or (start > 0 and GetTime() >= start + duration)
-                
-                if isUsable and isReady then
-                    UseInventoryItem(slot)
-                    local itemName = GetItemInfo(itemLink) or "Unknown"
-                    WarriorDebug("Used trinket in slot " .. slot .. ": " .. itemName)
-                    
-                    -- Check if this trinket has a cooldown after use (active trinket)
-                    local newStart, newDuration = GetInventoryItemCooldown("player", slot)
-                    if newStart > 0 and newDuration > 0 then
-                        -- Active trinket with cooldown - count as successful usage
-                        WarriorDebug("Active trinket used with " .. newDuration .. "s cooldown")
-                        return true
-                    else
-                        -- Passive trinket - don't count as successful usage
-                        WarriorDebug("Passive trinket attempted - continuing to check other abilities")
-                    end
-                else
-                    WarriorDebug("Trinket in slot " .. slot .. " not ready (cooldown or conditions)")
-                end
-            else
-                WarriorDebug("Error checking trinket cooldown in slot " .. slot)
-            end
-        else
-            WarriorDebug("No trinket equipped in slot " .. slot)
-        end
-    end
-    
-    return false
+    return self:UseOffensiveTrinkets()
 end
 
 
@@ -617,6 +577,15 @@ function AC:UseWarriorDefensives()
         if self:UseRacialsWarrior(false, true) then
             markAttempt("defensiveRacial")
             WarriorDebug("Used defensive racial")
+            return true
+        end
+    end
+
+    -- Defensive on-use Trinket (absorb, dodge, parry, max health, armor)
+    if (health < 45 or (spec == "Protection" and underHeavyPressure and health < 55)) and canRetry("defensiveTrinket", 15) then
+        if self:UseDefensiveTrinkets() then
+            markAttempt("defensiveTrinket")
+            WarriorDebug("Used defensive trinket at " .. string.format("%.0f", health) .. "% health")
             return true
         end
     end
@@ -2032,6 +2001,15 @@ function AC:ProtectionWarriorRotation()
         
         -- ENHANCED: Proactive Spell Reflection (interrupt priority system)
         if self:UseEnhancedSpellReflection() then return true end
+
+        -- Protection offensive trinket for burst threat on dangerous targets or large packs
+        local classification = hasTarget and UnitClassification("target") or ""
+        local dangerousTarget = classification == "elite" or classification == "rareelite" or classification == "worldboss"
+        if (dangerousTarget or enemies >= 3) and Throttle("ProtOffensiveTrinket", 30.0) then
+            if self:UseOffensiveTrinkets() then
+                WarriorDebug("Prot: Used offensive trinket for threat burst")
+            end
+        end
         
         -- Rage generation with Blood Rage
         if rage < 25 and self:IsUsableSpell(S.BloodRage) and self:GetSpellCooldown(S.BloodRage) == 0 then

@@ -117,68 +117,210 @@ function AC:KnowsSpell(spellName)
     return false
 end
 
--- Trinket usage
-function AC:UseTrinkets()
-    -- Add throttling to prevent spam attempts 
-    if not self:ActionThrottle("TrinketUsage", 5) then
-        return false
+-- =============================================
+-- TRINKET MANAGEMENT SYSTEM (OFFENSIVE & DEFENSIVE)
+-- =============================================
+
+-- Catalog of known WotLK defensive on-use trinkets (Item IDs)
+local WOTLK_DEFENSIVE_TRINKETS = {
+    -- Health boost / Battlemaster trinkets
+    [42122] = true, [42123] = true, [42125] = true, [42126] = true,
+    [44063] = true, [44103] = true, [44111] = true, [44112] = true,
+    [45866] = true, [45867] = true, [47732] = true, [47733] = true,
+    [50354] = true, [50355] = true, [51377] = true, [51378] = true,
+    [47080] = true, [47088] = true, -- Satrina's Impeding Scarab (Normal / Heroic)
+    [47451] = true, [47464] = true, -- Juggernaut's Vitality (Normal / Heroic)
+    [50235] = true,                 -- Ick's Rotting Thumb
+    [45138] = true,                 -- Heart of Iron
+
+    -- Absorb trinkets
+    [50356] = true,                 -- Corroded Skeleton Key (6400 absorb)
+
+    -- Avoidance / Mitigation / Armor / Resistances
+    [47735] = true,                 -- Glyph of Indomitability (Dodge)
+    [50361] = true, [50364] = true, -- Sindragosa's Flawless Fang (Normal / Heroic magic resist)
+    [49487] = true,                 -- Onyxia Blood Talisman (Defense)
+    [47948] = true, [47949] = true, [48020] = true, [48021] = true, -- Fervor of the Frostborn (Armor)
+    [37872] = true,                 -- Lavanthor's Talisman (Shield Block)
+    [37220] = true,                 -- Seal of the Pantheon (Armor)
+    [39292] = true,                 -- Lazulite Pantheon (Defense)
+    [39282] = true,                 -- Repelling Charge (Defense)
+    [44323] = true,                 -- Honor's Call (Dodge)
+    [28528] = true,                 -- Moroes' Lucky Pocket Watch (Dodge)
+    [30629] = true,                 -- Scarab of Displacement (Defense)
+    [32658] = true,                 -- Badge of Tenacity (Armor)
+    [38287] = true,                 -- Empty Mug of Direbrew (Dodge)
+    [49080] = true,                 -- Brawler's Souvenir (Dodge)
+    [36993] = true,                 -- Horn of the Traitor (Dodge)
+    [37637] = true,                 -- Offering of Sacrifice (Shield Block)
+    [37645] = true,                 -- Dabbler's Gem (Defense)
+    [35987] = true,                 -- Figurine - Monarch Crab (Dodge)
+}
+
+-- Catalog of known WotLK offensive on-use trinkets (Item IDs)
+local WOTLK_OFFENSIVE_TRINKETS = {
+    [54569] = true, [54590] = true, -- Sharpened Twilight Scale (AP)
+    [47734] = true,                 -- Mark of Supremacy (AP)
+    [51379] = true, [51380] = true, -- Wrathful Gladiator's Badge of Victory
+    [47731] = true,                 -- Relentless Gladiator's Badge of Victory
+    [45868] = true, [44107] = true, -- Furious Gladiator's Badge of Victory
+    [44115] = true, [42124] = true, -- Deadly / Hateful Gladiator's Badge of Victory
+    [48722] = true,                 -- Shard of the Crystal Heart (Haste)
+    [48724] = true,                 -- Ephemeral Snowflake (Haste)
+    [48721] = true,                 -- Talisman of Resurgence (Spell Power)
+    [50357] = true,                 -- Maghia's Misguided Quill (Spell Power)
+    [50358] = true,                 -- Purified Lunar Dust (Spell Power)
+    [50339] = true, [50346] = true, -- Sliver of Pure Ice (Spell Power)
+    [50259] = true,                 -- Nevermelting Ice Crystal (Crit)
+    [40682] = true, [40684] = true, -- Mirror of Truth / Sundial tokens
+}
+
+-- Hidden tooltip for dynamic trinket effect parsing
+local trinketScanTooltip = nil
+local function GetTrinketScanTooltip()
+    if not trinketScanTooltip then
+        trinketScanTooltip = CreateFrame("GameTooltip", "AzeroCombatTrinketScanTooltip", nil, "GameTooltipTemplate")
+        trinketScanTooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
     end
+    return trinketScanTooltip
+end
+
+-- Determine whether a trinket in slot 13 or 14 is "defensive" or "offensive"
+function AC:GetTrinketType(slot)
+    if slot ~= 13 and slot ~= 14 then return nil end
     
-    local used = false
+    local itemID = GetInventoryItemID("player", slot)
+    if not itemID then return nil end
     
-    -- Check both trinket slots (13 = top, 14 = bottom)
-    for slot = 13, 14 do
-        -- Check if there's actually an item in the slot
-        local itemLink = GetInventoryItemLink("player", slot)
-        if itemLink then
-            local itemName = GetItemInfo(itemLink) or "Unknown"
-            if self.debugMode then
-                self:Debug("Checking trinket in slot " .. slot .. ": " .. itemName)
-            end
-            -- Check if the trinket is off cooldown
-            local start, duration = GetInventoryItemCooldown("player", slot)
-            local isUsable = IsUsableItem(itemLink)
-            
-            -- Trinket is ready if: no cooldown (start == 0) OR cooldown has expired
-            local isReady = (start == 0) or (start > 0 and GetTime() >= start + duration)
-            
-            if isUsable and isReady then
-                -- Try to use the trinket
-                if self.debugMode then
-                    self:Debug("Using trinket in slot " .. slot .. ": " .. (GetItemInfo(itemLink) or "Unknown"))
-                end
-                UseInventoryItem(slot)
-                
-                -- Check if this trinket has a cooldown after use (active trinket)
-                -- If it has no cooldown, it's likely passive and shouldn't block other abilities
-                local newStart, newDuration = GetInventoryItemCooldown("player", slot)
-                if newStart > 0 and newDuration > 0 then
-                    -- Active trinket with cooldown - count as successful usage
-                    used = true
-                    if self.debugMode then
-                        self:Debug("Active trinket used with " .. newDuration .. "s cooldown")
-                    end
-                    break
-                else
-                    -- Passive trinket - don't count as successful usage
-                    if self.debugMode then
-                        self:Debug("Passive trinket attempted - continuing to check other abilities")
-                    end
-                end
-            else
-                if self.debugMode then
-                    if not isUsable then
-                        self:Debug("Trinket in slot " .. slot .. " not usable (passive or wrong conditions)")
-                    elseif start > 0 and GetTime() < start + duration then
-                        local remaining = start + duration - GetTime()
-                        self:Debug("Trinket in slot " .. slot .. " on cooldown: " .. string.format("%.1fs", remaining))
+    local itemLink = GetInventoryItemLink("player", slot)
+    if not itemLink or not IsUsableItem(itemLink) then
+        return nil
+    end
+
+    self.trinketTypeCache = self.trinketTypeCache or {}
+    if self.trinketTypeCache[itemID] then
+        return self.trinketTypeCache[itemID]
+    end
+
+    -- 1. Fast catalog lookup
+    if WOTLK_DEFENSIVE_TRINKETS[itemID] then
+        self.trinketTypeCache[itemID] = "defensive"
+        return "defensive"
+    end
+    if WOTLK_OFFENSIVE_TRINKETS[itemID] then
+        self.trinketTypeCache[itemID] = "offensive"
+        return "offensive"
+    end
+
+    -- 2. Dynamic tooltip scanning fallback
+    local tt = GetTrinketScanTooltip()
+    tt:ClearLines()
+    local ok = pcall(tt.SetInventoryItem, tt, "player", slot)
+    if ok then
+        for i = 1, tt:NumLines() do
+            local line = _G["AzeroCombatTrinketScanTooltipTextLeft" .. i]
+            if line then
+                local text = line:GetText()
+                if text then
+                    local lower = string.lower(text)
+                    -- Check for Use: line
+                    if string.find(lower, "use:") then
+                        if string.find(lower, "absorb") or
+                           string.find(lower, "dodge") or
+                           string.find(lower, "parry") or
+                           string.find(lower, "defense") or
+                           string.find(lower, "armor by") or
+                           string.find(lower, "shield block") or
+                           string.find(lower, "maximum health") or
+                           string.find(lower, "health by") or
+                           string.find(lower, "resistance") or
+                           string.find(lower, "damage taken") then
+                            self.trinketTypeCache[itemID] = "defensive"
+                            return "defensive"
+                        end
+                        if string.find(lower, "attack power") or
+                           string.find(lower, "critical strike") or
+                           string.find(lower, "haste") or
+                           string.find(lower, "armor penetration") or
+                           string.find(lower, "spell power") or
+                           string.find(lower, "damage done") or
+                           string.find(lower, "strength") or
+                           string.find(lower, "agility") then
+                            self.trinketTypeCache[itemID] = "offensive"
+                            return "offensive"
+                        end
                     end
                 end
             end
         end
     end
+
+    -- Default to offensive if active on-use but unidentified
+    self.trinketTypeCache[itemID] = "offensive"
+    return "offensive"
+end
+
+-- Use a specific trinket slot if off cooldown
+function AC:UseTrinketSlot(slot)
+    local itemLink = GetInventoryItemLink("player", slot)
+    if not itemLink or not IsUsableItem(itemLink) then return false end
     
-    return used
+    local start, duration = GetInventoryItemCooldown("player", slot)
+    local isReady = (start == 0) or (start > 0 and GetTime() >= start + duration)
+    if not isReady then return false end
+
+    UseInventoryItem(slot)
+    
+    -- Verify activation (active trinket gets cooldown)
+    local newStart, newDuration = GetInventoryItemCooldown("player", slot)
+    if newStart > 0 and newDuration > 0 then
+        local itemName = GetItemInfo(itemLink) or ("Trinket " .. slot)
+        if self.debugMode then
+            self:Debug("Used active trinket: " .. itemName .. " (" .. newDuration .. "s cooldown)")
+        end
+        return true
+    end
+    return false
+end
+
+-- Use defensive trinkets (slot 13 or 14)
+function AC:UseDefensiveTrinkets()
+    if not self:ActionThrottle("DefensiveTrinketUsage", 1.0) then return false end
+    
+    for slot = 13, 14 do
+        if self:GetTrinketType(slot) == "defensive" then
+            if self:UseTrinketSlot(slot) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Use offensive trinkets (slot 13 or 14)
+function AC:UseOffensiveTrinkets()
+    if not self:ActionThrottle("OffensiveTrinketUsage", 1.0) then return false end
+    
+    for slot = 13, 14 do
+        if self:GetTrinketType(slot) == "offensive" then
+            if self:UseTrinketSlot(slot) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Backward-compatible general trinket call
+function AC:UseTrinkets(category)
+    if category == "defensive" then
+        return self:UseDefensiveTrinkets()
+    elseif category == "offensive" then
+        return self:UseOffensiveTrinkets()
+    end
+    
+    -- Default behavior: use offensive trinket
+    return self:UseOffensiveTrinkets()
 end
 
 -- Debug function
