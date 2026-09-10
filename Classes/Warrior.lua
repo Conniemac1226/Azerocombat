@@ -1657,8 +1657,8 @@ function AC:TryArmsSoloBurst(rage, nearbyEnemies, targetHP, msCooldown, overpowe
 
     -- Solo bladestorming for faster quest-pack deletes, guarded behind core-proc checks.
     if highValueSoloTarget and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm) and
-       self:GetSpellCooldown(S.Bladestorm) == 0 and rage >= 25 and not overpowerReady and
-       msCooldown > 1.0 and rendRemaining > 2 and Throttle("ArmsSoloBladestorm", 30) then
+       self:GetSpellCooldown(S.Bladestorm) == 0 and rage >= 25 and not overpowerExpiring and
+       msCooldown > 1.0 and rendRemaining > 2 and Throttle("ArmsSoloBladestorm", 1.0) then
         if not self:CastSpell(S.Bladestorm) then return false end
         WarriorDebug("Arms Solo Burst: Bladestorm")
         return true
@@ -2250,6 +2250,12 @@ function AC:ArmsWarriorRotation()
     end
     
     if hasTarget then self:EnsureMeleeAutoAttack("target") end
+
+    -- If currently channeling/spinning Bladestorm, do nothing and let it finish!
+    if self:HasBuff("player", S.Bladestorm) then
+        return true
+    end
+
     if not inCombat and hasTarget and level >= 4 then
         if self:TryCharge() then return true end
     end
@@ -2512,8 +2518,17 @@ function AC:ArmsWarriorRotation()
             end
         end
 
-        -- Cleave/AoE support. Bladestorm is strongest after Rend is secure and no Overpower is expiring.
+        -- Cleave/AoE support. Bladestorm is top priority in AoE (especially paired with Sweeping Strikes).
         if isCleaveContext and self:IsInMeleeRange("target") then
+            -- Bladestorm on 2+ targets: massive weapon damage on all nearby enemies
+            if health > 35 and (not overpowerExpiring) and self:KnowsSpell(S.Bladestorm) and
+               self:IsUsableSpell(S.Bladestorm) and self:GetSpellCooldown(S.Bladestorm) == 0 and
+               rage >= 25 and Throttle("ArmsBladestormAoE", 1.0) then
+                if not self:CastSpell(S.Bladestorm) then return false end
+                WarriorDebug("Arms: Bladestorm AoE (" .. nearbyEnemies .. " targets)")
+                return true
+            end
+
             if self:KnowsSpell(S.ThunderClap) and self:IsUsableSpell(S.ThunderClap) and
                self:GetSpellCooldown(S.ThunderClap) == 0 and self:ThunderClapInRange() and
                self:HasEnemyInThunderClapReach(20) and
@@ -2523,14 +2538,6 @@ function AC:ArmsWarriorRotation()
                 return true
             end
 
-            if nearbyEnemies >= 3 and health > 35 and rendRemaining > 4 and not overpowerExpiring
-               and not suddenDeathProc and not executePhase
-               and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm)
-               and self:GetSpellCooldown(S.Bladestorm) == 0 then
-                if not self:CastSpell(S.Bladestorm) then return false end
-                WarriorDebug("Arms: Bladestorm AoE")
-                return true
-            end
             if ShouldQueueRageDump(rage, {self:GetSpellCooldown(S.MortalStrike), self:GetSpellCooldown(S.Overpower)}, 20) then
                 QueueOnNextSwing(S.Cleave, "Arms: Cleave AoE")
             end
@@ -2557,14 +2564,15 @@ function AC:ArmsWarriorRotation()
             return true
         end
 
-        -- Single-target Bladestorm filler only when it will not clip core Arms buttons.
-        if not isCleaveContext and health > 35 and (isElite or inGroup or targetHP > 50) and rendRemaining > 6
-           and not overpowerReady and not suddenDeathProc and not executePhase
-           and msCooldown > 1.5 and self:KnowsSpell(S.Bladestorm)
-           and self:IsUsableSpell(S.Bladestorm) and self:GetSpellCooldown(S.Bladestorm) == 0
-           and Throttle("ArmsBladestormSingle", 90) then
+        -- Single-target Bladestorm filler when core abilities are on cooldown
+        if not isCleaveContext and health > 35 and (isElite or inGroup or targetHP > 40) and rendRemaining > 3
+           and not overpowerExpiring and not suddenDeathReady and not executePhase
+           and (msCooldown > 1.5 or not self:KnowsSpell(S.MortalStrike))
+           and self:KnowsSpell(S.Bladestorm) and self:IsUsableSpell(S.Bladestorm)
+           and self:GetSpellCooldown(S.Bladestorm) == 0 and rage >= 25
+           and Throttle("ArmsBladestormSingle", 1.0) then
             if not self:CastSpell(S.Bladestorm) then return false end
-            WarriorDebug("Arms: Bladestorm")
+            WarriorDebug("Arms: Bladestorm (single-target)")
             return true
         end
         
