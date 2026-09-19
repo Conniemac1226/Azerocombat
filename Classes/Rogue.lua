@@ -1725,6 +1725,24 @@ function AC:CastSpell(spellName, unit)
         RogueDebug("CastSpell FAILED: No spell name or invalid target - " .. (spellName or "nil"))
         return false
     end
+
+    -- Universal Immunity Check
+    if unit ~= "player" and UnitExists(unit) and UnitCanAttack("player", unit) then
+        if self:IsSpellImmune(spellName, unit) then
+            if self.debugMode and self:Throttle("ImmuneCastBlock_" .. tostring(spellName), 2.0) then
+                RogueDebug("Blocked cast of " .. tostring(spellName) .. " - target is IMMUNE")
+            end
+            return false
+        end
+    end
+
+    self.lastCastAttempt = {
+        spell = spellName,
+        unit = unit,
+        guid = UnitGUID(unit),
+        destName = UnitName(unit),
+        time = GetTime()
+    }
     
     -- Check if spell is known
     if not self:KnowsSpell(spellName) then

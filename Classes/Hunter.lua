@@ -1848,6 +1848,12 @@ function AC:HunterCanCast(spellName, unit, opts)
         return false, "no unit"
     end
 
+    -- Universal Immunity Check
+    local checkUnit = (unit and unit ~= "player" and unit) or "target"
+    if UnitExists(checkUnit) and UnitCanAttack("player", checkUnit) and self:IsSpellImmune(spellName, checkUnit) then
+        return false, "immune"
+    end
+
     if opts.requirePet and self:GetPetStatus() ~= "alive" then
         return false, "no pet"
     end
@@ -1923,6 +1929,13 @@ function AC:HunterTryCast(spellName, unit, opts)
     end
 
     unit = unit or "target"
+    self.lastCastAttempt = {
+        spell = spellName,
+        unit = unit,
+        guid = UnitGUID(unit),
+        destName = UnitName(unit),
+        time = GetTime()
+    }
     local beforeSpellCooldown = self:GetSpellCooldown(spellName)
     local beforeGlobalCooldown = self:GetSpellCooldown(61304)
     local beforeCast = UnitCastingInfo("player")

@@ -197,6 +197,11 @@ function AC:CanCast(spellName)
         return false
     end
 
+    -- Universal Immunity Check
+    if UnitExists("target") and UnitCanAttack("player", "target") and self:IsSpellImmune(spellName, "target") then
+        return false
+    end
+
     -- Briefly back off spells that just failed to start to avoid hard lock loops.
     if self.WarlockCastFailures and self.WarlockCastFailures[spellName] then
         if (GetTime() - self.WarlockCastFailures[spellName]) < 0.8 then
@@ -3555,6 +3560,24 @@ function AC:CastWarlockSpell(spellName, unit)
     if not self:CanCast(spellName) then
         return false
     end
+
+    -- Universal Immunity Check
+    if unit ~= "player" and UnitExists(unit) and UnitCanAttack("player", unit) then
+        if self:IsSpellImmune(spellName, unit) then
+            if self.debugMode and self:Throttle("ImmuneCastBlock_" .. tostring(spellName), 2.0) then
+                WarlockDebug("Blocked cast of " .. tostring(spellName) .. " - target is IMMUNE")
+            end
+            return false
+        end
+    end
+
+    self.lastCastAttempt = {
+        spell = spellName,
+        unit = unit,
+        guid = UnitGUID(unit),
+        destName = UnitName(unit),
+        time = GetTime()
+    }
     
     local preCast = UnitCastingInfo("player")
     local preChannel = UnitChannelInfo("player")

@@ -1259,6 +1259,24 @@ function AC:CastPaladinSpell(spellName, unit)
         return false
     end
 
+    -- Universal Immunity Check
+    if unit ~= "player" and UnitExists(unit) and UnitCanAttack("player", unit) then
+        if self:IsSpellImmune(spellName, unit) then
+            if self.debugMode and self:Throttle("ImmuneCastBlock_" .. tostring(spellName), 2.0) then
+                PaladinDebug("Blocked cast of " .. tostring(spellName) .. " - target is IMMUNE")
+            end
+            return false
+        end
+    end
+
+    self.lastCastAttempt = {
+        spell = spellName,
+        unit = unit,
+        guid = UnitGUID(unit),
+        destName = UnitName(unit),
+        time = GetTime()
+    }
+
     if IsPaladinForbearanceBlocked(self, spellName, unit) then
         if self:Throttle("PaladinForbearanceBlocked_" .. spellName, 2.0) then
             PaladinDebug("SKIPPED " .. spellName .. " - " .. unit .. " has Forbearance")

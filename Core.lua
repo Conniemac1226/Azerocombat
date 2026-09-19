@@ -527,6 +527,7 @@ function AC:SilenceErrorSounds()
         UIErrorsFrame:SetScript("OnEvent", function(self, event, ...)
             -- Filter out error messages only
             if event == "UI_ERROR_MESSAGE" then
+                AC:OnUIErrorMessage(...)
                 -- Don't show the error, but still allow the action to proceed
                 return true
             else
@@ -2789,6 +2790,156 @@ function AC:TryInterrupt(interruptSpell, unit)
 end
 
 -- =============================================
+-- UNIVERSAL SPELL IMMUNITY DETECTION SYSTEM
+-- =============================================
+
+AC.immuneCache = AC.immuneCache or {}
+AC.lastCastAttempt = AC.lastCastAttempt or {}
+
+-- Record an observed spell immunity on a target GUID
+function AC:RecordSpellImmunity(destGUID, spellName, duration, destName)
+    if not destGUID or not spellName then return end
+    duration = duration or 120 -- Default cache for 2 minutes (120s)
+
+    self.immuneCache = self.immuneCache or {}
+    if not self.immuneCache[destGUID] then
+        self.immuneCache[destGUID] = {
+            name = destName or "Unknown",
+            spells = {}
+        }
+    elseif destName and self.immuneCache[destGUID].name == "Unknown" then
+        self.immuneCache[destGUID].name = destName
+    end
+
+    self.immuneCache[destGUID].spells[spellName] = GetTime() + duration
+
+    if self.debugMode and self:Throttle("ImmunityLogged_" .. tostring(destGUID) .. "_" .. tostring(spellName), 2.0) then
+        self:Debug(string.format("Immunity recorded: [%s] is IMMUNE to [%s] (cached for %ds)",
+                   self.immuneCache[destGUID].name, tostring(spellName), duration))
+    end
+end
+
+-- Check if a specific target is immune to harm (total invulnerability auras)
+function AC:IsTargetImmuneToHarm(unit)
+    unit = unit or "target"
+    if not UnitExists(unit) then return false end
+
+    -- Check for total invulnerability buffs
+    local totalImmunityBuffs = {
+        "Divine Shield",
+        "Ice Block",
+        "Cyclone",
+        "Banish",
+        "Deterrence",
+    }
+
+    for _, buffName in ipairs(totalImmunityBuffs) do
+        if self:HasBuff(unit, buffName) then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- Check if unit is immune to a spell
+function AC:IsSpellImmune(spellName, unit)
+    if not spellName then return false end
+    unit = unit or "target"
+    if not UnitExists(unit) then return false end
+
+    -- Check cached immunities from combat log / UI errors
+    local guid = UnitGUID(unit)
+    if guid and self.immuneCache and self.immuneCache[guid] then
+        local expTime = self.immuneCache[guid].spells and self.immuneCache[guid].spells[spellName]
+        if expTime then
+            if GetTime() < expTime then
+                return true
+            else
+                self.immuneCache[guid].spells[spellName] = nil
+            end
+        end
+    end
+
+    -- Target total immunity auras (Divine Shield, Ice Block, Cyclone, Banish, Deterrence)
+    if self:IsTargetImmuneToHarm(unit) then
+        return true
+    end
+
+    return false
+end
+
+-- Flexible helper alias accepting either (unit, spellName) or (spellName, unit)
+function AC:IsImmune(unit, spellName)
+    if type(unit) == "string" and (not spellName or UnitExists(spellName)) then
+        return self:IsSpellImmune(unit, spellName)
+    end
+    return self:IsSpellImmune(spellName, unit)
+end
+
+-- Clear immunity for a GUID (e.g. on death)
+function AC:ClearSpellImmunity(destGUID, spellName)
+    if not destGUID or not self.immuneCache or not self.immuneCache[destGUID] then return end
+    if spellName then
+        if self.immuneCache[destGUID].spells then
+            self.immuneCache[destGUID].spells[spellName] = nil
+        end
+    else
+        self.immuneCache[destGUID] = nil
+    end
+end
+
+-- Handle UI Error Messages (catches "Target is immune" immediately on cast attempt)
+function AC:OnUIErrorMessage(...)
+    local arg1, arg2 = ...
+    local msg = (type(arg2) == "string" and arg2) or (type(arg1) == "string" and arg1) or ""
+    if msg ~= "" then
+        local lower = msg:lower()
+        if lower:find("immune") then
+            if self.lastCastAttempt and (GetTime() - (self.lastCastAttempt.time or 0)) < 0.5 then
+                local guid = self.lastCastAttempt.guid
+                local spell = self.lastCastAttempt.spell
+                local destName = self.lastCastAttempt.destName
+                if guid and spell then
+                    self:RecordSpellImmunity(guid, spell, 120, destName)
+                end
+            end
+        end
+    end
+end
+
+-- Report all active mob immunities to the player
+function AC:PrintImmunitiesReport()
+    if not self.immuneCache or not next(self.immuneCache) then
+        self:Print("No active mob immunities recorded.")
+        return
+    end
+
+    local now = GetTime()
+    local count = 0
+    self:Print("=== Active Mob Immunities ===")
+    for guid, data in pairs(self.immuneCache) do
+        local name = data.name or "Unknown"
+        local activeList = {}
+        if data.spells then
+            for spell, expTime in pairs(data.spells) do
+                local rem = expTime - now
+                if rem > 0 then
+                    activeList[#activeList + 1] = string.format("%s (%.0fs)", spell, rem)
+                end
+            end
+        end
+        if #activeList > 0 then
+            count = count + 1
+            self:Print(string.format("  [%s]: %s", name, table.concat(activeList, ", ")))
+        end
+    end
+    if count == 0 then
+        self:Print("No active mob immunities recorded.")
+    end
+end
+
+-- =============================================
 -- COMBAT LOG TRACKING (FIXED FOR WOTLK)
 -- =============================================
 
@@ -2856,9 +3007,28 @@ function AC:COMBAT_LOG_EVENT_UNFILTERED(event, ...)
         end
     end
     
+    -- Track immunities from player casts
+    if sourceGUID == UnitGUID("player") and destGUID and destGUID ~= "" then
+        if subevent == "SPELL_MISSED" or subevent == "SPELL_PERIODIC_MISSED" or subevent == "RANGE_MISSED" then
+            local spellName = select(10, ...)
+            local missType = select(12, ...)
+            if missType == "IMMUNE" and spellName then
+                self:RecordSpellImmunity(destGUID, spellName, 120, destName)
+            end
+        elseif subevent == "SWING_MISSED" then
+            local missType = select(9, ...)
+            if missType == "IMMUNE" then
+                self:RecordSpellImmunity(destGUID, "Auto Attack", 120, destName)
+            end
+        end
+    end
+
     -- Track enemy deaths to remove them
     if subevent == "UNIT_DIED" and destGUID then
         self.combatEnemies[destGUID] = nil
+        if self.immuneCache and self.immuneCache[destGUID] then
+            self.immuneCache[destGUID] = nil
+        end
     end
 
     if self.HandleClassCombatLog then
@@ -2897,9 +3067,28 @@ function AC:COMBAT_LOG_EVENT_UNFILTERED_SAFE(event, ...)
             end
         end
         
+        -- Track immunities from player casts
+        if sourceGUID == UnitGUID("player") and destGUID and destGUID ~= "" then
+            if subevent == "SPELL_MISSED" or subevent == "SPELL_PERIODIC_MISSED" or subevent == "RANGE_MISSED" then
+                local spellName = select(10, ...)
+                local missType = select(12, ...)
+                if missType == "IMMUNE" and spellName then
+                    self:RecordSpellImmunity(destGUID, spellName, 120, destName)
+                end
+            elseif subevent == "SWING_MISSED" then
+                local missType = select(9, ...)
+                if missType == "IMMUNE" then
+                    self:RecordSpellImmunity(destGUID, "Auto Attack", 120, destName)
+                end
+            end
+        end
+
         -- Track deaths
         if subevent == "UNIT_DIED" and destGUID then
             self.combatEnemies[destGUID] = nil
+            if self.immuneCache and self.immuneCache[destGUID] then
+                self.immuneCache[destGUID] = nil
+            end
         end
     end
 
@@ -2939,6 +3128,23 @@ function AC:InitializeCombatLogTracking()
             -- Remove enemies we haven't seen in 5 seconds
             if now - data.lastSeen > 5 then
                 self.combatEnemies[guid] = nil
+            end
+        end
+        if self.immuneCache then
+            for guid, data in pairs(self.immuneCache) do
+                local anyActive = false
+                if data.spells then
+                    for spell, expTime in pairs(data.spells) do
+                        if now < expTime then
+                            anyActive = true
+                        else
+                            data.spells[spell] = nil
+                        end
+                    end
+                end
+                if not anyActive then
+                    self.immuneCache[guid] = nil
+                end
             end
         end
     end, 2)
@@ -3320,8 +3526,16 @@ function AC:GetSpellCooldown(spellName)
     return 0
 end
 
-function AC:IsUsableSpell(spellName)
+function AC:IsUsableSpell(spellName, unit)
     if not spellName then return false end
+    
+    -- Universal Immunity Check: if current target or specified unit is immune, spell is not usable
+    local checkUnit = unit or "target"
+    if checkUnit and UnitExists(checkUnit) and UnitCanAttack("player", checkUnit) then
+        if self:IsSpellImmune(spellName, checkUnit) then
+            return false
+        end
+    end
     
     -- Check if spell exists first
     local spellInfo = GetSpellInfo(spellName)
@@ -3421,12 +3635,31 @@ function AC:CastSpell(spellName, unit)
     if not spellName or (unit ~= "player" and not UnitExists(unit)) then
         return false
     end
+
+    -- Universal Immunity Check: reject cast if target is immune
+    if unit ~= "player" and UnitExists(unit) and UnitCanAttack("player", unit) then
+        if self:IsSpellImmune(spellName, unit) then
+            if self.debugMode and self:Throttle("ImmuneCastBlock_" .. tostring(spellName), 2.0) then
+                self:Debug("Blocked cast of " .. tostring(spellName) .. " - target is IMMUNE")
+            end
+            return false
+        end
+    end
+
+    -- Track last cast attempt for UI_ERROR_MESSAGE correlation
+    self.lastCastAttempt = {
+        spell = spellName,
+        unit = unit,
+        guid = UnitGUID(unit),
+        destName = UnitName(unit),
+        time = GetTime()
+    }
     
     -- Only cast if the spell is usable and not on cooldown.  Do not interrupt
     -- an unrelated cast/channel; callers must be able to fall through when
     -- the client rejects an action instead of treating the API call as a
     -- successful rotation step.
-    if self:IsUsableSpell(spellName) then
+    if self:IsUsableSpell(spellName, unit) then
         if self:GetSpellCooldown(spellName) > 0 then
             return false
         end
@@ -4848,6 +5081,11 @@ function AC:OnEnable()
             else
                 self:Print("Invalid feral role. Use /ac feral auto | bear | cat")
             end
+        elseif msg == "immunities" or msg == "immune" then
+            self:PrintImmunitiesReport()
+        elseif msg == "clearimmune" or msg == "clearimmunities" then
+            self.immuneCache = {}
+            self:Print("Immunity cache cleared.")
         elseif msg == "spec" then
             self:ForceSpecDetection()
         elseif msg == "performance" or msg == "perf" then
