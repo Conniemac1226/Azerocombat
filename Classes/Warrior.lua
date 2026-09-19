@@ -259,20 +259,25 @@ end
 
 -- Count hostiles physically close enough to likely be hit by Thunder Clap.
 function AC:GetEnemiesInThunderClapReach(maxNameplates)
-    maxNameplates = maxNameplates or 20
-    local count = 0
-    local processedGUIDs = {}
-    local groupSize = GetNumRaidMembers() > 0 and GetNumRaidMembers() or GetNumPartyMembers()
-    local unitPrefix = GetNumRaidMembers() > 0 and "raid" or "party"
+    -- Range guarantee: Thunder Clap is an 8-10 yard PBAoE. If our target is not in strict
+    -- melee range (5 yards), never claim enemies are in reach to prevent wasting the cooldown on empty air.
+    if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") or
+       not self:IsInMeleeRange("target", true) then
+        return 0
+    end
 
-    local function addUnitInReach(unit, requireCombat)
+    local count = 1
+    local processedGUIDs = {}
+    local targetGUID = UnitGUID("target")
+    if targetGUID then
+        processedGUIDs[targetGUID] = true
+    end
+
+    local function addUnitInReach(unit)
         if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
             return
         end
-        if requireCombat and not UnitAffectingCombat(unit) then
-            return
-        end
-        if not CheckInteractDistance(unit, 3) then
+        if not UnitAffectingCombat(unit) then
             return
         end
 
@@ -281,20 +286,41 @@ function AC:GetEnemiesInThunderClapReach(maxNameplates)
             return
         end
 
-        processedGUIDs[guid] = true
-        count = count + 1
+        -- Verify physically within melee / Thunder Clap radius (~10-11 yards)
+        -- CheckInteractDistance 2 is Trade (~11.11 yd), 3 is Duel (~9.9 yd)
+        if self:IsInMeleeRange(unit, false) or CheckInteractDistance(unit, 2) or CheckInteractDistance(unit, 3) then
+            processedGUIDs[guid] = true
+            count = count + 1
+        end
     end
 
-    addUnitInReach("target", false)
-    addUnitInReach("focus", true)
-    addUnitInReach("mouseover", true)
+    addUnitInReach("focus")
+    addUnitInReach("mouseover")
+    addUnitInReach("targettarget")
 
-    for i = 1, groupSize do
-        addUnitInReach(unitPrefix .. i .. "target", true)
+    local numRaid = GetNumRaidMembers()
+    local numParty = GetNumPartyMembers()
+    if numRaid > 0 then
+        for i = 1, numRaid do
+            addUnitInReach("raid" .. i .. "target")
+            addUnitInReach("raidpet" .. i .. "target")
+        end
+    elseif numParty > 0 then
+        for i = 1, numParty do
+            addUnitInReach("party" .. i .. "target")
+            addUnitInReach("partypet" .. i .. "target")
+        end
     end
 
-    for i = 1, maxNameplates do
-        addUnitInReach("nameplate" .. i, true)
+    -- Factor in verified combat log enemies actively in combat with player/group within last 3 seconds
+    if self.combatEnemies then
+        local now = GetTime()
+        for guid, data in pairs(self.combatEnemies) do
+            if not processedGUIDs[guid] and (now - data.lastSeen) <= 3 then
+                processedGUIDs[guid] = true
+                count = count + 1
+            end
+        end
     end
 
     return count
@@ -555,7 +581,8 @@ function AC:UseWarriorDefensives()
 
     local function shouldDelayConsumableRetry(reason)
         return reason == "attempted" or reason == "gcd" or reason == "locked" or
-               reason == "blocked" or reason == "cooldown"
+               reason == "blocked" or reason == "cooldown" or reason == "missing_item" or
+               reason == "no_potions" or reason == "empty"
     end
     
     if health < 35 and canRetry("healthPotion", 20) then
@@ -653,16 +680,6 @@ function AC:UseWarriorDefensives()
         end
     end
 
-    -- Disarm for high melee pressure in Defensive Stance
-    if currentStance == 2 and self:KnowsSpell(S.Disarm) and self:IsUsableSpell(S.Disarm) and
-       self:GetSpellCooldown(S.Disarm) == 0 and canRetry("disarm", 20) and hasTarget and
-       self:IsInMeleeRange("target") and (underHeavyPressure or health < 50) then
-        markAttempt("disarm")
-        if self:CastSpell(S.Disarm, "target") then
-            WarriorDebug("Disarm - reducing enemy physical damage")
-            return true
-        end
-    end
 
     -- Retaliation for multi-mob melee survival in Battle Stance
     if currentStance == 1 and enemies >= 2 and health < 75 and canRetry("retaliation", 60) and
@@ -1686,8 +1703,8 @@ function AC:ShouldMaintainProtectionThunderClap()
     local activelyTanking = UnitExists("targettarget") and UnitIsUnit("targettarget", "player")
     local hasMultipleTargets = self:GetEnemiesInThunderClapReach(20) >= 2
 
-    -- Avoid random Thunder Clap on incidental combat targets; only maintain it on real tank targets.
-    if not activelyTanking and not targetIsDangerous and not hasMultipleTargets then
+    -- If target is in combat and in melee range, maintain Thunder Clap debuff
+    if not UnitAffectingCombat("target") then
         return false
     end
 
