@@ -1186,10 +1186,10 @@ function AC:IsInMeleeRange(unit, strict)
 
     local _, class = UnitClass("player")
     local classMeleeSpells = {
-        WARRIOR = {"Shield Slam", "Revenge", "Devastate", "Heroic Strike", "Mortal Strike", "Bloodthirst"},
+        WARRIOR = {"Shield Slam", "Revenge", "Devastate", "Hamstring", "Sunder Armor", "Rend", "Mortal Strike", "Bloodthirst", "Pummel"},
         PALADIN = {"Hammer of the Righteous", "Shield of Righteousness", "Crusader Strike"},
-        DRUID = {"Maul", "Mangle (Bear)", "Swipe (Bear)", "Lacerate"},
-        DEATHKNIGHT = {"Heart Strike", "Blood Strike", "Plague Strike", "Rune Strike"},
+        DRUID = {"Mangle (Bear)", "Swipe (Bear)", "Lacerate"},
+        DEATHKNIGHT = {"Heart Strike", "Blood Strike", "Plague Strike", "Death Strike", "Scourge Strike", "Obliterate"},
         ROGUE = {"Mutilate", "Sinister Strike", "Hemorrhage", "Backstab"},
         SHAMAN = {"Stormstrike", "Lava Lash"},
         WARLOCK = {"Shadowflame"},

@@ -158,16 +158,19 @@ function AC:IsInMeleeRange(unit, strict)
 
     -- Prefer spell-based checks that respect boss hitboxes (edge-to-edge)
     -- Try a list of common melee-range warrior abilities the player may know
+    -- MUST ONLY USE TRUE HOSTILE-TARGETED MELEE SPELLS!
+    -- DO NOT include on-next-swing abilities like Heroic Strike or Cleave,
+    -- as IsSpellInRange can return 1 on them regardless of target distance.
     local meleeSpells = {
         S.Hamstring,
         S.SunderArmor,
+        S.ShieldSlam,
         S.Rend,
-        S.HeroicStrike,
         S.Devastate,
         S.MortalStrike,
         S.Bloodthirst,
-        S.ShieldSlam,
         S.Revenge,
+        S.Pummel,
     }
 
     local sawValidRangeResult = false
@@ -247,37 +250,44 @@ function AC:GetAvailableRangedAbilities()
     return abilities
 end
 
--- FIXED: Check if Thunder Clap will hit targets using proper melee range
-function AC:ThunderClapInRange()
-    -- Thunder Clap is centered on the player. For rotation safety, require strict melee
-    -- validation on the current hostile target rather than broad nearby-unit inference.
-    if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then
+-- Check if a specific hostile unit is physically close enough to be hit by Thunder Clap (~8-10 yard PBAoE)
+function AC:IsUnitInThunderClapRange(unit)
+    if not unit or not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
         return false
     end
-    return self:IsInMeleeRange("target", true)
+
+    -- 1. If in confirmed 5-yard melee range, guaranteed to be hit
+    if self:IsInMeleeRange(unit, true) then
+        return true
+    end
+
+    -- 2. Duel distance check: CheckInteractDistance index 3 is ~9.9 yards.
+    -- Thunder Clap has an 8-yard base radius (10 yards with 2/2 Improved Thunder Clap).
+    -- If a mob fails CheckInteractDistance(unit, 3), it is > 9.9 yards away and CANNOT be hit.
+    local ok, inDuelRange = pcall(CheckInteractDistance, unit, 3)
+    return ok and inDuelRange == true
 end
 
--- Count hostiles physically close enough to likely be hit by Thunder Clap.
+-- FIXED: Check if Thunder Clap will hit targets
+function AC:ThunderClapInRange()
+    if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target") then
+        if self:IsUnitInThunderClapRange("target") then
+            return true
+        end
+    end
+    return self:HasEnemyInThunderClapReach()
+end
+
+-- Count hostiles physically close enough to likely be hit by Thunder Clap (~8-10 yards).
 function AC:GetEnemiesInThunderClapReach(maxNameplates)
-    -- Range guarantee: Thunder Clap is an 8-10 yard PBAoE. If our target is not in strict
-    -- melee range (5 yards), never claim enemies are in reach to prevent wasting the cooldown on empty air.
-    if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") or
-       not self:IsInMeleeRange("target", true) then
-        return 0
-    end
-
-    local count = 1
+    local count = 0
     local processedGUIDs = {}
-    local targetGUID = UnitGUID("target")
-    if targetGUID then
-        processedGUIDs[targetGUID] = true
-    end
 
-    local function addUnitInReach(unit)
-        if not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
+    local function addUnitIfInReach(unit)
+        if not unit or not UnitExists(unit) or not UnitCanAttack("player", unit) or UnitIsDeadOrGhost(unit) then
             return
         end
-        if not UnitAffectingCombat(unit) then
+        if not UnitAffectingCombat(unit) and not UnitIsUnit(unit, "target") then
             return
         end
 
@@ -286,40 +296,28 @@ function AC:GetEnemiesInThunderClapReach(maxNameplates)
             return
         end
 
-        -- Verify physically within melee / Thunder Clap radius (~10-11 yards)
-        -- CheckInteractDistance 2 is Trade (~11.11 yd), 3 is Duel (~9.9 yd)
-        if self:IsInMeleeRange(unit, false) or CheckInteractDistance(unit, 2) or CheckInteractDistance(unit, 3) then
+        if self:IsUnitInThunderClapRange(unit) then
             processedGUIDs[guid] = true
             count = count + 1
         end
     end
 
-    addUnitInReach("focus")
-    addUnitInReach("mouseover")
-    addUnitInReach("targettarget")
+    addUnitIfInReach("target")
+    addUnitIfInReach("focus")
+    addUnitIfInReach("mouseover")
+    addUnitIfInReach("targettarget")
 
     local numRaid = GetNumRaidMembers()
     local numParty = GetNumPartyMembers()
     if numRaid > 0 then
         for i = 1, numRaid do
-            addUnitInReach("raid" .. i .. "target")
-            addUnitInReach("raidpet" .. i .. "target")
+            addUnitIfInReach("raid" .. i .. "target")
+            addUnitIfInReach("raidpet" .. i .. "target")
         end
     elseif numParty > 0 then
         for i = 1, numParty do
-            addUnitInReach("party" .. i .. "target")
-            addUnitInReach("partypet" .. i .. "target")
-        end
-    end
-
-    -- Factor in verified combat log enemies actively in combat with player/group within last 3 seconds
-    if self.combatEnemies then
-        local now = GetTime()
-        for guid, data in pairs(self.combatEnemies) do
-            if not processedGUIDs[guid] and (now - data.lastSeen) <= 3 then
-                processedGUIDs[guid] = true
-                count = count + 1
-            end
+            addUnitIfInReach("party" .. i .. "target")
+            addUnitIfInReach("partypet" .. i .. "target")
         end
     end
 
@@ -1694,19 +1692,9 @@ function AC:ShouldMaintainProtectionThunderClap()
     if self:GetSpellCooldown(S.ThunderClap) > 0 then return false end
     if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then return false end
     if not UnitAffectingCombat("target") then return false end
-    if not self:IsInMeleeRange("target", true) then return false end
-    if not self:ThunderClapInRange() or not self:HasEnemyInThunderClapReach(20) then return false end
 
-    local classification = UnitClassification("target")
-    local targetIsDangerous = classification == "elite" or classification == "rare" or
-                              classification == "rareelite" or classification == "worldboss"
-    local activelyTanking = UnitExists("targettarget") and UnitIsUnit("targettarget", "player")
-    local hasMultipleTargets = self:GetEnemiesInThunderClapReach(20) >= 2
-
-    -- If target is in combat and in melee range, maintain Thunder Clap debuff
-    if not UnitAffectingCombat("target") then
-        return false
-    end
+    -- Absolute physical range gate: target MUST be in physical reach of Thunder Clap (<= 10 yards)
+    if not self:IsUnitInThunderClapRange("target") then return false end
 
     if self:HasDebuff("target", S.ThunderClap) and self:DebuffTimeRemaining("target", S.ThunderClap) > 3 then
         return false
@@ -1720,8 +1708,16 @@ function AC:TryProtectionShockwave(nearbyEnemies, inMeleeRange, targetInCombat)
     if not self:KnowsSpell(S.Shockwave) or not self:IsUsableSpell(S.Shockwave) then return false end
     if self:GetSpellCooldown(S.Shockwave) > 0 or UnitPower("player", 1) < 15 then return false end
     if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then return false end
-    if not targetInCombat or not inMeleeRange then return false end
-    if not self:IsInMeleeRange("target", true) then return false end
+    if not targetInCombat then return false end
+
+    -- ABSOLUTE RANGE GATE FOR SHOCKWAVE:
+    -- Shockwave is a 10-yard frontal cone. The target MUST be within 10 yards!
+    -- Check strict melee range first; if that's false, check Duel interact distance (~9.9 yards).
+    -- If the target is beyond 9.9 yards, Shockwave WILL MISS and be completely wasted.
+    local targetInReach = self:IsInMeleeRange("target", true) or CheckInteractDistance("target", 3)
+    if not targetInReach then
+        return false
+    end
 
     local now = GetTime()
     if not self.lastMovementTime then
@@ -2064,16 +2060,17 @@ function AC:ProtectionWarriorRotation()
             return true
         end
 
-        -- *** HIGH PRIORITY AoE ABILITIES (only if we have melee targets) ***
+        -- *** HIGH PRIORITY AoE ABILITIES (only if enemies are physically in reach) ***
         -- INTEGRATION: Use enhanced enemy location detection for better AoE decisions
         local nearbyEnemies = self:GetEnemiesInThunderClapReach(20)
         local inMeleeRange = self:IsInMeleeRange("target", true)
+        local inTCRange = self:IsUnitInThunderClapRange("target")
         local targetInCombat = UnitExists("target") and UnitAffectingCombat("target")
         if Throttle("ProtAOEDebug", 3.0) then
-            WarriorDebug("AoE Check: nearbyEnemies=" .. nearbyEnemies .. " inMelee=" .. (inMeleeRange and "Y" or "N"))
+            WarriorDebug("AoE Check: nearbyEnemies=" .. nearbyEnemies .. " inMelee=" .. (inMeleeRange and "Y" or "N") .. " inTCRange=" .. (inTCRange and "Y" or "N"))
         end
 
-        if not largeGroupMode and nearbyEnemies >= 2 and inMeleeRange and
+        if not largeGroupMode and nearbyEnemies >= 2 and (inMeleeRange or inTCRange) and
            self:TryProtectionMultiTargetDistribution(nearbyEnemies) then
             return true
         end
@@ -2082,13 +2079,12 @@ function AC:ProtectionWarriorRotation()
             return true
         end
 
-        if nearbyEnemies >= 2 and inMeleeRange then
+        if nearbyEnemies >= 2 and (inMeleeRange or inTCRange) then
             -- Thunder Clap FIRST (highest priority for initial AoE threat)
-            -- FIXED: Only use Thunderclap when in proper melee range, not just when enemies are detectable
             local canUseTC = self:IsUsableSpell(S.ThunderClap)
             local notThrottled = Throttle("ProtTCAoE", 0.5)
-            local inRange = self:ThunderClapInRange()
-            local hasTCReach = self:HasEnemyInThunderClapReach(20)
+            local inRange = inTCRange or self:ThunderClapInRange()
+            local hasTCReach = nearbyEnemies >= 1
             local notOnCD = self:GetSpellCooldown(S.ThunderClap) == 0
             local delayForCharge = self:ShouldDelayProtectionThunderClapAfterCharge()
             
@@ -2145,15 +2141,15 @@ function AC:ProtectionWarriorRotation()
             end
         end
 
-        -- Maintain the Thunder Clap attack-speed debuff on real tank targets, not random combat units.
-        if nearbyEnemies < 2 and Throttle("ProtTCSingle", 0.5) and self:ShouldMaintainProtectionThunderClap() then
+        -- Maintain the Thunder Clap attack-speed debuff on real tank targets, but ONLY if target is in reach.
+        if nearbyEnemies >= 1 and nearbyEnemies < 2 and inTCRange and Throttle("ProtTCSingle", 0.5) and self:ShouldMaintainProtectionThunderClap() then
             if not self:CastSpell(S.ThunderClap) then return false end
             self:MarkAsOurTarget(UnitGUID("target"))
             WarriorDebug("Prot: Thunder Clap (single-target debuff)")
             return true
         end
 
-        local tcReadyAndInRange = nearbyEnemies >= 2 and inMeleeRange and self:IsUsableSpell(S.ThunderClap) and rage >= 20 and
+        local tcReadyAndInRange = nearbyEnemies >= 2 and (inMeleeRange or inTCRange) and self:IsUsableSpell(S.ThunderClap) and rage >= 20 and
                                   self:ThunderClapInRange() and self:HasEnemyInThunderClapReach(20) and
                                   self:GetSpellCooldown(S.ThunderClap) == 0
         if not tcReadyAndInRange and self:ShouldUseDemoShout(nearbyEnemies) and self:IsUsableSpell(S.DemoShout) and
@@ -2164,8 +2160,8 @@ function AC:ProtectionWarriorRotation()
             return true
         end
 
-        -- Single-target Prot filler before Devastate, but only on a target we can actually hit.
-        if nearbyEnemies < 2 and self:TryProtectionShockwave(nearbyEnemies, inMeleeRange, targetInCombat) then
+        -- Single-target Prot filler before Devastate, but ONLY on a target in reach.
+        if nearbyEnemies >= 1 and nearbyEnemies < 2 and (inMeleeRange or inTCRange) and self:TryProtectionShockwave(nearbyEnemies, inMeleeRange, targetInCombat) then
             return true
         end
 
