@@ -2889,7 +2889,7 @@ function AC:ClearSpellImmunity(destGUID, spellName)
     end
 end
 
--- Handle UI Error Messages (catches "Target is immune" immediately on cast attempt)
+-- Handle UI Error Messages (catches "Target is immune" and pet errors immediately)
 function AC:OnUIErrorMessage(...)
     local arg1, arg2 = ...
     local msg = (type(arg2) == "string" and arg2) or (type(arg1) == "string" and arg1) or ""
@@ -2902,6 +2902,23 @@ function AC:OnUIErrorMessage(...)
                 local destName = self.lastCastAttempt.destName
                 if guid and spell then
                     self:RecordSpellImmunity(guid, spell, 120, destName)
+                end
+            end
+        end
+
+        local _, playerClass = UnitClass("player")
+        if playerClass == "HUNTER" and self.InitializeHunterState then
+            if lower:find("pet is dead") or lower:find("use revive pet") then
+                local state = self:InitializeHunterState()
+                state.petDeadPending = true
+                if self.debugMode and self:Throttle("HunterPetDeadUIError", 2.0) then
+                    self:Debug("UI Error: Pet is dead - set state to petDeadPending")
+                end
+            elseif lower:find("pet is not dead") or lower:find("not dead") then
+                local state = self:InitializeHunterState()
+                state.petDeadPending = false
+                if self.debugMode and self:Throttle("HunterPetNotDeadUIError", 2.0) then
+                    self:Debug("UI Error: Pet is not dead - petDeadPending cleared")
                 end
             end
         end
@@ -5008,6 +5025,14 @@ function AC:OnEnable()
         if unit == "player" and self.enabled then
             -- This will trigger a rotation update when pet status changes
             self:OnUpdate()
+        end
+    end)
+
+    self:RegisterEvent("PLAYER_DEAD", function()
+        local _, playerClass = UnitClass("player")
+        if playerClass == "HUNTER" and self.InitializeHunterState then
+            local state = self:InitializeHunterState()
+            state.petDeadPending = true
         end
     end)
     

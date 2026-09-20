@@ -955,9 +955,9 @@ function AC:HunterShouldUseSerpentSting(unit, targetHP, targetIsTough, isFastDyi
 end
 
 function AC:GetPetStatus()
-    -- Check if pet is being called first (channeling Call Pet)
+    -- Check if pet is being called or revived
     local channeling = UnitChannelInfo("player")
-    if channeling == S.CallPet then
+    if channeling == S.CallPet or channeling == S.RevivePet then
         return "calling"
     end
 
@@ -966,26 +966,20 @@ function AC:GetPetStatus()
         return "calling"
     end
     
+    local state = self:InitializeHunterState()
+
     if UnitExists("pet") then
-        if UnitIsDeadOrGhost("pet") then 
-            local state = self:InitializeHunterState()
+        if UnitIsDeadOrGhost("pet") or UnitHealth("pet") == 0 then 
             state.petDeadPending = true
             return "dead" 
-        elseif UnitHealth("pet") == 0 then
-            -- Sometimes pet is at 0 health but not flagged as dead yet
-            local state = self:InitializeHunterState()
-            state.petDeadPending = true
-            return "dead"
         else 
-            local state = self:InitializeHunterState()
             state.petDeadPending = false
             return "alive" 
         end 
     end
 
-    local state = self:InitializeHunterState()
-    if state.petDeadPending and self:HunterSpellAvailable(S.RevivePet) and
-       IsUsableSpell(S.RevivePet) then
+    -- If no pet unit exists: check if pet is known to be dead
+    if state.petDeadPending then
         return "dead"
     end
     
@@ -1125,6 +1119,46 @@ function AC:TryMendPet()
     return true
 end
 
+function AC:HunterRevivePet()
+    if not self:HunterSpellAvailable(S.RevivePet) then return false end
+    if self:IsPlayerMoving() then return false end
+    if self:IsChanneling() or UnitCastingInfo("player") then return false end
+
+    -- Check mana before casting Revive Pet
+    local usable, noMana = IsUsableSpell(S.RevivePet)
+    if noMana then
+        HunterDebugThrottled("RevivePetNoMana", 3.0, "Revive Pet waiting: not enough mana")
+        return false
+    end
+
+    local beforeCast = UnitCastingInfo("player")
+    CastSpellByName(S.RevivePet)
+    local afterCast = UnitCastingInfo("player")
+
+    if afterCast == S.RevivePet or (not beforeCast and afterCast) then
+        HunterDebug("Revive Pet started casting")
+        return true
+    end
+    HunterDebug("Revive Pet cast requested")
+    return true
+end
+
+function AC:HunterCallPet()
+    if not self:HunterSpellAvailable(S.CallPet) then return false end
+    if self:IsChanneling() or UnitCastingInfo("player") then return false end
+    if self:IsPlayerMoving() and UnitAffectingCombat("player") then return false end
+
+    local usable, noMana = IsUsableSpell(S.CallPet)
+    if noMana then
+        HunterDebugThrottled("CallPetNoMana", 3.0, "Call Pet waiting: not enough mana")
+        return false
+    end
+
+    CastSpellByName(S.CallPet)
+    HunterDebug("Call Pet executed")
+    return true
+end
+
 function AC:ManagePet(inCombat)
     -- Reduced throttle for critical pet management
     if not Throttle("PetManagement", 0.5) then return false end 
@@ -1136,7 +1170,7 @@ function AC:ManagePet(inCombat)
     
     -- Don't interrupt existing pet summon/revive
     if channeling == S.RevivePet or channeling == S.CallPet or casting == S.RevivePet or casting == S.CallPet then
-        HunterDebug("Currently summoning pet")
+        HunterDebugThrottled("PetSummoning", 2.0, "Currently summoning/reviving pet...")
         return false
     end
 
@@ -1151,13 +1185,12 @@ function AC:ManagePet(inCombat)
 
         -- Hardcasting Revive Pet takes 10 seconds: only do this out of combat,
         -- or in combat if feigning death
-        if self:KnowsSpell(S.RevivePet) then
-            local canRevive = self:HunterSpellAvailable(S.RevivePet) and
-                              IsUsableSpell(S.RevivePet) and not self:IsPlayerMoving() and
+        if self:HunterSpellAvailable(S.RevivePet) then
+            local canRevive = not self:IsPlayerMoving() and
                               (not inCombat or self:HasBuff("player", S.FeignDeath))
             if canRevive and self:ActionThrottle("RevivePetAttempt", 2.0) then
                 HunterDebug("Attempting to revive pet")
-                if self:CastSpell(S.RevivePet, "player") then
+                if self:HunterRevivePet() then
                     state.petDeadPending = true
                     return true
                 end
@@ -1169,21 +1202,20 @@ function AC:ManagePet(inCombat)
     end
     
     -- Priority 2: Call missing pet
-    if petStatus == "nopet" and self:IsUsableSpell(S.CallPet) then
+    if petStatus == "nopet" and self:HunterSpellAvailable(S.CallPet) then
         local safeToCall = not self:IsChanneling() and 
                           (not self:IsPlayerMoving() or playerHealth > 60 or not inCombat)
         
         if safeToCall then
-            if self:ActionThrottle("CallPetAttempt", 6.0) then
+            if self:ActionThrottle("CallPetAttempt", 2.0) then
                 HunterDebug("Calling Pet (no pet active)")
-                if self:CastSpell(S.CallPet, "player") then
-                    state.petDeadPending = false
+                if self:HunterCallPet() then
                     return true
                 end
                 HunterDebug("Call Pet failed to start")
             end
         else
-            HunterDebug("No pet - waiting for safe moment (moving: " .. tostring(self:IsPlayerMoving()) .. ", health: " .. playerHealth .. "%)")
+            HunterDebugThrottled("NoPetWaitingSafe", 2.0, "No pet - waiting for safe moment (moving: " .. tostring(self:IsPlayerMoving()) .. ", health: " .. playerHealth .. "%)")
             -- Emergency: Stop moving to call pet if really needed
             if inCombat and self:IsPlayerMoving() and playerHealth > 30 then
                 -- This is a signal to the player that pet is needed
@@ -2086,8 +2118,11 @@ function AC:HandleClassCombatLog(...)
         end
     end
 
-    if subevent == "UNIT_DIED" and destGUID and petGUID and destGUID == petGUID then
-        state.petDeadPending = true
+    if subevent == "UNIT_DIED" then
+        if (destGUID and petGUID and destGUID == petGUID) or
+           (destGUID and playerGUID and destGUID == playerGUID) then
+            state.petDeadPending = true
+        end
     end
 end
 
@@ -3245,7 +3280,9 @@ function AC:HunterRotation()
 end
 
 function AC:CheckHunterBuffs(spec)
-    if not Throttle("HunterOOCBuffCheck", 5) then return false end
+    local petStatus = self:GetPetStatus()
+    local throttleTime = (petStatus ~= "alive" and petStatus ~= "calling") and 1.0 or 4.0
+    if not Throttle("HunterOOCBuffCheck", throttleTime) then return false end
     if IsMounted() or UnitAffectingCombat("player") then return false end 
     
     if self:ManagePet(false) then return true end
