@@ -1030,68 +1030,32 @@ end
 -- STANCE AND COMBAT UTILITY FUNCTIONS
 -- =============================================
 
--- FIXED: Enhanced buff checking with performance optimization
-function AC:WarriorHasAttackPowerBuff()
-    local buffsToCheck = {
-        [S.BattleShout] = true, 
-        ["Blessing of Might"] = true, 
-        ["Greater Blessing of Might"] = true,
-    }
-
-    -- Prefer exact name lookup so a sparse/stale indexed aura list cannot make
-    -- the Warrior overwrite a Paladin's Might at combat start.
-    for buffName in pairs(buffsToCheck) do
-        if UnitBuff("player", buffName) then
-            if Throttle("ConflictingBuffDebug", 10.0) then
-                WarriorDebug("Found active attack power buff: " .. buffName)
-            end
-            return true
-        end
-    end
-    
-    for i = 1, 40 do
-        local buffName = UnitBuff("player", i)
-        if buffsToCheck[buffName] then
-            if Throttle("ConflictingBuffDebug", 10.0) then
-                WarriorDebug("Found active attack power buff: " .. buffName)
-            end
-            return true 
-        end
-    end
-    return false
-end
-
-function AC:WarriorHasCommandingBuff()
-    local buffsToCheck = {
-        [S.CommandingShout] = true,
-        ["Blood Pact"] = true,
-    }
-
-    for buffName in pairs(buffsToCheck) do
-        if UnitBuff("player", buffName) then return true end
-    end
-
-    for i = 1, 40 do
-        local buffName = UnitBuff("player", i)
-        if buffsToCheck[buffName] then
-            return true
-        end
-    end
-    return false
-end
-
 local WARRIOR_SHOUT_REFRESH_WINDOW = 8
 
-local function GetWarriorBuffTimeRemaining(buffName)
-    local name, _, _, _, _, duration, expirationTime = UnitBuff("player", buffName)
-    if not name then return 0 end
+local function GetWarriorBuffInfo(buffName)
+    local name, _, _, _, _, duration, expirationTime, unitCaster = UnitBuff("player", buffName)
+    if not name then
+        for i = 1, 40 do
+            local bName, _, _, _, _, bDuration, bExpirationTime, bUnitCaster = UnitBuff("player", i)
+            if not bName then break end
+            if bName == buffName then
+                name = bName
+                duration = bDuration
+                expirationTime = bExpirationTime
+                unitCaster = bUnitCaster
+                break
+            end
+        end
+    end
+
+    if not name then return 0, nil end
 
     -- A zero expiration denotes a permanent aura. It never needs refreshing.
     if not duration or duration == 0 or not expirationTime or expirationTime == 0 then
-        return math.huge
+        return math.huge, unitCaster
     end
 
-    return math.max(0, expirationTime - GetTime())
+    return math.max(0, expirationTime - GetTime()), unitCaster
 end
 
 function AC:GetPreferredWarriorShout(spec)
@@ -1101,24 +1065,41 @@ function AC:GetPreferredWarriorShout(spec)
         return nil
     end
 
-    local battleRemaining = GetWarriorBuffTimeRemaining(S.BattleShout)
-    local commandingRemaining = GetWarriorBuffTimeRemaining(S.CommandingShout)
-    local battleHealthy = battleRemaining > WARRIOR_SHOUT_REFRESH_WINDOW
-    local commandingHealthy = commandingRemaining > WARRIOR_SHOUT_REFRESH_WINDOW
-    local hasExternalAP = UnitBuff("player", "Blessing of Might") or
-                          UnitBuff("player", "Greater Blessing of Might")
-    -- Commanding Shout and Blood Pact provide the same raid-buff category.
-    -- Fortitude grants stamina and stacks with their health bonus in WotLK.
-    local hasExternalHealth = UnitBuff("player", "Blood Pact") and true or false
+    local battleRemaining, battleCaster = GetWarriorBuffInfo(S.BattleShout)
+    local commandingRemaining, commandingCaster = GetWarriorBuffInfo(S.CommandingShout)
 
-    local preferredShout = nil
+    -- External attack power buff (Blessing of Might / Greater Blessing of Might)
+    -- In WotLK 3.3.5a, Battle Shout does not stack with Blessing of Might.
+    local mightRemaining = math.max(GetWarriorBuffInfo("Blessing of Might"), GetWarriorBuffInfo("Greater Blessing of Might"))
+    local hasExternalAP = mightRemaining > 0
+
+    -- External max health buff (Blood Pact from Warlock Imp)
+    -- In WotLK 3.3.5a, Commanding Shout does not stack with Blood Pact.
+    local bloodPactRemaining = GetWarriorBuffInfo("Blood Pact")
+    local hasExternalHealth = bloodPactRemaining > 0
+
+    -- If another player cast Battle Shout or Commanding Shout on us, do not attempt
+    -- to overwrite it early while it is active; if their rank or Commanding Presence talent
+    -- is higher, the cast will be rejected with "A more powerful spell is already active".
+    local battleCoveredByOther = (battleRemaining > 0 and battleCaster and battleCaster ~= "player")
+    local commandingCoveredByOther = (commandingRemaining > 0 and commandingCaster and commandingCaster ~= "player")
+
+    local battleHealthy = hasExternalAP or battleCoveredByOther or (battleRemaining > WARRIOR_SHOUT_REFRESH_WINDOW)
+    local commandingHealthy = hasExternalHealth or commandingCoveredByOther or (commandingRemaining > WARRIOR_SHOUT_REFRESH_WINDOW)
+
+    -- Determine primary and secondary shout preference based on spec
+    local primaryShout, secondaryShout
     if spec == "Protection" then
-        preferredShout = knowsCommanding and S.CommandingShout or (knowsBattle and S.BattleShout or nil)
+        primaryShout = (knowsCommanding and S.CommandingShout) or (knowsBattle and S.BattleShout)
+        secondaryShout = (primaryShout == S.CommandingShout and knowsBattle and S.BattleShout) or nil
     else
-        preferredShout = knowsBattle and S.BattleShout or (knowsCommanding and S.CommandingShout or nil)
+        primaryShout = (knowsBattle and S.BattleShout) or (knowsCommanding and S.CommandingShout)
+        secondaryShout = (primaryShout == S.BattleShout and knowsCommanding and S.CommandingShout) or nil
     end
 
-    local function shoutIsHealthy(shoutName)
+    if not primaryShout then return nil end
+
+    local function isShoutHealthy(shoutName)
         if shoutName == S.BattleShout then
             return battleHealthy
         elseif shoutName == S.CommandingShout then
@@ -1127,31 +1108,53 @@ function AC:GetPreferredWarriorShout(spec)
         return false
     end
 
-    -- Solo (or no external buff coverage): keep only the spec-preferred shout.
-    if preferredShout and (not IsInGroup() or (not hasExternalAP and not hasExternalHealth)) then
-        return not shoutIsHealthy(preferredShout) and preferredShout or nil
+    local function hasExternalConflict(shoutName)
+        if shoutName == S.BattleShout then
+            return hasExternalAP
+        elseif shoutName == S.CommandingShout then
+            return hasExternalHealth
+        end
+        return false
     end
 
-    -- If both categories are already covered, don't spend rage/GCD.
-    if hasExternalAP and hasExternalHealth then
-        return nil
+    -- 1. Try to maintain primary shout if it is not healthy AND not blocked by an external buff
+    if not isShoutHealthy(primaryShout) then
+        if not hasExternalConflict(primaryShout) then
+            return primaryShout
+        end
     end
 
-    -- Group with external coverage: fill whichever category is currently missing.
-    if hasExternalAP and knowsCommanding and not hasExternalHealth then
-        return not commandingHealthy and S.CommandingShout or nil
-    end
+    -- 2. If primary shout is healthy/covered:
+    -- If primary category is already covered by an external buff (e.g. Paladin Might for Arms/Fury,
+    -- or Blood Pact for Prot) or by another player's shout in a group, fill the secondary shout.
+    if secondaryShout and not isShoutHealthy(secondaryShout) and not hasExternalConflict(secondaryShout) then
+        local primaryCoveredExternally = hasExternalConflict(primaryShout) or 
+            (primaryShout == S.BattleShout and battleCoveredByOther) or
+            (primaryShout == S.CommandingShout and commandingCoveredByOther)
 
-    if hasExternalHealth and knowsBattle and not hasExternalAP then
-        return not battleHealthy and S.BattleShout or nil
+        if primaryCoveredExternally then
+            return secondaryShout
+        end
     end
 
     return nil
 end
 
+local shoutConflictUntil = {}
+local lastShoutAttemptSpell = nil
+local lastShoutAttemptTime = 0
+
 function AC:TryMaintainWarriorShout(spec, context)
     local shoutToUse = self:GetPreferredWarriorShout(spec)
     if not shoutToUse then return false end
+
+    local now = GetTime()
+
+    -- Back-off safety check: if a previous attempt to cast this shout was rejected by the server
+    -- (e.g. "A more powerful spell is already active"), wait until timeout expires to prevent GCD lockout.
+    if shoutConflictUntil[shoutToUse] and now < shoutConflictUntil[shoutToUse] then
+        return false
+    end
 
     -- Shouts cost 10 rage. Check every blocker before consuming the short
     -- attempt throttle so a lack of rage or an active GCD cannot defer a cast.
@@ -1162,7 +1165,24 @@ function AC:TryMaintainWarriorShout(spec, context)
     end
 
     if not Throttle("WarriorShoutAttempt", 0.75) then return false end
+
+    -- Check if our previous attempt to cast this exact shout failed to apply the buff.
+    -- If we cast it between 0.3s and 3.5s ago, but we still have 0 buff time,
+    -- the server rejected the buff (e.g. "A more powerful spell is already active").
+    if lastShoutAttemptSpell == shoutToUse and (now - lastShoutAttemptTime) >= 0.3 and (now - lastShoutAttemptTime) <= 3.5 then
+        local buffRemaining = GetWarriorBuffInfo(shoutToUse)
+        if buffRemaining == 0 then
+            shoutConflictUntil[shoutToUse] = now + 10
+            WarriorDebug("Shout " .. shoutToUse .. " failed to apply (buff conflict) - backing off for 10s")
+            lastShoutAttemptSpell = nil
+            return false
+        end
+    end
+
     if not self:CastSpell(shoutToUse, "player") then return false end
+
+    lastShoutAttemptSpell = shoutToUse
+    lastShoutAttemptTime = now
 
     WarriorDebug((context or spec or "Warrior") .. ": " .. shoutToUse)
     return true
@@ -1660,11 +1680,15 @@ function AC:ShouldUseDemoShout(enemies)
     local minRage = (spec == "Protection") and 10 or 30
     if rage < minRage then return false end
     
-    -- FIXED: Check if demo shout is already active
-    if self:HasDebuff("target", S.DemoShout) then
-        local timeLeft = self:DebuffTimeRemaining("target", S.DemoShout)
-        if timeLeft > 2 then
-            return false
+    -- Check if Demoralizing Shout or an equivalent AP-reduction debuff is already active.
+    -- In WotLK 3.3.5a, Demoralizing Shout, Demoralizing Roar (Druid), and Curse of Weakness (Warlock) share this role.
+    local conflictingDebuffs = { S.DemoShout, "Demoralizing Roar", "Curse of Weakness" }
+    for _, debuffName in ipairs(conflictingDebuffs) do
+        if self:HasDebuff("target", debuffName) then
+            local timeLeft = self:DebuffTimeRemaining("target", debuffName)
+            if timeLeft > 2 then
+                return false
+            end
         end
     end
     
